@@ -7,9 +7,20 @@ import type { LiveClientFrame, LiveEventName, LiveEvents, LiveServerFrame, LiveT
 import type { Permission } from "@shared/permissions.ts";
 import { Config } from "../../Config.ts";
 import { User } from "../../models/index.ts";
+import { GameServerService } from "../../servers/GameServerService.ts";
 
 const WS_OPEN = 1;
 const SWEEP_INTERVAL_MS = 60_000;
+const MAX_TOPICS = 20;
+/**
+ * A socket whose unsent data passes this is closed with LIVE_CLOSE.TOO_SLOW instead of buffering without bound.
+ */
+const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
+const MAX_SOCKETS_PER_USER = 16;
+/**
+ * Frames a socket may have waiting to be handled (they are handled one at a time); more closes it.
+ */
+const MAX_PENDING_FRAMES = 32;
 
 /**
  * `/ws/live`: pushes `LiveEvents` to browsers. Controllers and the agent gateway call `push()`; nothing else imports
@@ -34,8 +45,10 @@ export class LiveGateway {
     return await next();
   }, upgradeWebSocket((_c) => {
     let client: LiveGateway.Client | null = null;
-    let authenticating = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    // Frames are handled one at a time, in order, so checks like MAX_TOPICS can't be raced by parallel subscribes.
+    let queue: Promise<void> = Promise.resolve();
+    let pending = 0;
 
     const clearTimer = () => {
       if (timer !== null) clearTimeout(timer);
@@ -49,60 +62,14 @@ export class LiveGateway {
           ws.close(LIVE_CLOSE.UNAUTHORIZED, "Authentication timed out.");
         }, LIVE_AUTH_TIMEOUT_SEC * 1000);
       },
-      onMessage: async (event, ws) => {
-        let frame: LiveClientFrame;
-        try {
-          frame = JSON.parse(String(event.data));
-        } catch {
-          LiveGateway.send(ws, { t: "error", message: "Frames must be JSON." });
+      onMessage: (event, ws) => {
+        if (++pending > MAX_PENDING_FRAMES) {
+          ws.close(LIVE_CLOSE.TOO_SLOW, "Too many frames at once.");
           return;
         }
-
-        if (!client) {
-          if (frame?.t !== "auth" || typeof frame.token !== "string") {
-            LiveGateway.send(ws, { t: "error", message: "Send an auth frame first." });
-            ws.close(LIVE_CLOSE.UNAUTHORIZED, "Authentication required.");
-            return;
-          }
-          if (authenticating) return;
-          authenticating = true;
-          let user: User | null = null;
-          try {
-            user = await User.findByToken(frame.token);
-          } catch (error) {
-            console.error("live auth failed", error);
-          }
-          if (!user) {
-            LiveGateway.send(ws, { t: "error", message: "The token is invalid or expired." });
-            ws.close(LIVE_CLOSE.UNAUTHORIZED, "Invalid token.");
-            return;
-          }
-          if (ws.readyState !== WS_OPEN) return;
-          clearTimer();
-          client = {
-            ws,
-            userId: user.id,
-            tokenVersion: user.tokenVersion,
-            permissions: user.getPermissions(),
-            isAdmin: user.isAdmin(),
-            topics: new Set(),
-          };
-          LiveGateway._clients.add(client);
-          LiveGateway.send(ws, { t: "ready", userId: user.id });
-          return;
-        }
-
-        switch (frame?.t) {
-          case "subscribe":
-            // Stream topics (`server:<id>`) arrive with M2, which also checks access per topic. Until then nothing may subscribe.
-            LiveGateway.send(ws, { t: "error", message: "There are no streams to subscribe to yet." });
-            break;
-          case "unsubscribe":
-            if (typeof frame.topic === "string") client.topics.delete(frame.topic);
-            break;
-          default:
-            LiveGateway.send(ws, { t: "error", message: "Unknown frame." });
-        }
+        queue = queue.then(() => handleFrame(event.data, ws)).catch((error) => console.error("live frame failed", error)).finally(() => {
+          pending--;
+        });
       },
       onClose: () => {
         clearTimer();
@@ -113,6 +80,83 @@ export class LiveGateway {
         if (client) LiveGateway._clients.delete(client);
       },
     };
+
+    async function handleFrame(data: unknown, ws: WSContext): Promise<void> {
+      if (ws.readyState !== WS_OPEN) return;
+      let frame: LiveClientFrame;
+      try {
+        frame = JSON.parse(String(data));
+      } catch {
+        LiveGateway.send(ws, { t: "error", message: "Frames must be JSON." });
+        return;
+      }
+
+      if (!client) {
+        if (frame?.t !== "auth" || typeof frame.token !== "string") {
+          LiveGateway.send(ws, { t: "error", message: "Send an auth frame first." });
+          ws.close(LIVE_CLOSE.UNAUTHORIZED, "Authentication required.");
+          return;
+        }
+        let user: User | null = null;
+        try {
+          user = await User.findByToken(frame.token);
+        } catch (error) {
+          console.error("live auth failed", error);
+        }
+        if (!user) {
+          LiveGateway.send(ws, { t: "error", message: "The token is invalid or expired." });
+          ws.close(LIVE_CLOSE.UNAUTHORIZED, "Invalid token.");
+          return;
+        }
+        if (ws.readyState !== WS_OPEN) return;
+        clearTimer();
+        let open = 0;
+        for (const other of LiveGateway._clients) if (other.userId === user.id) open++;
+        if (open >= MAX_SOCKETS_PER_USER) {
+          LiveGateway.send(ws, { t: "error", message: `You have ${open} live connections open (at most ${MAX_SOCKETS_PER_USER}). Close some tabs.` });
+          ws.close(LIVE_CLOSE.TOO_MANY, "Too many live connections.");
+          return;
+        }
+        client = {
+          ws,
+          userId: user.id,
+          tokenVersion: user.tokenVersion,
+          permissions: user.getPermissions(),
+          isAdmin: user.isAdmin(),
+          topics: new Set(),
+        };
+        LiveGateway._clients.add(client);
+        LiveGateway.send(ws, { t: "ready", userId: user.id });
+        return;
+      }
+
+      switch (frame?.t) {
+        case "subscribe": {
+          const match = typeof frame.topic === "string" ? /^server:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(frame.topic) : null;
+          if (!match) {
+            LiveGateway.send(ws, { t: "error", message: "Unknown topic. Streams are named server:<id>.", topic: typeof frame.topic === "string" ? frame.topic : undefined });
+            break;
+          }
+          const topic: LiveTopic = `server:${match[1].toLowerCase()}`;
+          if (!client.topics.has(topic) && client.topics.size >= MAX_TOPICS) {
+            LiveGateway.send(ws, { t: "error", message: `You can follow at most ${MAX_TOPICS} streams at once.`, topic });
+            break;
+          }
+          if (!await GameServerService.canAccess(client.userId, match[1].toLowerCase())) {
+            LiveGateway.send(ws, { t: "error", message: "There is no game server with that id that you may follow.", topic });
+            break;
+          }
+          client.topics.add(topic);
+          LiveGateway.send(ws, { t: "subscribed", topic });
+          break;
+        }
+        case "unsubscribe":
+          if (typeof frame.topic === "string") client.topics.delete(frame.topic.toLowerCase() as LiveTopic);
+          break;
+        default:
+          LiveGateway.send(ws, { t: "error", message: "Unknown frame." });
+      }
+    }
   }));
 
   /**
@@ -143,9 +187,11 @@ export class LiveGateway {
    * Send an event to every authenticated socket in `audience`. Never throws; safe to call from any handler.
    */
   public static push<E extends LiveEventName>(event: E, data: LiveEvents[E], audience: LiveGateway.Audience): void {
-    const frame = { t: "event", event, data } as LiveServerFrame;
+    let text: string | null = null;
     for (const client of LiveGateway._clients) {
-      if (LiveGateway.isInAudience(client, audience)) LiveGateway.send(client.ws, frame);
+      if (!LiveGateway.isInAudience(client, audience)) continue;
+      text ??= JSON.stringify({ t: "event", event, data } as LiveServerFrame);
+      LiveGateway.sendText(client, text);
     }
   }
 
@@ -184,6 +230,26 @@ export class LiveGateway {
   private static send(ws: WSContext, frame: LiveServerFrame): void {
     try {
       if (ws.readyState === WS_OPEN) ws.send(JSON.stringify(frame));
+    } catch {
+      // The socket closed under us; the sweeper or onClose drops it.
+    }
+  }
+
+  /**
+   * Send to an authenticated client, closing it with LIVE_CLOSE.TOO_SLOW when its send buffer is past
+   * MAX_BUFFERED_BYTES (a slow network or a stalled tab): it reconnects and refetches instead of growing memory.
+   */
+  private static sendText(client: LiveGateway.Client, text: string): void {
+    const ws = client.ws;
+    try {
+      if (ws.readyState !== WS_OPEN) return;
+      const buffered = (ws.raw as { bufferedAmount?: number } | undefined)?.bufferedAmount ?? 0;
+      if (buffered + text.length > MAX_BUFFERED_BYTES) {
+        LiveGateway._clients.delete(client);
+        ws.close(LIVE_CLOSE.TOO_SLOW, "The connection fell behind; reconnect.");
+        return;
+      }
+      ws.send(text);
     } catch {
       // The socket closed under us; the sweeper or onClose drops it.
     }

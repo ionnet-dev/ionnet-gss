@@ -9,6 +9,7 @@
     "INIT_SOCKET_PATH": { "value": "/gss/run/init.sock", "description": "The supervisor socket inside the container (the run folder is a read-write mount)." },
     "INIT_DATA_PATH": { "value": "/data", "description": "The server's data folder inside the container." },
     "INIT_BACKLOG_LINES": { "value": 2000, "description": "Console lines kept in gss-init's ring buffer." },
+    "INIT_INSTALL_TIMEOUT_SEC": { "value": 7200, "description": "Default for `InitSpec.installTimeoutSec`: an install still running after this long is cancelled and ends `install_failed`." },
     "GAME_UID": { "value": 1000, "description": "uid and gid the game and every hook run as (`gss` user in ionnet-gss-base)." }
   },
   "x-messages": [
@@ -40,7 +41,7 @@
     {
       "channel": "supervisor", "type": "backlog", "kind": "request", "from": "agent", "milestone": 2,
       "request": "InitBacklogRequest", "response": "BacklogResponse",
-      "description": "Lines from the ring buffer after `afterSeq`; how the agent catches up after a restart."
+      "description": "Lines from the ring buffer between `afterSeq` and `beforeSeq`, capped by count and encoded size (`more` says the answer was cut); how the agent catches up after a restart and how browsers page back."
     },
     {
       "channel": "supervisor", "type": "reload", "kind": "request", "from": "agent", "milestone": 2,
@@ -78,7 +79,10 @@
         "console": { "$ref": "definition.json#/$defs/ConsoleSpec" },
         "players": { "oneOf": [{ "$ref": "definition.json#/$defs/PlayersSpec" }, { "type": "null" }] },
         "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment for the game and hooks: `GSS_VAR_<KEY>`, `GSS_PORT_<NAME>`, `GSS_SERVER_ID`." },
-        "autoRestart": { "$ref": "#/$defs/AutoRestart" }
+        "autoRestart": { "$ref": "#/$defs/AutoRestart" },
+        "installTimeoutSec": { "type": "integer", "description": "Seconds the whole install may take (the definition's `install_timeout`); 0 or absent = `INIT_INSTALL_TIMEOUT_SEC`." },
+        "agentUid": { "type": "integer", "description": "Set by the agent, not the panel: uid of the host agent. gss-init gives it the socket (0600) and the run folder (0700), so no other host user can reach the socket. 0 or absent = root." },
+        "agentGid": { "type": "integer", "description": "Set by the agent: gid of the host agent, for the socket and the run folder." }
       },
       "required": ["serverId", "install", "configs", "hooks", "start", "ready", "stop", "console", "players", "env", "autoRestart"]
     },
@@ -110,7 +114,8 @@
     "InitStopRequest": {
       "type": "object",
       "properties": {
-        "kill": { "type": "boolean" }
+        "kill": { "type": "boolean" },
+        "reason": { "type": "string", "description": "Why the agent stops the game (e.g. over its disk limit): becomes the `reason` of the final `stopped` state." }
       },
       "required": ["kill"]
     },
@@ -125,7 +130,9 @@
       "type": "object",
       "properties": {
         "afterSeq": { "type": "integer", "description": "Return lines with a higher `seq`; 0 = from the oldest kept." },
-        "limit": { "type": "integer" }
+        "beforeSeq": { "type": "integer", "description": "Return lines with a lower `seq`; 0 or absent = up to the newest." },
+        "limit": { "type": "integer", "description": "Most lines to return; 0 = as many as fit `CONSOLE_BATCH_MAX_LINES` and `CONSOLE_BATCH_MAX_BYTES`, which always cap the answer." },
+        "tail": { "type": "boolean", "description": "Which end of the range to keep when not everything fits: true = the newest lines (opening a console, paging back), false = the oldest (catching up after `afterSeq`). `more` in the answer says whether lines were left out." }
       },
       "required": ["afterSeq", "limit"]
     }

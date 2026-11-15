@@ -17,6 +17,7 @@
   },
   "x-constants": {
     "PROTOCOL_VERSION": { "value": 1, "description": "Version of this protocol. Sent in `enrol` and `hello`; the panel refuses versions it does not speak with `CLOSE_UNSUPPORTED_VERSION`." },
+    "MAX_FRAME_BYTES": { "value": 4194304, "description": "Largest frame either side accepts, in bytes of UTF-8 JSON (one WebSocket text frame, or one NDJSON line on the supervisor socket). Senders split console data well below it (`CONSOLE_BATCH_MAX_BYTES`); a provision spec with hook files is the largest frame." },
     "HELLO_TIMEOUT_SEC": { "value": 10, "description": "Seconds the panel waits for the first frame (`enrol` or `hello`) before closing with `CLOSE_HELLO_TIMEOUT`." },
     "CLOSE_PROTOCOL_ERROR": { "value": 4400, "description": "WebSocket close code: a frame was not valid JSON or broke the envelope rules." },
     "CLOSE_UNAUTHORIZED": { "value": 4401, "description": "WebSocket close code: the `enrol` token or the `hello` credential was refused (sent after an `unauthorized` response). An agent whose hello was answered `unauthorized` stops reconnecting." },

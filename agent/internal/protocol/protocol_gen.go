@@ -11,6 +11,8 @@ import (
 const (
 	// ProtocolVersion version of this protocol. Sent in enrol and hello; the panel refuses versions it does not speak with CLOSE_UNSUPPORTED_VERSION.
 	ProtocolVersion = 1
+	// MaxFrameBytes largest frame either side accepts, in bytes of UTF-8 JSON (one WebSocket text frame, or one NDJSON line on the supervisor socket). Senders split console data well below it (CONSOLE_BATCH_MAX_BYTES); a provision spec with hook files is the largest frame.
+	MaxFrameBytes = 4194304
 	// HelloTimeoutSec seconds the panel waits for the first frame (enrol or hello) before closing with CLOSE_HELLO_TIMEOUT.
 	HelloTimeoutSec = 10
 	// CloseProtocolError WebSocket close code: a frame was not valid JSON or broke the envelope rules.
@@ -27,6 +29,16 @@ const (
 	CloseUnsupportedVersion = 4426
 	// CloseEnrolled WebSocket close code: enrolment finished; the socket was only for the enrol request.
 	CloseEnrolled = 4000
+	// ConsoleLineMaxBytes longest console line text in UTF-8 bytes. gss-init splits longer output; the panel truncates a longer line instead of refusing its batch.
+	ConsoleLineMaxBytes = 8192
+	// ConsoleBatchMaxLines most lines in one server.console batch or one backlog response.
+	ConsoleBatchMaxLines = 500
+	// ConsoleBatchMaxBytes most bytes of encoded JSON lines in one server.console batch or one backlog response (gss-init's and the agent's), so a frame of console data always stays far below MAX_FRAME_BYTES.
+	ConsoleBatchMaxBytes = 1048576
+	// ConsoleBacklogMaxLines most lines one server.backlog request may ask for.
+	ConsoleBacklogMaxLines = 1000
+	// ProvisionTimeoutSec how long the agent works on one server.provision (image pull included) before it gives up and answers timeout. The panel waits a little longer, so the agent's answer always arrives first.
+	ProvisionTimeoutSec = 900
 	// InitSpecPath where gss-init reads its spec (read-only mount).
 	InitSpecPath = "/gss/spec/spec.json"
 	// InitFilesDir definition files (hooks, templates) under their definition-relative path, e.g. /gss/spec/files/hooks/install.sh. Hook paths in the spec are relative to this folder.
@@ -37,6 +49,8 @@ const (
 	InitDataPath = "/data"
 	// InitBacklogLines console lines kept in gss-init's ring buffer.
 	InitBacklogLines = 2000
+	// InitInstallTimeoutSec default for InitSpec.installTimeoutSec: an install still running after this long is cancelled and ends install_failed.
+	InitInstallTimeoutSec = 7200
 	// GameUID uid and gid the game and every hook run as (gss user in ionnet-gss-base).
 	GameUID = 1000
 )
@@ -107,12 +121,15 @@ type GameDefinition struct {
 	Install   []InstallStep   `json:"install,omitempty"`
 	Configs   []ConfigMapping `json:"configs,omitempty"`
 	Hooks     *HookDecl       `json:"hooks,omitempty"`
-	Start     string          `json:"start,omitempty"`
-	Ready     *ReadyCheck     `json:"ready,omitempty"`
-	Stop      *StopSpec       `json:"stop,omitempty"`
-	Console   *ConsoleSpec    `json:"console,omitempty"`
-	Players   *PlayersSpec    `json:"players,omitempty"`
-	Backup    *BackupSpec     `json:"backup,omitempty"`
+	// Start command line run through /bin/sh -c. String and secret variables and server.name must use the sh filter here ({{vars.motd|sh}}).
+	Start string `json:"start,omitempty"`
+	// InstallTimeout seconds the whole install may take before it is cancelled (install_failed). Default is INIT_INSTALL_TIMEOUT_SEC (2 hours).
+	InstallTimeout int64        `json:"install_timeout,omitempty"`
+	Ready          *ReadyCheck  `json:"ready,omitempty"`
+	Stop           *StopSpec    `json:"stop,omitempty"`
+	Console        *ConsoleSpec `json:"console,omitempty"`
+	Players        *PlayersSpec `json:"players,omitempty"`
+	Backup         *BackupSpec  `json:"backup,omitempty"`
 	// Services extra containers of a stack, keyed by the host name the game reaches them under.
 	Services map[string]ServiceSpec `json:"services,omitempty"`
 }
@@ -151,6 +168,10 @@ type VariableDecl struct {
 	Default     any            `json:"default,omitempty"`
 	// Unit display unit, e.g. MB.
 	Unit string `json:"unit,omitempty"`
+	// Min number only: smallest accepted value.
+	Min float64 `json:"min,omitempty"`
+	// Max number only: largest accepted value.
+	Max float64 `json:"max,omitempty"`
 	// Reinstall changing the value re-runs install.
 	Reinstall bool `json:"reinstall,omitempty"`
 	// AdminOnly only admins see and change it.
@@ -422,7 +443,7 @@ type Heartbeat struct {
 	Facts HostFacts `json:"facts"`
 }
 
-// ServerState creating → installing → stopped ⇄ starting → running → stopping → stopped; failures: install_failed, crashed.
+// ServerState creating → installing → stopped ⇄ starting → running → stopping → stopped; failures: install_failed, crashed. deleting is the panel's own: a delete (or a rolled-back create) the agent has not confirmed yet; agents never report it.
 type ServerState string
 
 // ServerState values.
@@ -435,6 +456,7 @@ const (
 	ServerStateRunning       ServerState = "running"
 	ServerStateStopping      ServerState = "stopping"
 	ServerStateCrashed       ServerState = "crashed"
+	ServerStateDeleting      ServerState = "deleting"
 )
 
 // ServerStatus is defined in protocol/schema/server.json.
@@ -509,7 +531,7 @@ type Limits struct {
 	// CPUMillis 1000 = one CPU.
 	CPUMillis int64 `json:"cpuMillis"`
 	Pids      int64 `json:"pids"`
-	// DiskMB soft limit: the agent warns and refuses to start above it.
+	// DiskMB soft limit: the agent refuses to start above it and stops a running game that grows past it (checked about once a minute).
 	DiskMB int64 `json:"diskMb"`
 }
 
@@ -554,13 +576,18 @@ type InputRequest struct {
 // BacklogRequest is defined in protocol/schema/server.json.
 type BacklogRequest struct {
 	ServerID string `json:"serverId"`
-	// Limit most recent lines to return, at most 1000.
+	// Limit most recent lines to return, at most CONSOLE_BACKLOG_MAX_LINES.
 	Limit int64 `json:"limit"`
+	// BeforeSeq page back: only lines with a lower seq (the first seq of the previous page). 0 or absent = up to the newest line.
+	BeforeSeq int64 `json:"beforeSeq,omitempty"`
 }
 
 // BacklogResponse is defined in protocol/schema/server.json.
 type BacklogResponse struct {
+	// Lines oldest first. At most CONSOLE_BATCH_MAX_LINES lines and CONSOLE_BATCH_MAX_BYTES of encoded JSON.
 	Lines []ConsoleLine `json:"lines"`
+	// More lines in the asked range were left out to stay within the limits: older ones for a tail request (page back with beforeSeq = the first seq), newer ones for a catch-up (ask again with afterSeq = the last seq).
+	More bool `json:"more"`
 }
 
 // ConsoleStream output: the game's pty; input: an echoed console command; system: gss-init's own messages (install steps, state changes).
@@ -655,6 +682,12 @@ type InitSpec struct {
 	// Env environment for the game and hooks: GSS_VAR_<KEY>, GSS_PORT_<NAME>, GSS_SERVER_ID.
 	Env         map[string]string `json:"env"`
 	AutoRestart AutoRestart       `json:"autoRestart"`
+	// InstallTimeoutSec seconds the whole install may take (the definition's install_timeout); 0 or absent = INIT_INSTALL_TIMEOUT_SEC.
+	InstallTimeoutSec int64 `json:"installTimeoutSec,omitempty"`
+	// AgentUID set by the agent, not the panel: uid of the host agent. gss-init gives it the socket (0600) and the run folder (0700), so no other host user can reach the socket. 0 or absent = root.
+	AgentUID int64 `json:"agentUid,omitempty"`
+	// AgentGID set by the agent: gid of the host agent, for the socket and the run folder.
+	AgentGID int64 `json:"agentGid,omitempty"`
 }
 
 // AutoRestart restart after a crash, at most max times within windowSec; beyond that the state stays crashed.
@@ -687,6 +720,8 @@ type InitStatus struct {
 // InitStopRequest is defined in protocol/schema/supervisor.json.
 type InitStopRequest struct {
 	Kill bool `json:"kill"`
+	// Reason why the agent stops the game (e.g. over its disk limit): becomes the reason of the final stopped state.
+	Reason string `json:"reason,omitempty"`
 }
 
 // InputLine is defined in protocol/schema/supervisor.json.
@@ -698,7 +733,12 @@ type InputLine struct {
 type InitBacklogRequest struct {
 	// AfterSeq return lines with a higher seq; 0 = from the oldest kept.
 	AfterSeq int64 `json:"afterSeq"`
-	Limit    int64 `json:"limit"`
+	// BeforeSeq return lines with a lower seq; 0 or absent = up to the newest.
+	BeforeSeq int64 `json:"beforeSeq,omitempty"`
+	// Limit most lines to return; 0 = as many as fit CONSOLE_BATCH_MAX_LINES and CONSOLE_BATCH_MAX_BYTES, which always cap the answer.
+	Limit int64 `json:"limit"`
+	// Tail which end of the range to keep when not everything fits: true = the newest lines (opening a console, paging back), false = the oldest (catching up after afterSeq). more in the answer says whether lines were left out.
+	Tail bool `json:"tail,omitempty"`
 }
 
 // Message types.

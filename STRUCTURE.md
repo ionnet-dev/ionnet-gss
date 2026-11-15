@@ -30,6 +30,7 @@ server/src/
   migrate.ts           Umzug runner + CLI (deno task migrate up|down|pending|executed|create <name>)
   migrations/          index.ts (explicit list) + 20261115000000-initial.ts (whole v1 schema, seeds admin/user roles)
                        + 20261116000000-m2-servers.ts (sources.kind)
+                       + 20261117000000-server-deleting.ts (state `deleting`, delete_keep_data)
   models/              one class per file (declare attributes, initModel(), finders, serializers) + columns.ts
                        + index.ts (instance, init, every association)
   controllers/         one namespace per resource exporting `router`; ApiController mounts them
@@ -112,6 +113,16 @@ live events (`useResource({ liveEvents })`).
   otherwise `host.facts` (usage, detail page only) at most once a minute per host. Online state is `host.status`.
 - Supervisor channel: NDJSON on `/gss/run/init.sock` inside the container (host:
   `/var/lib/ionnet-gss/servers/<uuid>/run/init.sock`); spec at `/gss/spec/spec.json` (ro), data at `/data`.
+- Frame and console limits (one set, in the schemas, used by gss-init, agent and panel): `MAX_FRAME_BYTES` (4 MiB,
+  either channel), `CONSOLE_LINE_MAX_BYTES` (8 KiB: gss-init splits longer output at a UTF-8 boundary, the panel
+  cuts a longer line instead of refusing its batch), `CONSOLE_BATCH_MAX_LINES` (500) and `CONSOLE_BATCH_MAX_BYTES`
+  (1 MiB of encoded lines) per `server.console` batch and per backlog answer. Go encodes every frame with
+  `protocol.Marshal` (no HTML escaping: `<>&` stay one byte). Backlogs page: `InitBacklogRequest { afterSeq,
+  beforeSeq, limit, tail }` → `{ lines, more }`; the agent catches up page by page after a restart, browsers page
+  back with `GET …/console?before=<first seq>`.
+- Buffers are bounded by bytes: the agent's outbox (64 MiB; console first, then player events; state changes never
+  dropped), the supervisor client's queue (8 MiB / 10000 console lines, then a `Gap` that the agent fills from the
+  backlog), live sockets (closed with `LIVE_CLOSE.TOO_SLOW` past 4 MiB unsent; at most 16 per user, `TOO_MANY`).
 - Generated maps: `AgentToPanelRequests`, `AgentToPanelEvents`, `PanelToAgentRequests`, `PanelToAgentEvents`,
   `AgentToInitRequests`, `InitToAgentEvents` (TS); `Msg*` / `InitMsg*` consts + `Messages` (Go).
 - Generator subset is documented at the top of `protocol/generate.ts` (inline objects refused: name them in `$defs`).
@@ -258,20 +269,41 @@ gss-init ─state/console (NDJSON, /gss/run/init.sock)─► agent ─server.sta
 - **Container layout:** host `<root>/servers/<id>/data` → `/data` (rw), `spec/` → `/gss/spec` (ro: `spec.json` =
   `InitSpec`, `files/<definition-relative path>`), `run/` → `/gss/run` (rw, `init.sock`). Names and labels:
   `agent/internal/servers/new.go`.
+- **Host permissions:** the server folder and `run/` are the agent's, 0700; the agent writes its uid/gid into
+  `InitSpec.agentUid/agentGid` and gss-init hands `run/` (0700) and `init.sock` (0600) to them, so no other host user
+  can reach the socket or the data. In-container peers are refused by pid (`peerError`). Ownership per agent uid:
+  `agent/internal/servers/fs.go`.
 - **Templates are rendered by the panel.** The agent and gss-init never see `{{…}}`. Hook files travel in
   `ServerSpec.files`; template configs travel rendered in `ConfigMapping.content`.
 - **Images:** bare `ionnet-gss-*` in game.yml → `${IMAGE_REGISTRY}/ionnet-gss-*` (`:latest` when untagged).
   `images/build.sh` tags locally; agents pull only when an image is missing.
 - **States:** gss-init owns `installing → stopped ⇄ starting → running → stopping`, `install_failed`, `crashed`; the
-  panel row starts as `creating`. `installProgress` (step/total/name) is in `ServerStatus`, `StateChange`,
+  panel row starts as `creating` and ends as `deleting` (below). A stop during `installing` cancels the install
+  (→ `install_failed`); an install running longer than `install_timeout` (default `INIT_INSTALL_TIMEOUT_SEC`, 2 h)
+  is cancelled the same way. A stop the agent starts itself (disk limit) carries its reason into the final `stopped`. `installProgress` (step/total/name) is in `ServerStatus`, `StateChange`,
   `InitStatus` and the `server.state` live event.
 - **Reconnect:** `hello.servers` is the agent's inventory; `GameServerService.reconcile` re-provisions stopped servers
-  whose `specHash` differs and never deletes unknown ones. An agent restart reattaches to sockets and catches up
-  with `backlog(afterSeq)`.
+  whose `specHash` differs, deletes tombstones, and never deletes unknown ones. An agent restart reattaches to
+  sockets and catches up with paged `backlog(afterSeq)`. `Restore` says hello after at most ~25 s even when a
+  container is slow or an image is being pulled (bounded by `PROVISION_TIMEOUT_SEC`); late servers report through
+  state changes.
+- **Tombstones:** delete, and a create rolled back (provision failed, timed out or the host dropped mid-way), turn
+  the row into state `deleting` with its ports still allocated. The row goes only when the agent confirms
+  `server.delete` (or says it doesn't know the server); until then it is retried every minute while the host is
+  online and on every hello, and reconcile never provisions it. Timeouts: the panel waits `PROVISION_TIMEOUT_SEC` +
+  30 s for a provision (the agent gives up first and answers), and for restart/delete the definition's
+  `stop.timeout` + 15 s (`docker stop` grace) + 90 s.
+- **Disk:** the soft `limits.diskMb` is checked at start (409) and about once a minute while running (one server at a
+  time, in its own goroutine); a running server over it is stopped with the measured size as `stateReason`.
 - **Settings** change only while stopped (409 otherwise) and re-provision; a `reinstall` variable sets
   `reinstall: true`.
-- **Console:** the client subscribes to `server:<id>` (LiveGateway checks `GameServerService.canAccess`, answers
-  `subscribed`), then `GET /api/servers/:id/console`, and dedupes by `seq`. Input is `POST /api/servers/:id/console`.
+- **Console:** the client subscribes to `server:<id>` (LiveGateway handles a socket's frames one at a time, checks
+  `GameServerService.canAccess`, answers `subscribed`), then `GET /api/servers/:id/console`, and dedupes by `seq`
+  (a lower `seq` with a later `at` is a new gss-init process). Input is `POST /api/servers/:id/console`, at most 30
+  commands per 10 s per server (429).
+- **Templates:** `{{vars.x|sh}}` (POSIX single-quoted) and `{{vars.x|json}}`; a string/secret variable or
+  `server.name` unfiltered in `start`, `stop.command` or a hook path fails definition validation (`games/README.md`).
+  Number variables take `min`/`max` (400 outside, shown by the form).
 - **Not in M2:** stats (M4), derived images for `packages` (the agent answers `unsupported`), `steamcmd`,
   `options_from`, config formats other than `properties` and `template` (M3).
 
@@ -288,12 +320,12 @@ Access: `O` = owner or SERVERS_MANAGE_ALL (else 404).
 | GET | /api/servers/:id | O | | `GameServerDetailResponse` |
 | PATCH | /api/servers/:id | O | `UpdateServerBody` | `UpdateServerResponse`; 409 not stopped |
 | POST | /api/servers/:id/start | O | | `GameServerDto`; 409 offline/running/disk |
-| POST | /api/servers/:id/stop | O | `StopServerBody` | `GameServerDto` |
+| POST | /api/servers/:id/stop | O | `StopServerBody` | `GameServerDto` (also cancels an install) |
 | POST | /api/servers/:id/restart | O | | `GameServerDto` |
 | POST | /api/servers/:id/reinstall | O | | `GameServerDto`; 409 running |
-| DELETE | /api/servers/:id?keepData=true | O | | `OkResponse`; 409 offline |
-| GET | /api/servers/:id/console?limit= | O | | `ConsoleBacklogResponse` |
-| POST | /api/servers/:id/console | O | `ConsoleInputBody` | `OkResponse`; 409 not running |
+| DELETE | /api/servers/:id?keepData=true | O | | `OkResponse` (202: host didn't answer in time, stays `deleting`); 409 offline |
+| GET | /api/servers/:id/console?limit=&before= | O | | `ConsoleBacklogResponse` (`more`: page back with `before`) |
+| POST | /api/servers/:id/console | O | `ConsoleInputBody` | `OkResponse`; 409 not running; 429 |
 
 Live: `server.updated` (refetch), `server.state` (apply in place), `server.console` (topic `server:<id>`), frames
 `subscribed` / `error { topic }`. Client routes: `/` and `/servers`, `/servers/new`, `/servers/<uuid>`.
@@ -308,6 +340,15 @@ Live: `server.updated` (refetch), `server.state` (apply in place), `server.conso
 | `definitions/loaders/*` | `node:fs`, models (types), lib | `DefinitionEngine` (DefinitionSync validates) |
 | `agent/internal/servers` | `docker`, `supervisor`, `paths`, `protocol` | `panel` (it reports through `Sink`) |
 | `agent/internal/initd/**` | `protocol`, stdlib (+ `golang.org/x/sys` / a pty package if needed: ask main) | `docker`, `panel`, `servers` |
+
+### Open hardening (not in M2)
+
+- Per-server uids / user namespaces: every game runs as uid 1000 on the host kernel; with the agent also uid 1000 (dev
+  setups) the game could open `/gss/run`, and only gss-init's pid check refuses it.
+- Container egress: games can reach link-local (169.254.0.0/16, cloud metadata) and host-local addresses; block them
+  per server network.
+- Disk: hard quotas (XFS project quotas / a size-limited volume) and a read-only root filesystem instead of the
+  once-a-minute soft check.
 
 ## M2 work split
 

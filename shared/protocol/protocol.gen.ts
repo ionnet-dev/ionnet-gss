@@ -7,6 +7,11 @@
 export const PROTOCOL_VERSION = 1;
 
 /**
+ * Largest frame either side accepts, in bytes of UTF-8 JSON (one WebSocket text frame, or one NDJSON line on the supervisor socket). Senders split console data well below it (`CONSOLE_BATCH_MAX_BYTES`); a provision spec with hook files is the largest frame.
+ */
+export const MAX_FRAME_BYTES = 4194304;
+
+/**
  * Seconds the panel waits for the first frame (`enrol` or `hello`) before closing with `CLOSE_HELLO_TIMEOUT`.
  */
 export const HELLO_TIMEOUT_SEC = 10;
@@ -47,6 +52,31 @@ export const CLOSE_UNSUPPORTED_VERSION = 4426;
 export const CLOSE_ENROLLED = 4000;
 
 /**
+ * Longest console line text in UTF-8 bytes. gss-init splits longer output; the panel truncates a longer line instead of refusing its batch.
+ */
+export const CONSOLE_LINE_MAX_BYTES = 8192;
+
+/**
+ * Most lines in one `server.console` batch or one backlog response.
+ */
+export const CONSOLE_BATCH_MAX_LINES = 500;
+
+/**
+ * Most bytes of encoded JSON lines in one `server.console` batch or one backlog response (gss-init's and the agent's), so a frame of console data always stays far below `MAX_FRAME_BYTES`.
+ */
+export const CONSOLE_BATCH_MAX_BYTES = 1048576;
+
+/**
+ * Most lines one `server.backlog` request may ask for.
+ */
+export const CONSOLE_BACKLOG_MAX_LINES = 1000;
+
+/**
+ * How long the agent works on one `server.provision` (image pull included) before it gives up and answers `timeout`. The panel waits a little longer, so the agent's answer always arrives first.
+ */
+export const PROVISION_TIMEOUT_SEC = 900;
+
+/**
  * Where gss-init reads its spec (read-only mount).
  */
 export const INIT_SPEC_PATH = "/gss/spec/spec.json";
@@ -70,6 +100,11 @@ export const INIT_DATA_PATH = "/data";
  * Console lines kept in gss-init's ring buffer.
  */
 export const INIT_BACKLOG_LINES = 2000;
+
+/**
+ * Default for `InitSpec.installTimeoutSec`: an install still running after this long is cancelled and ends `install_failed`.
+ */
+export const INIT_INSTALL_TIMEOUT_SEC = 7200;
 
 /**
  * uid and gid the game and every hook run as (`gss` user in ionnet-gss-base).
@@ -154,7 +189,14 @@ export interface GameDefinition {
   install?: InstallStep[];
   configs?: ConfigMapping[];
   hooks?: HookDecl;
+  /**
+   * Command line run through `/bin/sh -c`. String and secret variables and `server.name` must use the `sh` filter here (`{{vars.motd|sh}}`).
+   */
   start?: string;
+  /**
+   * Seconds the whole install may take before it is cancelled (`install_failed`). Default is INIT_INSTALL_TIMEOUT_SEC (2 hours).
+   */
+  install_timeout?: number;
   ready?: ReadyCheck;
   stop?: StopSpec;
   console?: ConsoleSpec;
@@ -190,6 +232,14 @@ export interface VariableDecl {
    * Display unit, e.g. `MB`.
    */
   unit?: string;
+  /**
+   * `number` only: smallest accepted value.
+   */
+  min?: number;
+  /**
+   * `number` only: largest accepted value.
+   */
+  max?: number;
   /**
    * Changing the value re-runs install.
    */
@@ -532,10 +582,10 @@ export interface Heartbeat {
 
 //#region server.json
 /**
- * creating → installing → stopped ⇄ starting → running → stopping → stopped; failures: install_failed, crashed.
+ * creating → installing → stopped ⇄ starting → running → stopping → stopped; failures: install_failed, crashed. `deleting` is the panel's own: a delete (or a rolled-back create) the agent has not confirmed yet; agents never report it.
  */
-export type ServerState = "creating" | "installing" | "install_failed" | "stopped" | "starting" | "running" | "stopping" | "crashed";
-export const SERVER_STATE_VALUES: readonly ServerState[] = ["creating", "installing", "install_failed", "stopped", "starting", "running", "stopping", "crashed"];
+export type ServerState = "creating" | "installing" | "install_failed" | "stopped" | "starting" | "running" | "stopping" | "crashed" | "deleting";
+export const SERVER_STATE_VALUES: readonly ServerState[] = ["creating", "installing", "install_failed", "stopped", "starting", "running", "stopping", "crashed", "deleting"];
 
 export interface ServerStatus {
   serverId: string;
@@ -638,7 +688,7 @@ export interface Limits {
   cpuMillis: number;
   pids: number;
   /**
-   * Soft limit: the agent warns and refuses to start above it.
+   * Soft limit: the agent refuses to start above it and stops a running game that grows past it (checked about once a minute).
    */
   diskMb: number;
 }
@@ -694,13 +744,24 @@ export interface InputRequest {
 export interface BacklogRequest {
   serverId: string;
   /**
-   * Most recent lines to return, at most 1000.
+   * Most recent lines to return, at most `CONSOLE_BACKLOG_MAX_LINES`.
    */
   limit: number;
+  /**
+   * Page back: only lines with a lower `seq` (the first `seq` of the previous page). 0 or absent = up to the newest line.
+   */
+  beforeSeq?: number;
 }
 
 export interface BacklogResponse {
+  /**
+   * Oldest first. At most `CONSOLE_BATCH_MAX_LINES` lines and `CONSOLE_BATCH_MAX_BYTES` of encoded JSON.
+   */
   lines: ConsoleLine[];
+  /**
+   * Lines in the asked range were left out to stay within the limits: older ones for a tail request (page back with `beforeSeq` = the first `seq`), newer ones for a catch-up (ask again with `afterSeq` = the last `seq`).
+   */
+  more: boolean;
 }
 
 /**
@@ -802,6 +863,18 @@ export interface InitSpec {
    */
   env: Record<string, string>;
   autoRestart: AutoRestart;
+  /**
+   * Seconds the whole install may take (the definition's `install_timeout`); 0 or absent = `INIT_INSTALL_TIMEOUT_SEC`.
+   */
+  installTimeoutSec?: number;
+  /**
+   * Set by the agent, not the panel: uid of the host agent. gss-init gives it the socket (0600) and the run folder (0700), so no other host user can reach the socket. 0 or absent = root.
+   */
+  agentUid?: number;
+  /**
+   * Set by the agent: gid of the host agent, for the socket and the run folder.
+   */
+  agentGid?: number;
 }
 
 /**
@@ -848,6 +921,10 @@ export interface InitStatus {
 
 export interface InitStopRequest {
   kill: boolean;
+  /**
+   * Why the agent stops the game (e.g. over its disk limit): becomes the `reason` of the final `stopped` state.
+   */
+  reason?: string;
 }
 
 export interface InputLine {
@@ -859,7 +936,18 @@ export interface InitBacklogRequest {
    * Return lines with a higher `seq`; 0 = from the oldest kept.
    */
   afterSeq: number;
+  /**
+   * Return lines with a lower `seq`; 0 or absent = up to the newest.
+   */
+  beforeSeq?: number;
+  /**
+   * Most lines to return; 0 = as many as fit `CONSOLE_BATCH_MAX_LINES` and `CONSOLE_BATCH_MAX_BYTES`, which always cap the answer.
+   */
   limit: number;
+  /**
+   * Which end of the range to keep when not everything fits: true = the newest lines (opening a console, paging back), false = the oldest (catching up after `afterSeq`). `more` in the answer says whether lines were left out.
+   */
+  tail?: boolean;
 }
 
 //#endregion
@@ -899,7 +987,7 @@ export interface AgentToPanelEvents {
    */
   "heartbeat": Heartbeat;
   /**
-   * New console lines, batched (at most every 100 ms per server). (M2)
+   * New console lines, batched (at most every 100 ms per server), at most `CONSOLE_BATCH_MAX_LINES` lines and `CONSOLE_BATCH_MAX_BYTES` of encoded lines per batch. (M2)
    */
   "server.console": ConsoleBatch;
   /**
@@ -980,7 +1068,7 @@ export interface AgentToInitRequests {
    */
   "input": { request: InputLine; response: Empty };
   /**
-   * Lines from the ring buffer after `afterSeq`; how the agent catches up after a restart. (M2)
+   * Lines from the ring buffer between `afterSeq` and `beforeSeq`, capped by count and encoded size (`more` says the answer was cut); how the agent catches up after a restart and how browsers page back. (M2)
    */
   "backlog": { request: InitBacklogRequest; response: BacklogResponse };
   /**

@@ -27,7 +27,7 @@ export class GameServer extends Model<InferAttributes<GameServer>, InferCreation
   declare ownerId: ForeignKey<User["id"]>;
   declare hostId: ForeignKey<Host["id"]>;
   declare definitionId: ForeignKey<Definition["id"]>;
-  declare state: CreationOptional<ServerState>; // Last state the agent reported (or "creating").
+  declare state: CreationOptional<ServerState>; // Last state the agent reported, or the panel's "creating" / "deleting" (tombstone until the agent confirms).
   declare stateReason: string | null; // Readable cause of install_failed / crashed.
   declare lastExitCode: number | null;
   declare stateChangedAt: CreationOptional<Date>;
@@ -39,6 +39,7 @@ export class GameServer extends Model<InferAttributes<GameServer>, InferCreation
   declare autoRestart: CreationOptional<boolean>; // Restart after a crash (3 in 10 minutes).
   declare specHash: string | null; // Hash of the spec last provisioned; null = never provisioned.
   declare installedAt: Date | null;
+  declare deleteKeepData: CreationOptional<boolean>; // keepData of the pending delete (state "deleting").
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;
 
@@ -66,6 +67,7 @@ export class GameServer extends Model<InferAttributes<GameServer>, InferCreation
       autoRestart: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       specHash: { type: DataTypes.CHAR(64), allowNull: true },
       installedAt: { type: DataTypes.DATE, allowNull: true },
+      deleteKeepData: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       createdAt: DataTypes.DATE,
       updatedAt: DataTypes.DATE,
     }, { sequelize, tableName: "game_servers" });

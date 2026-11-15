@@ -3,6 +3,13 @@
   "$id": "server.json",
   "title": "Server",
   "description": "M2: game server lifecycle between panel and agent. The panel decides policy (quota, ports, secrets, templates); the agent only carries it out.",
+  "x-constants": {
+    "CONSOLE_LINE_MAX_BYTES": { "value": 8192, "description": "Longest console line text in UTF-8 bytes. gss-init splits longer output; the panel truncates a longer line instead of refusing its batch." },
+    "CONSOLE_BATCH_MAX_LINES": { "value": 500, "description": "Most lines in one `server.console` batch or one backlog response." },
+    "CONSOLE_BATCH_MAX_BYTES": { "value": 1048576, "description": "Most bytes of encoded JSON lines in one `server.console` batch or one backlog response (gss-init's and the agent's), so a frame of console data always stays far below `MAX_FRAME_BYTES`." },
+    "CONSOLE_BACKLOG_MAX_LINES": { "value": 1000, "description": "Most lines one `server.backlog` request may ask for." },
+    "PROVISION_TIMEOUT_SEC": { "value": 900, "description": "How long the agent works on one `server.provision` (image pull included) before it gives up and answers `timeout`. The panel waits a little longer, so the agent's answer always arrives first." }
+  },
   "x-messages": [
     {
       "channel": "agent", "type": "server.provision", "kind": "request", "from": "panel", "milestone": 2,
@@ -42,7 +49,7 @@
     {
       "channel": "agent", "type": "server.console", "kind": "event", "from": "agent", "milestone": 2,
       "data": "ConsoleBatch",
-      "description": "New console lines, batched (at most every 100 ms per server)."
+      "description": "New console lines, batched (at most every 100 ms per server), at most `CONSOLE_BATCH_MAX_LINES` lines and `CONSOLE_BATCH_MAX_BYTES` of encoded lines per batch."
     },
     {
       "channel": "agent", "type": "server.state", "kind": "event", "from": "agent", "milestone": 2,
@@ -63,8 +70,8 @@
   "$defs": {
     "ServerState": {
       "type": "string",
-      "description": "creating → installing → stopped ⇄ starting → running → stopping → stopped; failures: install_failed, crashed.",
-      "enum": ["creating", "installing", "install_failed", "stopped", "starting", "running", "stopping", "crashed"]
+      "description": "creating → installing → stopped ⇄ starting → running → stopping → stopped; failures: install_failed, crashed. `deleting` is the panel's own: a delete (or a rolled-back create) the agent has not confirmed yet; agents never report it.",
+      "enum": ["creating", "installing", "install_failed", "stopped", "starting", "running", "stopping", "crashed", "deleting"]
     },
     "ServerStatus": {
       "type": "object",
@@ -141,7 +148,7 @@
         "memoryMb": { "type": "integer" },
         "cpuMillis": { "type": "integer", "description": "1000 = one CPU." },
         "pids": { "type": "integer" },
-        "diskMb": { "type": "integer", "description": "Soft limit: the agent warns and refuses to start above it." }
+        "diskMb": { "type": "integer", "description": "Soft limit: the agent refuses to start above it and stops a running game that grows past it (checked about once a minute)." }
       },
       "required": ["memoryMb", "cpuMillis", "pids", "diskMb"]
     },
@@ -192,16 +199,18 @@
       "type": "object",
       "properties": {
         "serverId": { "type": "string", "format": "uuid" },
-        "limit": { "type": "integer", "description": "Most recent lines to return, at most 1000." }
+        "limit": { "type": "integer", "description": "Most recent lines to return, at most `CONSOLE_BACKLOG_MAX_LINES`." },
+        "beforeSeq": { "type": "integer", "description": "Page back: only lines with a lower `seq` (the first `seq` of the previous page). 0 or absent = up to the newest line." }
       },
       "required": ["serverId", "limit"]
     },
     "BacklogResponse": {
       "type": "object",
       "properties": {
-        "lines": { "type": "array", "items": { "$ref": "#/$defs/ConsoleLine" } }
+        "lines": { "type": "array", "items": { "$ref": "#/$defs/ConsoleLine" }, "description": "Oldest first. At most `CONSOLE_BATCH_MAX_LINES` lines and `CONSOLE_BATCH_MAX_BYTES` of encoded JSON." },
+        "more": { "type": "boolean", "description": "Lines in the asked range were left out to stay within the limits: older ones for a tail request (page back with `beforeSeq` = the first `seq`), newer ones for a catch-up (ask again with `afterSeq` = the last `seq`)." }
       },
-      "required": ["lines"]
+      "required": ["lines", "more"]
     },
     "ConsoleStream": {
       "type": "string",

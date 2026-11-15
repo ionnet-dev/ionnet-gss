@@ -13,7 +13,7 @@ import (
 
 // NewRequest builds a request envelope.
 func NewRequest(id, msgType string, data any) (Envelope, error) {
-	raw, err := json.Marshal(data)
+	raw, err := Marshal(data)
 	if err != nil {
 		return Envelope{}, fmt.Errorf("encode %s request: %w", msgType, err)
 	}
@@ -22,7 +22,7 @@ func NewRequest(id, msgType string, data any) (Envelope, error) {
 
 // NewEvent builds an event envelope.
 func NewEvent(msgType string, data any) (Envelope, error) {
-	raw, err := json.Marshal(data)
+	raw, err := Marshal(data)
 	if err != nil {
 		return Envelope{}, fmt.Errorf("encode %s event: %w", msgType, err)
 	}
@@ -31,7 +31,7 @@ func NewEvent(msgType string, data any) (Envelope, error) {
 
 // NewResponse builds a successful response to req.
 func NewResponse(req Envelope, data any) (Envelope, error) {
-	raw, err := json.Marshal(data)
+	raw, err := Marshal(data)
 	if err != nil {
 		return Envelope{}, fmt.Errorf("encode %s response: %w", req.Type, err)
 	}
@@ -77,9 +77,6 @@ func ErrorFromResponse(env Envelope) error {
 // ErrFrameTooLarge is returned by ReadFrame for a line over the limit.
 var ErrFrameTooLarge = errors.New("frame larger than the limit")
 
-// MaxFrameBytes bounds one frame on either channel (a provision spec with hook files is the largest).
-const MaxFrameBytes = 4 << 20
-
 // ReadFrame reads one newline-delimited envelope (supervisor socket).
 func ReadFrame(r *bufio.Reader) (Envelope, error) {
 	var env Envelope
@@ -96,14 +93,14 @@ func ReadFrame(r *bufio.Reader) (Envelope, error) {
 	return env, nil
 }
 
-// NewFrameReader wraps r with a buffer sized for MaxFrameBytes.
+// NewFrameReader wraps r with a buffer sized for MaxFrameBytes (MAX_FRAME_BYTES, the newline included).
 func NewFrameReader(r io.Reader) *bufio.Reader {
-	return bufio.NewReaderSize(r, MaxFrameBytes)
+	return bufio.NewReaderSize(r, MaxFrameBytes+1)
 }
 
 // WriteFrame writes one envelope followed by a newline (supervisor socket).
 func WriteFrame(w io.Writer, env Envelope) error {
-	raw, err := json.Marshal(env)
+	raw, err := Marshal(env)
 	if err != nil {
 		return fmt.Errorf("encode frame: %w", err)
 	}

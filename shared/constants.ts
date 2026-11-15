@@ -57,4 +57,13 @@ export const LIVE_CLOSE = {
    * The user's access changed (role, disabled, password). Reconnect to pick it up.
    */
   RECONNECT: 4002,
+  /**
+   * The socket fell too far behind (its send buffer passed the panel's limit). The client reconnects with its normal
+   * backoff and refetches what it shows (console backlog) when the subscribe is answered again.
+   */
+  TOO_SLOW: 4008,
+  /**
+   * The user has too many live sockets open (tabs); the client retries with its normal backoff.
+   */
+  TOO_MANY: 4029,
 } as const;

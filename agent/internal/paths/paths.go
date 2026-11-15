@@ -33,9 +33,25 @@ func (l Layout) ServerData(serverID string) string {
 	return filepath.Join(l.ServerDir(serverID), "data")
 }
 
-// ServerSpec is mounted read-only at /gss/spec (spec.json + hooks/).
+// ServerManifest is the agent's copy of the last ProvisionRequest (spec + hash), root-only and never mounted: Restore
+// rebuilds the container from it.
+func (l Layout) ServerManifest(serverID string) string {
+	return filepath.Join(l.ServerDir(serverID), "server.json")
+}
+
+// ServerSpec is mounted read-only at /gss/spec (spec.json + files/).
 func (l Layout) ServerSpec(serverID string) string {
 	return filepath.Join(l.ServerDir(serverID), "spec")
+}
+
+// ServerInitSpec is the host-side INIT_SPEC_PATH (spec/spec.json).
+func (l Layout) ServerInitSpec(serverID string) string {
+	return filepath.Join(l.ServerSpec(serverID), "spec.json")
+}
+
+// ServerFiles is the host-side INIT_FILES_DIR (spec/files): definition files under their definition-relative path.
+func (l Layout) ServerFiles(serverID string) string {
+	return filepath.Join(l.ServerSpec(serverID), "files")
 }
 
 // ServerRun is mounted read-write at /gss/run; gss-init creates init.sock in it.

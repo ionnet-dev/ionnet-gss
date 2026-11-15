@@ -17,11 +17,23 @@ export type LiveStatus = "idle" | "connecting" | "open" | "closed";
 
 type Listener<E extends LiveEventName> = (data: LiveEvents[E]) => void;
 
+export interface TopicListener {
+  /**
+   * The panel accepted the subscribe (again after every reconnect). Fetch the backlog here.
+   */
+  onSubscribed?: () => void;
+  /**
+   * The panel refused the subscribe, with its reason.
+   */
+  onRefused?: (message: string) => void;
+}
+
 export class LiveSocket extends Controller {
   public status: LiveStatus = "idle";
 
   private _eventListeners = new Map<LiveEventName, Set<Listener<LiveEventName>>>();
-  private _topics = new Set<LiveTopic>();
+  private _topics = new Map<LiveTopic, Set<TopicListener>>();
+  private _acknowledged = new Set<LiveTopic>(); // Topics the panel answered `subscribed` for on this connection.
   private _reconnectListeners = new Set<() => void>();
   private _socket: WebSocket | null = null;
   private _token: string | null = null;
@@ -80,13 +92,25 @@ export class LiveSocket extends Controller {
   }
 
   /**
-   * Start receiving a stream topic (M2: `server:<id>` console and stats).
+   * Start receiving a stream topic (`server:<id>`: console lines arrive as `server.console` events). The listener
+   * hears when the panel accepts or refuses it. Several subscribers to one topic share one panel subscription.
+   * Returns the unsubscribe function.
    */
-  public subscribeTopic(topic: LiveTopic): () => void {
-    this._topics.add(topic);
-    this._send({ t: "subscribe", topic });
+  public subscribeTopic(topic: LiveTopic, listener: TopicListener = {}): () => void {
+    let listeners = this._topics.get(topic);
+    const first = !listeners;
+    if (!listeners) {
+      listeners = new Set();
+      this._topics.set(topic, listeners);
+    }
+    listeners.add(listener);
+    if (first) this._send({ t: "subscribe", topic });
+    else if (this._acknowledged.has(topic)) listener.onSubscribed?.();
     return () => {
+      const current = this._topics.get(topic);
+      if (!current?.delete(listener) || current.size > 0) return;
       this._topics.delete(topic);
+      this._acknowledged.delete(topic);
       this._send({ t: "unsubscribe", topic });
     };
   }
@@ -125,13 +149,21 @@ export class LiveSocket extends Controller {
       const reconnected = this._hasOpened;
       this._hasOpened = true;
       this._attempt = 0;
+      this._acknowledged.clear();
       this.status = "open";
       this.notify();
-      for (const topic of this._topics) this._send({ t: "subscribe", topic });
+      for (const topic of this._topics.keys()) this._send({ t: "subscribe", topic });
       if (reconnected) for (const listener of this._reconnectListeners) listener();
     }
     else if (frame.t === "event") {
       this.emit(frame.event, frame.data as never);
+    }
+    else if (frame.t === "subscribed") {
+      this._acknowledged.add(frame.topic);
+      for (const listener of this._topics.get(frame.topic) ?? []) listener.onSubscribed?.();
+    }
+    else if (frame.t === "error" && frame.topic) {
+      for (const listener of this._topics.get(frame.topic) ?? []) listener.onRefused?.(frame.message);
     }
   }
 

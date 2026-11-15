@@ -8,8 +8,16 @@ import type {
   UpdateServerBody,
   UpdateServerResponse,
 } from "@shared/api/servers.ts";
+import { useEffect, useState } from "react";
+import type { LiveEvents } from "@shared/live.ts";
 import { useResource } from "@/hooks/useResource.ts";
+import { liveSocket } from "@/live/LiveSocket.ts";
 import { BaseApi } from "./BaseApi.ts";
+
+/**
+ * The newest `server.state` event per server id. Patches older than a fetched DTO are ignored by `applyState`.
+ */
+export type ServerStatePatches = Record<string, LiveEvents["server.state"]>;
 
 /**
  * `/api/servers`.
@@ -51,12 +59,47 @@ export namespace ServerApi {
     return BaseApi.DELETE(`/servers/${id}${keepData ? "?keepData=true" : ""}`);
   }
 
-  export function backlog(id: string, limit = 200): Promise<ConsoleBacklogResponse> {
-    return BaseApi.GET(`/servers/${id}/console?limit=${limit}`);
+  /**
+   * The newest `limit` console lines, or with `beforeSeq` the page before that line (`more` = older lines exist).
+   */
+  export function backlog(id: string, limit = 200, beforeSeq?: number): Promise<ConsoleBacklogResponse> {
+    return BaseApi.GET(`/servers/${id}/console?limit=${limit}${beforeSeq ? `&before=${beforeSeq}` : ""}`);
   }
 
   export function sendInput(id: string, line: string): Promise<OkResponse> {
     return BaseApi.POST(`/servers/${id}/console`, { line });
+  }
+
+  /**
+   * Overlay a `server.state` event on a server fetched earlier, unless the fetch is newer than the event.
+   */
+  export function applyState<T extends GameServerDto>(server: T, patch: LiveEvents["server.state"] | undefined): T {
+    if (!patch || patch.serverId !== server.id) return server;
+    if (new Date(patch.at).getTime() < new Date(server.stateChangedAt).getTime()) return server;
+    return {
+      ...server,
+      state: patch.state,
+      lastExitCode: patch.exitCode,
+      stateReason: patch.reason,
+      installProgress: patch.installProgress,
+      stateChangedAt: patch.at,
+    };
+  }
+
+  /**
+   * Collect `server.state` events as they arrive (no refetch), keyed by server id, so pages update rows in place.
+   * Pass `serverId` to keep only one server's events.
+   */
+  export function useStatePatches(serverId?: string): ServerStatePatches {
+    const [patches, setPatches] = useState<ServerStatePatches>({});
+    useEffect(() => {
+      setPatches({});
+      return liveSocket.on("server.state", (event) => {
+        if (serverId !== undefined && event.serverId !== serverId) return;
+        setPatches((current) => ({ ...current, [event.serverId]: event }));
+      });
+    }, [serverId]);
+    return patches;
   }
 
   /**

@@ -1,4 +1,4 @@
-# Minecraft: Java Edition (vanilla or Paper). M2 skeleton: the keys are final, the hook is the builder's (C).
+# Minecraft: Java Edition (vanilla or Paper). The install hook resolves "latest" and verifies the jar's checksum.
 id: minecraft-java
 name: "Minecraft: Java Edition"
 image: ionnet-gss-minecraft-server:java{{vars.java}}
@@ -12,26 +12,33 @@ variables:
     reinstall: true
   - key: version
     label: Minecraft version
-    description: A release like 1.21.4, or "latest".
+    description: A release like 1.21.4, or "latest" for the newest release.
     type: string
     default: latest
     reinstall: true
   - key: java
     label: Java
     type: select
+    description: The newest releases need Java 25, 1.20.5 to 1.21.x need 21, older ones 17 or 8.
     options: ["8", "17", "21", "25"]
-    default: "21"
+    default: "25"
+    reinstall: false
   - key: memory
     label: Memory
     type: number
+    description: The container's memory limit. The Java heap gets 75% of it; the rest is the JVM's own overhead.
     unit: MB
     default: 2048
+    min: 1024
+    max: 65536
     bind: limits.memory
   - key: motd
     label: Message of the day
     type: string
     default: A Minecraft Server
   - key: rcon_password
+    label: RCON password
+    description: Generated once. RCON is only reachable inside the server's own network.
     type: secret
     generate: 24
 
@@ -53,8 +60,11 @@ configs:
       rcon.port: "{{ports.rcon}}"
       rcon.password: "{{vars.rcon_password}}"
 
-# -Xmx leaves room for the JVM's own overhead inside the container's memory limit.
-start: java -Xms512M -Xmx{{vars.memory}}M -jar server.jar nogui
+# The heap is sized from the container's memory limit, which the JVM reads from the cgroup: at most 75%, so
+# metaspace, threads and direct buffers fit in the rest instead of getting the container OOM-killed under load.
+# Every Java line from 8u191 on knows these flags; Java 8 needs the decimal point.
+# terminal.jline=false stops Paper's line editor from echoing typed commands back into the console.
+start: java -XX:InitialRAMPercentage=25.0 -XX:MaxRAMPercentage=75.0 -Dterminal.jline=false -Dterminal.ansi=true -jar server.jar nogui
 ready: { log: 'Done \(\d' }
 stop: { command: stop, timeout: 60 }
 

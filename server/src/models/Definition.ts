@@ -8,6 +8,7 @@ import {
   type NonAttribute,
   type Sequelize,
 } from "sequelize";
+import type { DefinitionDto } from "@shared/api/definitions.ts";
 import type { GameDefinition } from "@shared/protocol/protocol.gen.ts";
 import { ID, intFk, jsonColumn } from "./columns.ts";
 import type { Source } from "./Source.ts";
@@ -48,6 +49,30 @@ export class Definition extends Model<InferAttributes<Definition>, InferCreation
       tableName: "definitions",
       indexes: [{ unique: true, fields: ["source_id", "game_id", "commit"] }],
     });
+  }
+
+  /**
+   * The create/settings form data. `admin_only` variables are dropped for non-admins, and a `secret`'s default is
+   * never shown. Needs `source` loaded.
+   */
+  public toClientJSON(isAdmin: boolean): DefinitionDto {
+    const variables = (this.document.variables ?? [])
+      .filter((variable) => isAdmin || !variable.admin_only)
+      .map((variable) => {
+        if (variable.type !== "secret") return variable;
+        const { default: _default, ...rest } = variable;
+        return rest;
+      });
+    return {
+      id: this.id,
+      gameId: this.gameId,
+      name: this.name,
+      source: this.source?.name ?? "",
+      commit: this.commit,
+      variables,
+      ports: this.document.ports ?? [],
+      syncedAt: this.updatedAt.toISOString(),
+    };
   }
 }
 

@@ -1,0 +1,113 @@
+.console {
+  display: flex;
+  flex-direction: column;
+  gap: var(--io-space-12);
+
+  &__status {
+    display: flex;
+    align-items: center;
+    gap: var(--io-space-8);
+    font-size: var(--io-text-sm);
+    color: var(--io-color-text-muted);
+  }
+
+  &__dot {
+    inline-size: 0.5rem;
+    block-size: 0.5rem;
+    border-radius: var(--io-radius-full);
+    background: var(--io-color-text-subtle);
+
+    &[data-live] {
+      background: var(--io-color-ok);
+    }
+  }
+
+  &__frame {
+    position: relative;
+  }
+
+  &__log {
+    block-size: clamp(14rem, 42vh, 32rem);
+    overflow: auto;
+    padding: var(--io-space-12) var(--io-space-16);
+    border-radius: var(--io-radius-panel);
+    background: var(--io-color-surface-soft);
+    border: 1px solid var(--io-color-line);
+    font-family: var(--io-font-mono);
+    font-size: var(--io-text-sm);
+    line-height: 1.5;
+    color: var(--io-color-text);
+    overscroll-behavior: contain;
+  }
+
+  // "Load older lines" sits at the top of the log and scrolls with it.
+  &__older {
+    display: flex;
+    justify-content: center;
+    padding-block-end: var(--io-space-8);
+  }
+
+  &__empty {
+    color: var(--io-color-text-muted);
+  }
+
+  &__line {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    min-block-size: 1.5em;
+
+    &[data-stream="input"] {
+      color: var(--io-color-hue-text-accent);
+
+      &::before {
+        content: "› ";
+      }
+    }
+
+    &[data-stream="system"] {
+      color: var(--io-color-text-muted);
+      font-style: italic;
+    }
+  }
+
+  &__jump {
+    position: absolute;
+    inset-block-end: var(--io-space-12);
+    inset-inline-end: var(--io-space-16);
+  }
+
+  &__input {
+    display: flex;
+    gap: var(--io-space-8);
+    align-items: flex-end;
+
+    > :first-child {
+      flex: 1;
+      min-inline-size: 0;
+    }
+  }
+
+  // ANSI attributes. The 16 colours are the theme's hue-text tokens so they hold contrast in both themes.
+  [data-bold] { font-weight: 700; }
+  [data-dim] { opacity: 0.7; }
+  [data-italic] { font-style: italic; }
+  [data-underline] { text-decoration: underline; }
+
+  [data-fg="0"], [data-fg="8"] { color: var(--io-color-text-muted); }
+  [data-fg="1"], [data-fg="9"] { color: var(--io-color-hue-text-bad); }
+  [data-fg="2"], [data-fg="10"] { color: var(--io-color-hue-text-ok); }
+  [data-fg="3"], [data-fg="11"] { color: var(--io-color-hue-text-warn); }
+  [data-fg="4"], [data-fg="12"] { color: var(--io-color-hue-text-info); }
+  [data-fg="5"], [data-fg="13"] { color: var(--io-color-hue-text-accent); }
+  [data-fg="6"], [data-fg="14"] { color: var(--io-color-hue-text-info); }
+  [data-fg="7"], [data-fg="15"] { color: var(--io-color-text); }
+
+  [data-bg] {
+    border-radius: var(--io-radius-sm);
+    background: color-mix(in srgb, var(--io-color-text-muted) 22%, transparent);
+  }
+  [data-bg="1"], [data-bg="9"] { background: color-mix(in srgb, var(--io-color-bad) 28%, transparent); }
+  [data-bg="2"], [data-bg="10"] { background: color-mix(in srgb, var(--io-color-ok) 28%, transparent); }
+  [data-bg="3"], [data-bg="11"] { background: color-mix(in srgb, var(--io-color-warn) 28%, transparent); }
+  [data-bg="4"], [data-bg="12"] { background: color-mix(in srgb, var(--io-color-info) 28%, transparent); }
+}

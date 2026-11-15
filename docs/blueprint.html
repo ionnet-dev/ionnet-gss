@@ -50,7 +50,7 @@ li { margin-bottom: 4px; }
 
 <div class="wrap">
 <header>
-  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestone 1 built, milestone 2 next</p>
+  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 and 2 built, milestone 2 in review</p>
   <h1>Ionnet GSS</h1>
   <p class="lead">Ionnet Game Server Studio. A game server manager: one control panel, an agent on every Host Machine, and one Docker container or stack per Game Server. Each game is a folder of configuration in a git repo, so adding a game means pushing a folder.</p>
   <p>This page is the design we agreed in three rounds of questions, plus the defaults I filled in around them. Rows tagged <span class="tag you">you chose</span> are settled. Rows tagged <span class="tag mine">my default</span> were my proposals, which you accepted on 2026-11-15.</p>
@@ -158,6 +158,7 @@ li { margin-bottom: 4px; }
     <tr><td>Extra packages</td><td>A definition may list <code>packages:</code>. The agent builds a small derived image (<code>FROM</code> the base, <code>apt-get install</code>) and caches it by hash.</td><td>This is "use the base as is and install through configuration" without running the game as root.</td><td><span class="tag mine">my default</span></td></tr>
     <tr><td>Stack example</td><td>Garry's Mod with a MariaDB beside it (for MySQLOO addons), as <code>garrys-mod-mysql</code> that <code>extends: garrys-mod</code>.</td><td>A stack you would really use, and it proves definition inheritance.</td><td><span class="tag mine">my default</span></td></tr>
     <tr><td>Ids</td><td>UUIDs for hosts and game servers, integers for everything else.</td><td>Server ids name folders and containers on hosts and appear in URLs.</td><td><span class="tag mine">my default</span></td></tr>
+    <tr><td>Outbound network</td><td>A game container cannot reach the host, other containers, private ranges or link-local addresses. The public internet stays open. An admin can allow private access per server.</td><td>Tenants must not reach services on the host or LAN, but installs, account checks and server lists need the internet.</td><td><span class="tag you">you chose</span></td></tr>
     <tr><td>Disk quota</td><td>Soft in v1: the agent measures usage, warns, and refuses to start a server over its limit.</td><td>Hard limits on bind mounts need XFS project quotas on every host.</td><td><span class="tag mine">my default</span></td></tr>
   </table></div>
 </section>
@@ -366,8 +367,9 @@ services:
   <div class="scroll"><table>
     <tr><th>Milestone</th><th>Status</th><th>Notes</th></tr>
     <tr><td>M0</td><td>Done</td><td>Blueprint agreed 2026-11-15.</td></tr>
-    <tr><td>M1 Spine</td><td>Built, in review</td><td>Panel sign-in, users, invites, hosts, enrol tokens and live updates; Go agent enrol, run, heartbeat and reconnect; web pages. Not committed or deployed.</td></tr>
-    <tr><td>M2 First server</td><td>Next</td><td>Base image, <code>gss-init</code>, definition engine, create/start/stop and the live console, proven with Minecraft.</td></tr>
+    <tr><td>M1 Spine</td><td>Done</td><td>Panel sign-in, users, invites, hosts, enrol tokens and live updates; Go agent enrol, run, heartbeat and reconnect; web pages. Reviewed, 15 findings fixed, committed as <code>84cfb97</code>.</td></tr>
+    <tr><td>M2 First server</td><td>Built, fixing review findings</td><td>Base and Minecraft images, <code>gss-init</code>, agent Docker side, definition engine, game server API, servers pages with live console. The review found 14 issues, the worst being mismatched console size limits that could disconnect a host. Not committed yet. The outbound network block is built right after the fixes.</td></tr>
+    <tr><td>M3 Definitions</td><td>Next</td><td>Git sources, remaining config formats, steamcmd, Garry's Mod and the stack.</td></tr>
   </table></div>
   <h3>M1 proof, real output from this machine</h3>
   <pre><code>$ gss-agent enrol --panel http://localhost:3200 --token gss_enrol_… --config …/agent.json
@@ -384,6 +386,34 @@ GET /api/hosts →
   memory: 62.6 GB   docker: 29.9.3
   portPool: 25565-25664,27015-27064</code></pre>
   <p>The Hosts page and Host detail page showed the same data in a headless browser with no page errors.</p>
+  <h3>M2 proof, real output from this machine</h3>
+  <pre><code>POST /api/servers  {name: "Survival", definition: minecraft-java, flavour: paper}
+  → state: installing (step 1 of 2, hook)   ports: game 25565/tcp   address: ionix:25565
+  → stopped → start → running
+
+console:
+  [18:14:37 INFO]: Done (7.132s)! For help, type "help"
+  list
+  [18:14:39 INFO]: System chat: There are 0 of a max of 20 players online:
+
+Minecraft server-list ping on 127.0.0.1:25565 →
+  version: Paper 26.3   players: 0 / 20   motd: "Ionnet GSS first server"
+
+agent restarted while the server ran:
+  INFO restored servers count=1
+  INFO attached to gss-init server=197c41e2… state=running lastSeq=71
+
+stop → "The game stopped (exit code 0)."   state: stopped</code></pre>
+  <p>The container is <code>ghcr.io/ionnet-dev/ionnet-gss-minecraft-server:java25</code>, built locally. A second server got port 25566, and deleting it removed its container, network and files. Nobody has joined with a real Minecraft client yet; the ping above speaks the same protocol the client's server list uses.</p>
+  <h3>How M2 was tested</h3>
+  <div class="scroll"><table>
+    <tr><th>Part</th><th>Tested against</th><th>Result</th></tr>
+    <tr><td>Whole chain</td><td>Real panel, agent, image and Paper server on this machine</td><td>Create, install, start, console in and out, agent restart, stop, delete all worked.</td></tr>
+    <tr><td>gss-init</td><td>Real image with a script game and Minecraft 26.3</td><td>Crash detection (exit 137), SIGKILL after an ignored stop, <code>docker stop</code> graceful in 0.8 s, no zombies, no data races.</td></tr>
+    <tr><td>Agent</td><td>A scripted panel, then the real image</td><td>Limits and dropped capabilities confirmed with <code>docker inspect</code>; events buffered while the panel was away arrived in order.</td></tr>
+    <tr><td>Panel</td><td>A scripted agent</td><td>Offline host gives 409 with no leftover rows or ports; a non-owner gets 404 and a refused console subscribe.</td></tr>
+    <tr><td>Web app</td><td>Mocked API (65 checks), then one real pass</td><td>Sign in, open the server, send a console command: worked with no page errors.</td></tr>
+  </table></div>
   <h3>Changes to the design found while building</h3>
   <div class="scroll"><table>
     <tr><th>Topic</th><th>What changed or was added</th></tr>
@@ -394,6 +424,11 @@ GET /api/hosts →
     <tr><td>Secrets</td><td>Stored unencrypted in the panel database and never sent to the browser. Encryption at rest is open.</td></tr>
     <tr><td>Sign-in</td><td>bcrypt and JWT bearer tokens with a per-user token version, so a password change or disable ends existing sessions.</td></tr>
     <tr><td>Web app tooling</td><td>npm instead of Deno, because of the Iontronic git dependency.</td></tr>
+    <tr><td>Container lifetime</td><td>The container stays up while the game is stopped, so <code>gss-init</code> and the console stay reachable. Its ports stay bound on the host during that time.</td></tr>
+    <tr><td>Settings</td><td>Changeable only while a server is stopped; saving re-provisions it. A server keeps the definition it was created from until then.</td></tr>
+    <tr><td>Capabilities</td><td>All dropped except the six <code>gss-init</code> needs to own <code>/data</code> and switch to uid 1000: CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL. <code>no-new-privileges</code> is set.</td></tr>
+    <tr><td>Deleting files</td><td>A non-root agent cannot remove root-owned files a container left behind, so it deletes them from a short-lived cleanup container.</td></tr>
+    <tr><td>Minecraft</td><td>Paper downloads use the v3 API (v2 is shut down). Default Java is 25 because Minecraft 26.3 needs it. The version field is free text; <code>latest</code> is resolved at install.</td></tr>
   </table></div>
 </section>
 </div>

@@ -6,6 +6,7 @@
 import type { QueryInterface } from "sequelize";
 import * as m20261115000000 from "./20261115000000-initial.ts";
 import * as m20261116000000 from "./20261116000000-m2-servers.ts";
+import * as m20261117000000 from "./20261117000000-server-deleting.ts";
 
 export interface Migration {
   name: string;
@@ -16,4 +17,5 @@ export interface Migration {
 export const migrations: Migration[] = [
   { name: "20261115000000-initial", ...m20261115000000 },
   { name: "20261116000000-m2-servers", ...m20261116000000 },
+  { name: "20261117000000-server-deleting", ...m20261117000000 },
 ];

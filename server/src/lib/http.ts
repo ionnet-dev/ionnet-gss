@@ -27,6 +27,24 @@ export async function readBody<T extends object>(c: Context): Promise<Partial<T>
 }
 
 /**
+ * Like `readBody`, but an empty body counts as `{}`. For actions whose body only holds optional flags.
+ */
+export async function readOptionalBody<T extends object>(c: Context): Promise<Partial<T>> {
+  const text = await c.req.text();
+  if (text.trim() === "") return {};
+  let body: unknown = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = null;
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw HttpError.badRequest("The request body must be a JSON object.");
+  }
+  return body as Partial<T>;
+}
+
+/**
  * A positive integer path parameter, or a 400.
  */
 export function paramInt(c: Context, name: string): number {

@@ -6,6 +6,7 @@ import {
   type Envelope,
   type ErrorCode,
   HELLO_TIMEOUT_SEC,
+  MAX_FRAME_BYTES,
   type PanelToAgentEvents,
   type PanelToAgentRequests,
 } from "@shared/protocol/protocol.gen.ts";
@@ -15,9 +16,10 @@ import { AgentGateway } from "./AgentGateway.ts";
 import { EVENT_HANDLERS, REQUEST_HANDLERS } from "./handlers/index.ts";
 
 /**
- * Largest text frame accepted from an agent (matches the agent's own `MaxFrameBytes`).
+ * Largest text frame accepted from an agent: MAX_FRAME_BYTES of UTF-8 (the agent never sends more). A UTF-16 string
+ * never has more code units than its UTF-8 form has bytes, so the cheap length check comes first.
  */
-const MAX_FRAME_CHARS = 4 * 1024 * 1024;
+const _encoder = new TextEncoder();
 /**
  * WebSocket close reasons are limited to 123 bytes; a longer one makes `close()` throw and the socket stays open.
  */
@@ -97,7 +99,9 @@ export class AgentConnection {
   public async handleFrame(text: string): Promise<void> {
     this.lastFrameAt = Date.now();
     if (this.phase === "closed") return;
-    if (text.length > MAX_FRAME_CHARS) return this._protocolError("Frame is too large.");
+    if (text.length > MAX_FRAME_BYTES || (text.length * 3 > MAX_FRAME_BYTES && _encoder.encode(text).length > MAX_FRAME_BYTES)) {
+      return this._protocolError("Frame is too large.");
+    }
 
     let envelope: Envelope;
     try {

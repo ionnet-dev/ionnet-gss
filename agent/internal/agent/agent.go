@@ -12,6 +12,7 @@ import (
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/docker"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/hostfacts"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/panel"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/paths"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/protocol"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/servers"
 )
@@ -21,25 +22,40 @@ type Agent struct {
 	Config  config.Config
 	Docker  docker.Client
 	Facts   hostfacts.Collector
-	Servers servers.Manager // nil in M1.
+	Servers servers.Manager
+	// Outbox carries server events to the panel and buffers state changes while it is away.
+	Outbox *panel.Outbox
 }
 
-// New builds an agent from a loaded config (defaults applied).
+// New builds an agent from a loaded config (defaults applied). Servers live below Config.DataRoot.
 func New(cfg config.Config) (*Agent, error) {
 	cfg = cfg.WithDefaults()
 	dockerClient, err := docker.New(cfg.DockerHost)
 	if err != nil {
 		return nil, err
 	}
+	outbox := panel.NewOutbox(panel.DefaultOutboxLimit, panel.DefaultOutboxBytes)
 	return &Agent{
 		Config: cfg,
 		Docker: dockerClient,
 		Facts:  hostfacts.New(cfg.DataRoot, dockerClient),
+		Servers: servers.New(servers.Options{
+			Layout: paths.Layout{Root: cfg.DataRoot},
+			Docker: dockerClient,
+			Sink:   panelSink{outbox: outbox},
+		}),
+		Outbox: outbox,
 	}, nil
 }
 
-// Run connects and stays connected until ctx ends or the panel revokes the host.
+// Run restores the servers on this host, then connects and stays connected until ctx ends or the panel revokes
+// the host. Servers keep running when it returns.
 func (a *Agent) Run(ctx context.Context) error {
+	go a.Outbox.Run(ctx)
+	defer a.Servers.Close()
+	if err := a.Servers.Restore(ctx); err != nil {
+		return fmt.Errorf("restore servers: %w", err)
+	}
 	session := &panel.Session{
 		PanelURL:    a.Config.PanelURL,
 		HostID:      a.Config.HostID,
@@ -48,6 +64,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		Hello:       a.hello,
 		OnConnected: a.onConnected,
 		Handlers:    a.handlers(),
+		Outbox:      a.Outbox,
 	}
 	return session.Run(ctx)
 }
@@ -55,7 +72,7 @@ func (a *Agent) Run(ctx context.Context) error {
 // defaultHeartbeat is used when the panel does not name a usable interval.
 const defaultHeartbeat = 15 * time.Second
 
-// hello builds the hello request: fresh facts and (M2) every server's status.
+// hello builds the hello request: fresh facts and every server's status (the inventory the panel reconciles).
 func (a *Agent) hello(ctx context.Context) (protocol.HelloRequest, error) {
 	facts, err := a.Facts.Collect(ctx)
 	if err != nil {
@@ -66,7 +83,7 @@ func (a *Agent) hello(ctx context.Context) (protocol.HelloRequest, error) {
 		Credential:      a.Config.Credential,
 		ProtocolVersion: protocol.ProtocolVersion,
 		Facts:           facts,
-		Servers:         []protocol.ServerStatus{},
+		Servers:         a.Servers.Statuses(),
 	}, nil
 }
 
@@ -107,25 +124,83 @@ func (a *Agent) heartbeatLoop(ctx context.Context, conn panel.Conn, interval tim
 	}
 }
 
+// Operation timeouts for panel requests. They run detached from the connection, so a panel that drops mid-way
+// doesn't leave a provision half done.
+const (
+	provisionTimeout = time.Duration(protocol.ProvisionTimeoutSec) * time.Second // includes an image pull
+	restartTimeout   = 10 * time.Minute                                          // includes a graceful stop
+	operationTimeout = 2 * time.Minute
+)
+
 // handlers maps panel → agent request types to their handlers. A new panel → agent request: schema in protocol/,
 // `deno task protocol`, a method on Agent, one entry here.
 func (a *Agent) handlers() panel.Handlers {
 	return panel.Handlers{
 		Requests: map[string]panel.RequestHandler{
-			// M2: protocol.MsgServerProvision, MsgServerStart, MsgServerStop, MsgServerDelete, MsgServerInput,
-			// MsgServerBacklog → a.Servers.
-			protocol.MsgServerProvision: unsupported,
-			protocol.MsgServerStart:     unsupported,
-			protocol.MsgServerRestart:   unsupported,
-			protocol.MsgServerStop:      unsupported,
-			protocol.MsgServerDelete:    unsupported,
-			protocol.MsgServerInput:     unsupported,
-			protocol.MsgServerBacklog:   unsupported,
+			protocol.MsgServerProvision: serve(provisionTimeout, func(ctx context.Context, req protocol.ProvisionRequest) (any, error) {
+				return a.Servers.Provision(ctx, req)
+			}),
+			protocol.MsgServerStart: serve(provisionTimeout, func(ctx context.Context, req protocol.ServerRef) (any, error) {
+				return a.Servers.Start(ctx, req.ServerID)
+			}),
+			protocol.MsgServerRestart: serve(restartTimeout, func(ctx context.Context, req protocol.ServerRef) (any, error) {
+				return a.Servers.Restart(ctx, req.ServerID)
+			}),
+			protocol.MsgServerStop: serve(operationTimeout, func(ctx context.Context, req protocol.StopRequest) (any, error) {
+				return a.Servers.Stop(ctx, req.ServerID, req.Kill)
+			}),
+			protocol.MsgServerDelete: serve(restartTimeout, func(ctx context.Context, req protocol.DeleteRequest) (any, error) {
+				return protocol.Empty{}, a.Servers.Delete(ctx, req.ServerID, req.KeepData)
+			}),
+			protocol.MsgServerInput: serve(operationTimeout, func(ctx context.Context, req protocol.InputRequest) (any, error) {
+				return protocol.Empty{}, a.Servers.Input(ctx, req.ServerID, req.Line)
+			}),
+			protocol.MsgServerBacklog: serve(operationTimeout, func(ctx context.Context, req protocol.BacklogRequest) (any, error) {
+				return a.Servers.Backlog(ctx, req.ServerID, req.Limit, req.BeforeSeq)
+			}),
 		},
 	}
 }
 
-// unsupported answers requests this agent version cannot handle yet.
-func unsupported(ctx context.Context, data json.RawMessage) (any, error) {
-	return nil, &protocol.RemoteError{Code: protocol.ErrorCodeUnsupported, Message: "this gss-agent version does not run game servers yet; update the agent"}
+// serve decodes a request into T and runs fn with its own timeout, detached from the connection's context.
+func serve[T any](timeout time.Duration, fn func(ctx context.Context, req T) (any, error)) panel.RequestHandler {
+	return func(ctx context.Context, data json.RawMessage) (any, error) {
+		var req T
+		if len(data) == 0 {
+			return nil, &protocol.RemoteError{Code: protocol.ErrorCodeBadRequest, Message: "The request has no data."}
+		}
+		if err := json.Unmarshal(data, &req); err != nil {
+			return nil, &protocol.RemoteError{Code: protocol.ErrorCodeBadRequest, Message: fmt.Sprintf("The request data does not match the protocol: %v.", err)}
+		}
+		opCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		defer cancel()
+		res, err := fn(opCtx, req)
+		if err != nil {
+			return nil, err
+		}
+		return res, nil
+	}
+}
+
+// panelSink forwards server reports through the outbox. While the panel is away state changes and player events
+// are kept, console lines are buffered (dropped first; a restarted agent's catch-up arrives this way), and stats are
+// dropped (the next sample replaces them).
+type panelSink struct {
+	outbox *panel.Outbox
+}
+
+func (p panelSink) Console(batch protocol.ConsoleBatch) {
+	p.outbox.Emit(protocol.MsgServerConsole, batch, panel.DeliverBuffered)
+}
+
+func (p panelSink) State(change protocol.StateChange) {
+	p.outbox.Emit(protocol.MsgServerState, change, panel.DeliverAlways)
+}
+
+func (p panelSink) Stats(batch protocol.StatsBatch) {
+	p.outbox.Emit(protocol.MsgServerStats, batch, panel.DeliverOnline)
+}
+
+func (p panelSink) Player(event protocol.PlayerEvent) {
+	p.outbox.Emit(protocol.MsgServerPlayer, event, panel.DeliverKept)
 }

@@ -1,16 +1,13 @@
 // Package servers runs game servers on this host (M2): folders, images, networks, containers, the supervisor
-// sockets, stats sampling, and the state file. The panel decides; this package carries it out.
+// sockets, and the state file. The panel decides; this package carries it out.
 package servers
 
 import (
 	"context"
-	"errors"
+	"fmt"
 
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/protocol"
 )
-
-// ErrNotImplemented marks skeleton functions.
-var ErrNotImplemented = errors.New("servers: not implemented")
 
 // Sink receives what servers report, for forwarding to the panel (server.console / server.state / server.stats /
 // server.player events). Calls must not block for long; the panel connection buffers while offline.
@@ -21,10 +18,14 @@ type Sink interface {
 	Player(event protocol.PlayerEvent)
 }
 
-// Manager is the agent's server lifecycle. Every method is idempotent and safe to retry after a reconnect.
+// Manager is the agent's server lifecycle. Every method is idempotent and safe to retry after a reconnect. Expected
+// failures are *protocol.RemoteError (bad_request, not_found, conflict, unsupported, or gss-init's own answer);
+// anything else is an internal error.
 type Manager interface {
-	// Restore runs at startup: reattach to running containers' sockets, start autostart servers that were running
-	// before a reboot.
+	// Restore runs at startup: load every server folder, reattach to running containers' sockets, start autostart
+	// servers that were running before a reboot. It returns once every server attached or after restoreWait at the
+	// latest; slower ones (an image pull, a container that is slow to boot) go on in the background and report
+	// through state changes.
 	Restore(ctx context.Context) error
 	// Statuses lists every server this agent manages (the hello request's `servers`).
 	Statuses() []protocol.ServerStatus
@@ -35,7 +36,17 @@ type Manager interface {
 	Stop(ctx context.Context, serverID string, kill bool) (protocol.ServerStatus, error)
 	Delete(ctx context.Context, serverID string, keepData bool) error
 	Input(ctx context.Context, serverID, line string) error
-	Backlog(ctx context.Context, serverID string, limit int64) ([]protocol.ConsoleLine, error)
+	// Backlog is the newest `limit` lines (before beforeSeq when it is > 0), within the CONSOLE_BATCH_* limits.
+	Backlog(ctx context.Context, serverID string, limit, beforeSeq int64) (protocol.BacklogResponse, error)
 	// Close detaches from every socket; servers keep running.
 	Close() error
+}
+
+// remoteError builds an error the panel receives with code and a readable message.
+func remoteError(code protocol.ErrorCode, format string, args ...any) error {
+	return &protocol.RemoteError{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+func notFound(serverID string) error {
+	return remoteError(protocol.ErrorCodeNotFound, "This agent does not manage server %s. Provision it first (the panel does this on create and on reconnect).", serverID)
 }

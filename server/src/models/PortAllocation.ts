@@ -10,9 +10,10 @@ import {
 } from "sequelize";
 import { PORT_PROTO_VALUES, type PortDecl, type PortProto } from "@shared/protocol/protocol.gen.ts";
 import { HttpError } from "../lib/HttpError.ts";
+import { isInPool, parsePortPool } from "../lib/portPool.ts";
 import { ID, uuidFk } from "./columns.ts";
 import type { GameServer } from "./GameServer.ts";
-import type { Host } from "./Host.ts";
+import { Host } from "./Host.ts";
 
 /**
  * A published port taken from a host's pool (M2). The same number is used on the host and inside the container.
@@ -49,11 +50,68 @@ export class PortAllocation extends Model<InferAttributes<PortAllocation>, Infer
 
   /**
    * Allocate every published port of a definition for a new server: the declared `default` when free and in the
-   * pool, else the lowest free port in the pool. The unique index settles races (retry on conflict).
-   * @throws HttpError 409 naming the pool when it is exhausted.
+   * pool, else the lowest free port in the pool. Internal ports are skipped. The host row is locked for the
+   * transaction, so two creates on one host take turns (and the unique index backs that up).
+   * @param pinned PORTS_OVERRIDE: port name → number, taken as is (any number 1-65535) when free on the host.
+   * @throws HttpError 409 naming the pool when it is exhausted or a pinned port is taken; 400 for a bad pinned port.
    */
-  public static async allocate(host: Host, serverId: string, ports: PortDecl[], transaction: Transaction): Promise<PortAllocation[]> {
-    throw HttpError.notImplemented("PortAllocation.allocate"); // TODO(builder): M2
+  public static async allocate(
+    host: Host,
+    serverId: string,
+    ports: PortDecl[],
+    transaction: Transaction,
+    pinned?: Record<string, number>,
+  ): Promise<PortAllocation[]> {
+    const published = ports.filter((port) => !port.internal);
+    for (const name of Object.keys(pinned ?? {})) {
+      if (!published.some((port) => port.name === name)) {
+        throw HttpError.badRequest(`There is no published port "${name}" to pin. This game has: ${published.map((p) => p.name).join(", ") || "none"}.`);
+      }
+    }
+    if (published.length === 0) return [];
+
+    await Host.findByPk(host.id, { transaction, lock: transaction.LOCK.UPDATE });
+    const ranges = parsePortPool(host.portPool);
+    const taken = await PortAllocation.findAll({ where: { hostId: host.id }, attributes: ["proto", "port"], transaction });
+    const used = new Set(taken.map((row) => `${row.proto}/${row.port}`));
+
+    const created: PortAllocation[] = [];
+    for (const decl of published) {
+      const key = (port: number) => `${decl.proto}/${port}`;
+      let port: number | null = null;
+      const wanted = pinned?.[decl.name];
+      if (wanted !== undefined) {
+        if (!Number.isInteger(wanted) || wanted < 1 || wanted > 65535) throw HttpError.badRequest(`The port for "${decl.name}" must be a number from 1 to 65535.`);
+        if (used.has(key(wanted))) throw HttpError.conflict(`${decl.proto.toUpperCase()} port ${wanted} is already in use on ${host.name}.`);
+        port = wanted;
+      }
+      else if (decl.default !== undefined && isInPool(ranges, decl.default) && !used.has(key(decl.default))) {
+        port = decl.default;
+      }
+      else {
+        search: for (const range of ranges) {
+          for (let candidate = range.start; candidate <= range.end; candidate++) {
+            if (!used.has(key(candidate))) {
+              port = candidate;
+              break search;
+            }
+          }
+        }
+      }
+      if (port === null) {
+        throw HttpError.conflict(`${host.name} has no free ${decl.proto.toUpperCase()} port left in its pool (${host.portPool}). Ask an administrator to widen the pool.`);
+      }
+      used.add(key(port));
+      created.push(await PortAllocation.create({
+        hostId: host.id,
+        serverId,
+        name: decl.name,
+        proto: decl.proto,
+        port,
+        pinned: wanted !== undefined,
+      }, { transaction }));
+    }
+    return created;
   }
 }
 

@@ -47,6 +47,8 @@ export interface ServerVariableDto {
   type: VariableType;
   options: string[] | null; // `select` choices.
   unit: string | null;
+  min: number | null; // `number` only: accepted range.
+  max: number | null;
   reinstall: boolean; // Changing it re-runs install at the next start.
   adminOnly: boolean;
   /**
@@ -104,9 +106,11 @@ export interface ConsoleInputBody {
 }
 
 /**
- * `GET /api/servers/:id/console?limit=200` (max 1000). The client subscribes to `server:<id>` first, then fetches
- * this and drops live lines with `seq` ≤ the last backlog line.
+ * `GET /api/servers/:id/console?limit=200&before=<seq>` (max 1000 lines, and at most 1 MiB: the agent cuts long
+ * answers). The client subscribes to `server:<id>` first, then fetches this and drops live lines with `seq` ≤ the
+ * last backlog line. `before` pages back from the first `seq` of the previous page.
  */
 export interface ConsoleBacklogResponse {
   lines: ConsoleLine[];
+  more: boolean; // Older lines exist: fetch again with before = lines[0].seq.
 }

@@ -18,6 +18,10 @@ type Console interface {
 	Append(stream protocol.ConsoleStream, text string) protocol.ConsoleLine
 	// After returns up to limit lines with seq > afterSeq, oldest first.
 	After(afterSeq, limit int64) []protocol.ConsoleLine
+	// Page answers a backlog request: lines with afterSeq < seq < beforeSeq (0 = no upper bound), at most limit
+	// (0 = no own limit) and always within CONSOLE_BATCH_MAX_LINES and CONSOLE_BATCH_MAX_BYTES of encoded JSON. When
+	// not all fit, tail keeps the newest lines and otherwise the oldest; more reports that lines were left out.
+	Page(afterSeq, beforeSeq, limit int64, tail bool) (lines []protocol.ConsoleLine, more bool)
 	LastSeq() int64
 	// Subscribe delivers every new line until cancel is called.
 	Subscribe() (lines <-chan protocol.ConsoleLine, cancel func())

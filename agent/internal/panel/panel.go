@@ -171,9 +171,12 @@ func Enrol(ctx context.Context, panelURL, token string, insecure bool, facts pro
 
 // writeEnvelope sends one envelope as a text frame.
 func writeEnvelope(ctx context.Context, ws *websocket.Conn, env protocol.Envelope) error {
-	raw, err := json.Marshal(env)
+	raw, err := protocol.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", env.Type, err)
+	}
+	if len(raw) > protocol.MaxFrameBytes {
+		return fmt.Errorf("%s %s is %d bytes, over the %d-byte frame limit", env.Kind, env.Type, len(raw), protocol.MaxFrameBytes)
 	}
 	return ws.Write(ctx, websocket.MessageText, raw)
 }
@@ -223,6 +226,8 @@ type Session struct {
 	// OnConnected runs after a successful hello, with the open connection (start the heartbeat loop there).
 	OnConnected func(ctx context.Context, conn Conn, hello protocol.HelloResponse)
 	Handlers    Handlers
+	// Outbox (may be nil) carries agent → panel events; it sends over each connection after its hello succeeded.
+	Outbox *Outbox
 }
 
 // stableAfter is how long a connection must have been up before the next reconnect starts from BackoffMin again.
@@ -297,6 +302,10 @@ func (s *Session) runOnce(ctx context.Context) error {
 		return classify(err)
 	}
 	slog.Info("connected to the panel", "host", res.HostName, "panel", res.PanelVersion, "heartbeatSec", res.HeartbeatSec)
+	if s.Outbox != nil {
+		s.Outbox.attach(conn)
+		defer s.Outbox.detach(conn)
+	}
 	if s.OnConnected != nil {
 		s.OnConnected(connCtx, conn, res)
 	}
