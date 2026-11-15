@@ -50,7 +50,7 @@ li { margin-bottom: 4px; }
 
 <div class="wrap">
 <header>
-  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 and 2 done, milestone 3 built and in review</p>
+  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 to 3 done, milestone 4 next</p>
   <h1>Ionnet GSS</h1>
   <p class="lead">Ionnet Game Server Studio. A game server manager: one control panel, an agent on every Host Machine, and one Docker container or stack per Game Server. Each game is a folder of configuration in a git repo, so adding a game means pushing a folder.</p>
   <p>This page is the design we agreed in three rounds of questions, plus the defaults I filled in around them. Rows tagged <span class="tag you">you chose</span> are settled. Rows tagged <span class="tag mine">my default</span> were my proposals, which you accepted on 2026-11-15.</p>
@@ -352,6 +352,18 @@ services:
 </section>
 
 <section class="open">
+  <h2>Open questions</h2>
+  <ol class="flow">
+    <li>User namespaces or a uid per server. Every game process runs as uid 1000 on the host, the same user for all tenants. Needs Docker configuration on each host.</li>
+    <li>Hard disk quotas. Today a server over its limit is stopped within minutes; a hard limit needs XFS project quotas or per-server disk images.</li>
+    <li>Encryption at rest for generated secrets and git tokens in the panel database.</li>
+    <li>Git tokens use HTTP Basic auth and were only tested against a local git server, not GitHub or GitLab.</li>
+    <li>No GitHub repo yet, images are only built locally, and nothing is deployed to hostion.</li>
+    <li>Known egress limits: neighbours on public addresses are reachable, Docker's built-in DNS can resolve the host's private names, and a server cannot reach another local server through the host's public IP.</li>
+  </ol>
+</section>
+
+<section class="open">
   <h2>Answered on 2026-11-15</h2>
   <ol class="flow">
     <li>GSS stands for Game Server Studio. The product name in the UI is "Ionnet GSS".</li>
@@ -370,7 +382,7 @@ services:
     <tr><td>M1 Spine</td><td>Done</td><td>Panel sign-in, users, invites, hosts, enrol tokens and live updates; Go agent enrol, run, heartbeat and reconnect; web pages. Reviewed, 15 findings fixed, committed as <code>84cfb97</code>.</td></tr>
     <tr><td>M2 First server</td><td>Done</td><td>Base and Minecraft images, <code>gss-init</code>, agent Docker side, definition engine, game server API, servers pages with live console. Reviewed, 14 findings fixed, committed as <code>1ac1557</code>.</td></tr>
     <tr><td>Outbound block</td><td>Done</td><td>Private, host and link-local destinations are rejected by default; admin switch per server. Committed as <code>a6b884f</code>. Not separately reviewed yet.</td></tr>
-    <tr><td>M3 Definitions</td><td>Built, in review</td><td>Git sources with pinning and upgrade, <code>ini</code>/<code>json</code>/<code>yaml</code>/<code>cfg</code> formats, steamcmd, derived images for packages, stacks, dynamic dropdowns, Garry's Mod and Garry's Mod + MariaDB. Not committed yet.</td></tr>
+    <tr><td>M3 Definitions</td><td>Done</td><td>Git sources with pinning and upgrade, <code>ini</code>/<code>json</code>/<code>yaml</code>/<code>cfg</code> formats, steamcmd, derived images for packages, stacks, dynamic dropdowns, Garry's Mod and Garry's Mod + MariaDB. Reviewed together with the outbound block; 15 findings fixed; committed as <code>1a1d15a</code>.</td></tr>
     <tr><td>M4 Operations</td><td>Next</td><td>File manager, backups and restore, metrics and players.</td></tr>
   </table></div>
   <h3>M1 proof, real output from this machine</h3>
@@ -443,7 +455,8 @@ Git source
     <tr><td>Data root on a RAM disk</td><td>steamcmd was killed at the memory limit, because files written to tmpfs count as the container's memory. The agent now warns at startup. Hosts must keep the data root on disk.</td></tr>
     <tr><td>Garry's Mod packages</td><td>The extra 32-bit packages were not needed; the base image runs the Source server as is.</td></tr>
     <tr><td>Minecraft memory</td><td>Paper is killed on start at 1024 MB. The minimum is now 1536 MB.</td></tr>
-    <tr><td>Ports used by other software</td><td>The allocator handed out 27015 while another container on the host held it. The create failed and rolled back cleanly. Open: make the panel skip ports the host reports as busy.</td></tr>
+    <tr><td>Ports used by other software</td><td>The allocator handed out 27015 while another container on the host held it. Fixed: the agent reports which pool ports are bound on the host, the allocator skips them, and a bind failure retries once on the next port.</td></tr>
+    <tr><td>Doubled console lines</td><td>The Source server prints each warning twice on a terminal (once in red, once plain). The console shows what the game prints; nothing to fix.</td></tr>
   </table></div>
   <h3>How M2 was tested</h3>
   <div class="scroll"><table>
@@ -478,7 +491,12 @@ Git source
     <tr><td>Dynamic dropdowns</td><td>The panel fetches the choices from an https URL the definition declares, on an allowlist of hosts, capped and cached. This replaces the hook idea in the example above. If the fetch fails, the field becomes free text checked against a pattern.</td></tr>
     <tr><td>Stacks</td><td>Service containers share the server's network under the service name, are never published, start before the game and stop after it. Default limits are 512 MB and half a core, counted against host capacity.</td></tr>
     <tr><td>Git sources</td><td>The panel reads definition files straight from the fetched commit without checking anything out, so repository hooks, symlinks and filters never touch the panel host. Adding a source syncs it.</td></tr>
-    <tr><td>Upgrades</td><td>A server moves to a newer definition version only while stopped, and reinstalls only when install steps or a reinstall-flagged setting changed.</td></tr>
+    <tr><td>Upgrades</td><td>A server moves to a newer definition version only while stopped, and reinstalls only when install steps or a reinstall-flagged setting changed. Values the new version rejects can be replaced in the same step. A failed upgrade puts the old spec and ports back.</td></tr>
+    <tr><td>Firewall self-check</td><td>The agent lists its table every minute and rebuilds it when it is missing or different, and the Hosts page reports that check. In a test the table was back 26 s after being deleted.</td></tr>
+    <tr><td>Container restarts</td><td>Game containers no longer restart on their own. After a reboot the agent applies the firewall rules first, then starts servers marked autostart. If the rules cannot be applied, restricted servers stay down with a reason.</td></tr>
+    <tr><td>Disk limit and stacks</td><td>A stack's database files count toward the server's disk limit.</td></tr>
+    <tr><td>Validation patterns</td><td>Patterns with nested or ambiguous repetition are refused when a definition is validated, so a user's value cannot stall the panel.</td></tr>
+    <tr><td>Images in definitions</td><td>An image name cannot contain free-text user values; only a select with a fixed list may choose an image.</td></tr>
   </table></div>
 </section>
 </div>
