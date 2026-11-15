@@ -340,3 +340,19 @@ func (c *unixClient) ContainerStats(ctx context.Context, name string) (Stats, er
 	}
 	return out, nil
 }
+
+func (c *unixClient) ContainerPause(ctx context.Context, name string) error {
+	err := c.call(ctx, http.MethodPost, "/containers/"+name+"/pause", nil, nil, nil)
+	if err != nil && !IsConflict(err) {
+		return fmt.Errorf("pause container %s: %w", name, err)
+	}
+	return nil
+}
+
+func (c *unixClient) ContainerUnpause(ctx context.Context, name string) error {
+	err := c.call(ctx, http.MethodPost, "/containers/"+name+"/unpause", nil, nil, nil)
+	if err != nil && !IsConflict(err) {
+		return fmt.Errorf("unpause container %s: %w", name, err)
+	}
+	return nil
+}

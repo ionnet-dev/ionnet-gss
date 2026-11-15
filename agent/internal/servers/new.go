@@ -53,6 +53,8 @@ type Options struct {
 	Images images.Resolver
 	// Stacks runs the `services` of a stack (M3). nil = stacks.New on Layout and Docker.
 	Stacks stacks.Stack
+	// Transfers is closed per server before a restore swaps its data folder (M4). nil = nothing to close.
+	Transfers TransferCloser
 }
 
 // Timing (M2).
@@ -109,6 +111,7 @@ func New(opts Options) Manager {
 	go m.diskLoop()
 	go m.healLoop()
 	go m.servicesLoop()
+	go m.statsLoop()
 	return m
 }
 

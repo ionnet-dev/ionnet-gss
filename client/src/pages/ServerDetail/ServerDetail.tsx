@@ -1,12 +1,15 @@
 import { type FormEvent, type ReactNode, useState } from "react";
 import { AlertDialog, Badge, Button, Card, CardBody, CardFooter, CardHeader, Dialog, Grid, IconTile, Menu, Spinner, Stack, Tabs } from "@ionnet/iontronic/react";
-import { ArrowLeft, CircleArrowUp, Download, Ellipsis, Hammer, Play, RotateCw, Settings, Square, SquareTerminal, TriangleAlert, Zap } from "@ionnet/iontronic/icons";
+import { Activity, Archive, ArrowLeft, CircleArrowUp, Download, Ellipsis, FolderOpen, Hammer, Play, RotateCw, Settings, Square, SquareTerminal, TriangleAlert, Zap } from "@ionnet/iontronic/icons";
 import type { GameServerDetailResponse } from "@shared/api/servers.ts";
 import type { ServerState } from "@shared/protocol/protocol.gen.ts";
 import { ApiError } from "@/Api/BaseApi.ts";
 import { DefinitionApi } from "@/Api/DefinitionApi.ts";
 import { ServerApi } from "@/Api/ServerApi.ts";
+import BackupList from "@/components/BackupList/BackupList.tsx";
 import Console from "@/components/Console/Console.tsx";
+import FileManager from "@/components/FileManager/FileManager.tsx";
+import MetricsPanel from "@/components/MetricsPanel/MetricsPanel.tsx";
 import FormError from "@/components/FormError/FormError.tsx";
 import CopyButton from "@/components/CopyButton/CopyButton.tsx";
 import { formatAgo, formatBytes, formatCommit } from "@/components/Format/format.ts";
@@ -44,7 +47,7 @@ export default function ServerDetail(props: Props) {
   const serverId = match.params[0];
   const resource = ServerApi.useServer(serverId);
   const patches = ServerApi.useStatePatches(serverId);
-  const [tab, setTab] = useState("console");
+  const [tab, setTab] = useState("overview");
   const server = resource.data ? ServerApi.applyState(resource.data, patches[serverId]) : null;
   const services = ServerApi.useServices(resource.data);
 
@@ -91,15 +94,27 @@ export default function ServerDetail(props: Props) {
       )}
       <Tabs.Root value={tab} onValueChange={(value) => setTab(String(value))}>
         <Tabs.List>
+          <Tabs.Tab value="overview" icon={Activity}>Overview</Tabs.Tab>
           <Tabs.Tab value="console" icon={SquareTerminal}>Console</Tabs.Tab>
+          <Tabs.Tab value="files" icon={FolderOpen}>Files</Tabs.Tab>
+          <Tabs.Tab value="backups" icon={Archive}>Backups</Tabs.Tab>
           <Tabs.Tab value="settings" icon={Settings}>Settings</Tabs.Tab>
         </Tabs.List>
+        <Tabs.Panel value="overview">
+          <MetricsPanel server={server} />
+        </Tabs.Panel>
         <Tabs.Panel value="console">
           <Card>
             <CardBody>
               <Console serverId={server.id} canSend={server.state === "running"} />
             </CardBody>
           </Card>
+        </Tabs.Panel>
+        <Tabs.Panel value="files">
+          <FileManager server={server} />
+        </Tabs.Panel>
+        <Tabs.Panel value="backups">
+          <BackupList server={server} />
         </Tabs.Panel>
         <Tabs.Panel value="settings">
           <ServerSettings server={server} onChanged={resource.reload} />

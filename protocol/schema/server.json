@@ -8,7 +8,11 @@
     "CONSOLE_BATCH_MAX_LINES": { "value": 500, "description": "Most lines in one `server.console` batch or one backlog response." },
     "CONSOLE_BATCH_MAX_BYTES": { "value": 1048576, "description": "Most bytes of encoded JSON lines in one `server.console` batch or one backlog response (gss-init's and the agent's), so a frame of console data always stays far below `MAX_FRAME_BYTES`." },
     "CONSOLE_BACKLOG_MAX_LINES": { "value": 1000, "description": "Most lines one `server.backlog` request may ask for." },
-    "PROVISION_TIMEOUT_SEC": { "value": 900, "description": "How long the agent works on one `server.provision` (image pull included) before it gives up and answers `timeout`. The panel waits a little longer, so the agent's answer always arrives first." }
+    "PROVISION_TIMEOUT_SEC": { "value": 900, "description": "How long the agent works on one `server.provision` (image pull included) before it gives up and answers `timeout`. The panel waits a little longer, so the agent's answer always arrives first." },
+    "STATS_INTERVAL_SEC": { "value": 5, "description": "How often the agent samples Docker stats of every server whose game is starting or running (M4)." },
+    "STATS_DISK_INTERVAL_SEC": { "value": 60, "description": "How often a sample carries `diskBytes` (data/ + services/, the disk check's measurement); null in the samples between." },
+    "PLAYERS_MAX": { "value": 1000, "description": "Most players gss-init tracks per server; joins beyond it are ignored until someone leaves." },
+    "PLAYER_NAME_MAX_CHARS": { "value": 64, "description": "Longer captured names are cut." }
   },
   "x-messages": [
     {
@@ -57,14 +61,14 @@
       "description": "A server changed state."
     },
     {
-      "channel": "agent", "type": "server.stats", "kind": "event", "from": "agent", "milestone": 2,
+      "channel": "agent", "type": "server.stats", "kind": "event", "from": "agent", "milestone": 4,
       "data": "StatsBatch",
-      "description": "Docker stats for every running server, every 5 seconds."
+      "description": "Docker stats for every server whose game is starting or running, every STATS_INTERVAL_SEC (one batch per agent; servers without a sample are left out). Dropped while the panel is away."
     },
     {
       "channel": "agent", "type": "server.player", "kind": "event", "from": "agent", "milestone": 4,
       "data": "PlayerEvent",
-      "description": "A player joined or left (from the definition's `players` patterns)."
+      "description": "A player joined or left (from the definition's `players` patterns). The list resets when the game process stops; the current list is also in `ServerStatus.players`."
     },
     {
       "channel": "agent", "type": "server.update", "kind": "request", "from": "panel", "milestone": 3,
@@ -93,7 +97,9 @@
         "specHash": { "type": "string", "description": "SHA-256 of the spec the server currently runs, as sent in `ProvisionRequest`. In `hello`, a hash that differs from the panel's makes the panel re-provision (while stopped)." },
         "installProgress": { "oneOf": [{ "$ref": "#/$defs/InstallProgress" }, { "type": "null" }] },
         "reason": { "type": ["string", "null"], "description": "Cause of install_failed / crashed, as in the last StateChange." },
-        "services": { "type": "array", "items": { "$ref": "#/$defs/ServiceStatus" }, "description": "Stack services (M3); empty for single-container servers." }
+        "services": { "type": "array", "items": { "$ref": "#/$defs/ServiceStatus" }, "description": "Stack services (M3); empty for single-container servers." },
+        "players": { "type": "array", "items": { "type": "string" }, "description": "Players online now, in join order (M4, from gss-init's `InitStatus.players`). Absent from older agents; empty when the game isn't running." },
+        "operation": { "oneOf": [{ "$ref": "backup.json#/$defs/BackupOperationStatus" }, { "type": "null" }], "description": "The backup or restore running right now (M4). In `hello`, a panel backup row that is pending/running but not named here failed (the agent restarted)." }
       },
       "required": ["serverId", "state", "since", "exitCode", "specHash", "installProgress", "reason", "services"]
     },
@@ -293,15 +299,16 @@
     },
     "ServerStats": {
       "type": "object",
+      "description": "One sample of a server. Stacks are summed over the game container and every running service container (CPU, memory, memory limit, pids); network counts the game container only, so traffic between the game and its services isn't counted twice.",
       "properties": {
         "serverId": { "type": "string", "format": "uuid" },
         "cpuPercent": { "type": "number", "description": "100 = one CPU fully used." },
-        "memoryBytes": { "type": "integer" },
-        "memoryLimitBytes": { "type": "integer" },
-        "netRxBytes": { "type": "integer" },
-        "netTxBytes": { "type": "integer" },
+        "memoryBytes": { "type": "integer", "description": "Without reclaimable page cache, like `docker stats`." },
+        "memoryLimitBytes": { "type": "integer", "description": "Sum of the counted containers' limits." },
+        "netRxBytes": { "type": "integer", "description": "Cumulative bytes received since the game container started; the panel derives rates and treats a decrease as a restart." },
+        "netTxBytes": { "type": "integer", "description": "Cumulative bytes sent, like `netRxBytes`." },
         "pids": { "type": "integer" },
-        "diskBytes": { "type": ["integer", "null"], "description": "Size of the data folder; null when not measured in this sample (it is measured once a minute)." }
+        "diskBytes": { "type": ["integer", "null"], "description": "data/ + services/ as the disk check measured it; null when not part of this sample (every STATS_DISK_INTERVAL_SEC)." }
       },
       "required": ["serverId", "cpuPercent", "memoryBytes", "memoryLimitBytes", "netRxBytes", "netTxBytes", "pids", "diskBytes"]
     },

@@ -2,7 +2,12 @@
 // package (InitSpecPath, InitSocketPath, InitDataPath).
 package paths
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strconv"
+
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/protocol"
+)
 
 const (
 	// ConfigFile holds the panel URL, host id and credential (root:root 0600). Override with --config or
@@ -73,6 +78,28 @@ func (l Layout) ServerServiceVolume(serverID, service string) string {
 // ServerBackups holds the server's backup archives (M4).
 func (l Layout) ServerBackups(serverID string) string {
 	return filepath.Join(l.ServerDir(serverID), "backups")
+}
+
+// ServerBackupArchive is one backup archive, <server>/backups/<id>.tar.zst (M4).
+func (l Layout) ServerBackupArchive(serverID string, backupID int64) string {
+	return filepath.Join(l.ServerBackups(serverID), strconv.FormatInt(backupID, 10)+protocol.BackupExtension)
+}
+
+// ServerBackupSidecar is the archive's BackupSidecar, <server>/backups/<id>.json, written once the archive is
+// complete (M4).
+func (l Layout) ServerBackupSidecar(serverID string, backupID int64) string {
+	return filepath.Join(l.ServerBackups(serverID), strconv.FormatInt(backupID, 10)+".json")
+}
+
+// ServerRestoreDir is where a restore extracts before the swap, <server>/restore-<id> (same filesystem as data/, so
+// the swap is a rename) (M4).
+func (l Layout) ServerRestoreDir(serverID string, backupID int64) string {
+	return filepath.Join(l.ServerDir(serverID), "restore-"+strconv.FormatInt(backupID, 10))
+}
+
+// ServerRestoreJournal records a restore's swap in progress, so Restore can roll an interrupted one back (M4).
+func (l Layout) ServerRestoreJournal(serverID string) string {
+	return filepath.Join(l.ServerDir(serverID), "restore.json")
 }
 
 // NetfilterDir holds the last nftables script the agent applied (bind-mounted read-only into the nft helper).

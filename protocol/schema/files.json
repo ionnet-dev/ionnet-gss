@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "files.json",
+  "title": "Files",
+  "description": "M4: the file manager and file transfers between panel and agent. Every path is relative to the server's data folder (`/data` in the container) and resolved beneath it with `os.Root` (Go's openat-based confinement): `..`, absolute paths and symlinks that lead out are refused. Bytes travel base64-encoded, so every frame stays below `MAX_FRAME_BYTES`. Transfers are pulled by the panel: one request per chunk, at most `TRANSFER_WINDOW` in flight, which is the backpressure.",
+  "x-constants": {
+    "FILE_TEXT_MAX_BYTES": { "value": 2097152, "description": "Largest file `files.read` returns and `files.write` accepts (the panel's text editor). Larger files are downloaded and uploaded instead." },
+    "FILES_LIST_MAX_ENTRIES": { "value": 5000, "description": "Most entries one `files.list` answer holds; `truncated` says more exist." },
+    "FILES_DELETE_MAX_PATHS": { "value": 100, "description": "Most paths in one `files.delete`." },
+    "TRANSFER_CHUNK_BYTES": { "value": 524288, "description": "Largest chunk of one `transfer.read` answer or `transfer.write` request, in raw bytes (about 683 KiB as base64)." },
+    "TRANSFER_WINDOW": { "value": 4, "description": "Most `transfer.read` / `transfer.write` requests the panel keeps in flight per transfer." },
+    "TRANSFER_IDLE_SEC": { "value": 120, "description": "The agent closes a transfer that saw no request for this long (an unfinished upload's temporary file is removed). Also every transfer is closed when the panel connection is replaced." },
+    "TRANSFER_MAX_OPEN": { "value": 16, "description": "Most open transfers per agent; `transfer.open` beyond it answers `conflict`." },
+    "UPLOAD_DISK_RESERVE_BYTES": { "value": 1073741824, "description": "Free space an upload (or a write) must leave on the host's data disk; otherwise `no_space`." },
+    "UPLOAD_TEMP_DIR": { "value": ".gss/uploads", "description": "Folder below the data folder where uploads are written before `transfer.commit` renames them into place (same filesystem, inside the same root). Emptied by the agent at startup." }
+  },
+  "x-messages": [
+    {
+      "channel": "agent", "type": "files.list", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "FilesPathRequest", "response": "FilesListResponse",
+      "description": "List one folder (not recursive), folders first, then by name."
+    },
+    {
+      "channel": "agent", "type": "files.stat", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "FilesPathRequest", "response": "FileEntry",
+      "description": "One entry. A symlink is reported as itself (`symlink`, with `linkTarget`)."
+    },
+    {
+      "channel": "agent", "type": "files.read", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "FilesPathRequest", "response": "FilesReadResponse",
+      "description": "A whole regular file of at most `FILE_TEXT_MAX_BYTES` (`too_large` otherwise). `binary` is set (and no content sent) when it isn't UTF-8 text or holds a NUL byte."
+    },
+    {
+      "channel": "agent", "type": "files.write", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "FilesWriteRequest", "response": "FileEntry",
+      "description": "Replace (or create) a regular file atomically: temporary file in the same folder, then rename. Keeps an existing file's mode; new files are 0644 and owned by GAME_UID. `conflict` when `expectedModifiedAt` is set and differs."
+    },
+    {
+      "channel": "agent", "type": "files.mkdir", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "FilesPathRequest", "response": "FileEntry",
+      "description": "Create one folder (0755, GAME_UID); the parent must exist. `conflict` when the name is taken."
+    },
+    {
+      "channel": "agent", "type": "files.rename", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "FilesRenameRequest", "response": "FileEntry",
+      "description": "Rename or move within the data folder. `conflict` when the target exists and `overwrite` is false, or when a folder would move into itself."
+    },
+    {
+      "channel": "agent", "type": "files.delete", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "FilesDeleteRequest", "response": "Empty",
+      "description": "Delete files and folders (folders recursively). A symlink is removed, never its target. The data folder itself can't be deleted."
+    },
+    {
+      "channel": "agent", "type": "transfer.open", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "TransferOpenRequest", "response": "TransferOpenResponse",
+      "description": "Start a download (a regular file in the data folder, or a finished backup archive) or an upload (into `UPLOAD_TEMP_DIR`, checked against free disk and the server's disk limit first)."
+    },
+    {
+      "channel": "agent", "type": "transfer.read", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "TransferReadRequest", "response": "TransferChunk",
+      "description": "One chunk of a download, by offset (random access, so several may be in flight)."
+    },
+    {
+      "channel": "agent", "type": "transfer.write", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "TransferWriteRequest", "response": "Empty",
+      "description": "One chunk of an upload, by offset. Chunks may arrive out of order; ranges must not overlap or pass the announced size."
+    },
+    {
+      "channel": "agent", "type": "transfer.commit", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "TransferRef", "response": "FileEntry",
+      "description": "Finish an upload: check that the written ranges cover exactly [0, size), fsync, rename into place (honouring `overwrite`), hand it to GAME_UID, close the transfer."
+    },
+    {
+      "channel": "agent", "type": "transfer.close", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "TransferRef", "response": "Empty",
+      "description": "Abort or finish a transfer: close the file; an uncommitted upload's temporary file is removed. Unknown ids are not an error."
+    }
+  ],
+  "$defs": {
+    "FileType": {
+      "type": "string",
+      "description": "other = sockets, devices, fifos: listed, never opened.",
+      "enum": ["file", "dir", "symlink", "other"]
+    },
+    "FileEntry": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string", "description": "Relative to the data folder, `/`-separated, no leading slash; `\"\"` is the data folder itself." },
+        "type": { "$ref": "#/$defs/FileType" },
+        "size": { "type": "integer", "description": "Bytes; 0 for folders." },
+        "modifiedAt": { "type": "string", "format": "date-time", "description": "RFC 3339 with nanoseconds, UTC. Pass it back unchanged as `expectedModifiedAt`." },
+        "mode": { "type": "integer", "description": "Permission bits (e.g. 420 = 0644)." },
+        "linkTarget": { "type": ["string", "null"], "description": "symlink only: where it points, as stored (it may lead out of the data folder; following it is refused then)." }
+      },
+      "required": ["name", "path", "type", "size", "modifiedAt", "mode", "linkTarget"]
+    },
+    "FilesPathRequest": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "path": { "type": "string", "description": "Relative to the data folder; `\"\"` = the data folder." }
+      },
+      "required": ["serverId", "path"]
+    },
+    "FilesListResponse": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "The listed folder, cleaned." },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/FileEntry" } },
+        "truncated": { "type": "boolean", "description": "More than `FILES_LIST_MAX_ENTRIES` entries exist; only the first ones (in order) are listed." }
+      },
+      "required": ["path", "entries", "truncated"]
+    },
+    "FilesReadResponse": {
+      "type": "object",
+      "properties": {
+        "entry": { "$ref": "#/$defs/FileEntry" },
+        "binary": { "type": "boolean", "description": "Not UTF-8 text (or holds a NUL byte): `contentBase64` is empty." },
+        "contentBase64": { "type": "string" }
+      },
+      "required": ["entry", "binary", "contentBase64"]
+    },
+    "FilesWriteRequest": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "path": { "type": "string" },
+        "contentBase64": { "type": "string", "description": "At most `FILE_TEXT_MAX_BYTES` once decoded." },
+        "expectedModifiedAt": { "type": ["string", "null"], "description": "The `modifiedAt` the editor loaded; a different current value answers `conflict`. null = create or overwrite without checking." }
+      },
+      "required": ["serverId", "path", "contentBase64", "expectedModifiedAt"]
+    },
+    "FilesRenameRequest": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "from": { "type": "string" },
+        "to": { "type": "string", "description": "Full new path (a move when the folder differs). The parent must exist." },
+        "overwrite": { "type": "boolean", "description": "Replace an existing file at `to` (never a folder)." }
+      },
+      "required": ["serverId", "from", "to", "overwrite"]
+    },
+    "FilesDeleteRequest": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "paths": { "type": "array", "items": { "type": "string" }, "description": "At most `FILES_DELETE_MAX_PATHS`; `\"\"` is refused." }
+      },
+      "required": ["serverId", "paths"]
+    },
+    "TransferDirection": {
+      "type": "string",
+      "enum": ["download", "upload"]
+    },
+    "TransferSource": {
+      "type": "string",
+      "description": "file: a path in the data folder; backup: a finished backup archive (download only).",
+      "enum": ["file", "backup"]
+    },
+    "TransferOpenRequest": {
+      "type": "object",
+      "properties": {
+        "transferId": { "type": "string", "format": "uuid", "description": "Chosen by the panel." },
+        "serverId": { "type": "string", "format": "uuid" },
+        "direction": { "$ref": "#/$defs/TransferDirection" },
+        "source": { "$ref": "#/$defs/TransferSource" },
+        "path": { "type": "string", "description": "source file: the file to download, or the upload's final path (its folder must exist)." },
+        "backupId": { "type": "integer", "description": "source backup: the panel's backup id." },
+        "size": { "type": "integer", "description": "upload: exact byte count (the browser's Content-Length)." },
+        "overwrite": { "type": "boolean", "description": "upload: replace an existing file at `path` on commit." }
+      },
+      "required": ["transferId", "serverId", "direction", "source"]
+    },
+    "TransferOpenResponse": {
+      "type": "object",
+      "properties": {
+        "transferId": { "type": "string", "format": "uuid" },
+        "name": { "type": "string", "description": "Base name of the file (`<backupId>.tar.zst` for a backup; the panel names that download after the server and the backup itself)." },
+        "size": { "type": "integer", "description": "download: bytes to read (the panel sends it as Content-Length); upload: the announced size." }
+      },
+      "required": ["transferId", "name", "size"]
+    },
+    "TransferReadRequest": {
+      "type": "object",
+      "properties": {
+        "transferId": { "type": "string", "format": "uuid" },
+        "offset": { "type": "integer" },
+        "length": { "type": "integer", "description": "At most `TRANSFER_CHUNK_BYTES`." }
+      },
+      "required": ["transferId", "offset", "length"]
+    },
+    "TransferChunk": {
+      "type": "object",
+      "properties": {
+        "offset": { "type": "integer" },
+        "dataBase64": { "type": "string", "description": "Shorter than asked only at the end of the file." },
+        "eof": { "type": "boolean", "description": "offset + length reached the size from `transfer.open`." }
+      },
+      "required": ["offset", "dataBase64", "eof"]
+    },
+    "TransferWriteRequest": {
+      "type": "object",
+      "properties": {
+        "transferId": { "type": "string", "format": "uuid" },
+        "offset": { "type": "integer" },
+        "dataBase64": { "type": "string", "description": "At most `TRANSFER_CHUNK_BYTES` once decoded." }
+      },
+      "required": ["transferId", "offset", "dataBase64"]
+    },
+    "TransferRef": {
+      "type": "object",
+      "properties": {
+        "transferId": { "type": "string", "format": "uuid" }
+      },
+      "required": ["transferId"]
+    }
+  }
+}

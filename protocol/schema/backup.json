@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "backup.json",
+  "title": "Backup",
+  "description": "M4: backups and restore between panel and agent. An archive is `<server>/backups/<backupId>.tar.zst` on the host (tar, zstd-compressed) with a sidecar `<backupId>.json` (`BackupSidecar`); entries are `gss-backup.json` (`BackupManifest`) first, then `data/…` and, for stacks, `services/<name>/…`. One operation (create or restore) per server at a time; it runs detached from the panel connection, reports `backup.progress` (dropped while the panel is away) and exactly one `backup.finished` (kept until delivered), and shows in `ServerStatus.operation` while it runs.",
+  "x-constants": {
+    "BACKUP_EXTENSION": { "value": ".tar.zst", "description": "Archive file extension." },
+    "BACKUP_PROGRESS_INTERVAL_SEC": { "value": 2, "description": "Most one `backup.progress` per operation per this many seconds." },
+    "BACKUP_SETTLE_SEC": { "value": 5, "description": "Wait after the definition's `backup.before` console commands before the archive starts (the game flushes its saves)." },
+    "BACKUP_MANIFEST_NAME": { "value": "gss-backup.json", "description": "First entry of every archive." },
+    "BACKUP_FORMAT_VERSION": { "value": 1, "description": "`BackupManifest.format`; a restore refuses archives with a higher one." }
+  },
+  "x-messages": [
+    {
+      "channel": "agent", "type": "backup.create", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "BackupRef", "response": "BackupOperationStatus",
+      "description": "Archive the data folder (minus the spec's `backup.exclude`) and every stack service volume. While the game runs: `backup.before` commands, BACKUP_SETTLE_SEC, archive data/, `backup.after` commands (also after a failure); running service containers are paused while their volume is archived (crash-consistent copy). Refused (`conflict`) while installing, while another operation runs, or with too little free disk (`no_space`). Answers when it has begun."
+    },
+    {
+      "channel": "agent", "type": "backup.restore", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "BackupRef", "response": "BackupOperationStatus",
+      "description": "Replace the data folder (and the service volumes the archive holds) with the archive's. Only while the game is stopped, crashed or install_failed (`conflict` otherwise). Extracts beside the live folders, then stops the containers, swaps by rename (journal in `<server>/restore.json`, rolled back at agent startup when interrupted), and starts the game container again (the game stays stopped). Answers when it has begun."
+    },
+    {
+      "channel": "agent", "type": "backup.delete", "kind": "request", "from": "panel", "milestone": 4,
+      "request": "BackupRef", "response": "Empty",
+      "description": "Remove an archive and its sidecar (a missing one is not an error). `conflict` while that backup is being created or restored."
+    },
+    {
+      "channel": "agent", "type": "backup.progress", "kind": "event", "from": "agent", "milestone": 4,
+      "data": "BackupProgress",
+      "description": "Bytes processed so far, at most every BACKUP_PROGRESS_INTERVAL_SEC. Dropped while the panel is away."
+    },
+    {
+      "channel": "agent", "type": "backup.finished", "kind": "event", "from": "agent", "milestone": 4,
+      "data": "BackupFinished",
+      "description": "An operation ended (ok or not). Never dropped."
+    }
+  ],
+  "$defs": {
+    "BackupOperation": {
+      "type": "string",
+      "enum": ["create", "restore"]
+    },
+    "BackupRef": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "backupId": { "type": "integer", "description": "The panel's `backups.id`; the archive is `<backupId>.tar.zst`, so no path ever travels." }
+      },
+      "required": ["serverId", "backupId"]
+    },
+    "BackupOperationStatus": {
+      "type": "object",
+      "description": "The operation a server runs right now.",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "backupId": { "type": "integer" },
+        "operation": { "$ref": "#/$defs/BackupOperation" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "bytes": { "type": "integer", "description": "Uncompressed bytes processed so far." },
+        "totalBytes": { "type": ["integer", "null"], "description": "Estimate: create = the last disk measurement of data/ + services/; restore = the sidecar's `bytes`. null when unknown." }
+      },
+      "required": ["serverId", "backupId", "operation", "startedAt", "bytes", "totalBytes"]
+    },
+    "BackupProgress": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "backupId": { "type": "integer" },
+        "operation": { "$ref": "#/$defs/BackupOperation" },
+        "bytes": { "type": "integer" },
+        "totalBytes": { "type": ["integer", "null"] },
+        "at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["serverId", "backupId", "operation", "bytes", "totalBytes", "at"]
+    },
+    "BackupFinished": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "backupId": { "type": "integer" },
+        "operation": { "$ref": "#/$defs/BackupOperation" },
+        "ok": { "type": "boolean" },
+        "sizeBytes": { "type": ["integer", "null"], "description": "create: size of the finished archive; null otherwise." },
+        "error": { "type": ["string", "null"], "description": "Readable cause when not ok, e.g. `The host's disk is full (2.1 GB free, about 6 GB needed).`" },
+        "at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["serverId", "backupId", "operation", "ok", "sizeBytes", "error", "at"]
+    },
+    "BackupManifest": {
+      "type": "object",
+      "description": "`gss-backup.json`, the first archive entry.",
+      "properties": {
+        "format": { "type": "integer", "description": "BACKUP_FORMAT_VERSION at creation." },
+        "serverId": { "type": "string", "format": "uuid" },
+        "backupId": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "definition": { "$ref": "server.json#/$defs/DefinitionRef" },
+        "specHash": { "type": "string" },
+        "roots": { "type": "array", "items": { "type": "string" }, "description": "Top-level folders in the archive: `data`, `services/<name>`…" },
+        "running": { "type": "boolean", "description": "The game was running while the archive was taken (before/after commands were sent)." }
+      },
+      "required": ["format", "serverId", "backupId", "createdAt", "definition", "specHash", "roots", "running"]
+    },
+    "BackupSidecar": {
+      "type": "object",
+      "description": "`<backupId>.json` next to the archive, written after it is complete; the restore's disk check reads it.",
+      "properties": {
+        "manifest": { "$ref": "#/$defs/BackupManifest" },
+        "bytes": { "type": "integer", "description": "Uncompressed bytes of every regular file archived." },
+        "files": { "type": "integer" },
+        "sizeBytes": { "type": "integer", "description": "Archive size." },
+        "finishedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["manifest", "bytes", "files", "sizeBytes", "finishedAt"]
+    }
+  }
+}

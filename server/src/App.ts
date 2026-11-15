@@ -8,7 +8,9 @@ import { serveStatic } from "hono/deno";
 import { proxy } from "hono/proxy";
 import type { ErrorResponse } from "@shared/api/common.ts";
 import { Config, isDevelopment } from "./Config.ts";
+import { FILE_TEXT_MAX_BYTES } from "@shared/protocol/protocol.gen.ts";
 import { ApiController } from "./controllers/ApiController.ts";
+import { FileController } from "./controllers/FileController.ts";
 import { AgentGateway } from "./gateways/agent/AgentGateway.ts";
 import { LiveGateway } from "./gateways/live/LiveGateway.ts";
 import { HttpError } from "./lib/HttpError.ts";
@@ -25,12 +27,24 @@ export function createApp(): Hono {
     return c.json<ErrorResponse>({ message: "Something went wrong on the panel. Check its log for details." }, 500);
   });
 
-  app.use("/api/*", bodyLimit({
+  const jsonLimit = bodyLimit({
     maxSize: Config.BODY_LIMIT_KB * 1024,
     onError: () => {
       throw HttpError.tooLarge(`The request body is larger than ${Config.BODY_LIMIT_KB} KB.`);
     },
-  }));
+  });
+  // M4: the editor saves plain text up to FILE_TEXT_MAX_BYTES (+ slack for a final newline the browser adds).
+  const textLimit = bodyLimit({
+    maxSize: FILE_TEXT_MAX_BYTES + 1024,
+    onError: () => {
+      throw HttpError.tooLarge(`The editor saves files of at most ${FILE_TEXT_MAX_BYTES / 1048576} MB. Upload larger files instead.`);
+    },
+  });
+  app.use("/api/*", (c, next) => {
+    if (FileController.BODY_PATHS.UPLOAD.test(c.req.path)) return next(); // Streamed; FileService checks UPLOAD_MAX_MB.
+    if (FileController.BODY_PATHS.CONTENT.test(c.req.path)) return textLimit(c, next);
+    return jsonLimit(c, next);
+  });
   app.route("/api", ApiController.router);
   app.route("/ws", AgentGateway.router); // /ws/agent
   app.route("/ws", LiveGateway.router); // /ws/live

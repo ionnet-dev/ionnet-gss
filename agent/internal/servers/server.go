@@ -44,6 +44,12 @@ type server struct {
 	// svc is the last known state of the stack's services (services.go); never nil.
 	svc              []protocol.ServiceStatus
 	servicesStopping bool // a stopServicesLater goroutine is waiting
+	// players online now (M4): set from InitStatus.players on every (re)connect, then from player events; emptied
+	// when the game leaves starting/running. Owned by the watcher (server.go), read by Status().
+	players []string
+	// operation is the backup or restore running right now (M4, backup.go); nil when none. Lifecycle requests other
+	// than stop are refused while it is set (checkIdleLocked in backup.go).
+	operation *protocol.BackupOperationStatus
 
 	watching  bool
 	kick      chan struct{}
@@ -70,6 +76,11 @@ func (s *server) Status() protocol.ServerStatus {
 	defer s.mu.Unlock()
 	status := s.status
 	status.Services = s.servicesSnapshotLocked()
+	status.Players = append([]string{}, s.players...)
+	if s.operation != nil {
+		op := *s.operation
+		status.Operation = &op
+	}
 	return status
 }
 

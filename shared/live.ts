@@ -5,7 +5,8 @@
  * Client → panel: `auth` first (within 10 s), then `subscribe` / `unsubscribe` for per-server streams (M2).
  * Panel → client: `ready` after auth, then `event` frames.
  */
-import type { ConsoleLine, InstallProgress, ServerState, ServerStats, ServiceStatus } from "./protocol/protocol.gen.ts";
+import type { BackupOperation, ConsoleLine, InstallProgress, ServerState, ServiceStatus } from "./protocol/protocol.gen.ts";
+import type { MetricSampleDto } from "./api/metrics.ts";
 
 /**
  * Every live event and its data. A `null` id means "the list changed, refetch it".
@@ -43,8 +44,9 @@ export interface LiveEvents {
   // Audience: subscribers of `server:<id>` only. Subscribing checks access (owner or SERVERS_MANAGE_ALL); a refused
   // subscribe answers `{ t: "error" }`. Backlog comes from `GET /api/servers/:id/console`.
   "server.console": { serverId: string; lines: ConsoleLine[] };
-  // Audience: subscribers of `server:<id>` only.
-  "server.stats": { serverId: string; stats: ServerStats };
+  // M4: one sample every STATS_INTERVAL_SEC while the game runs (rates derived by the panel). Audience: subscribers
+  // of `server:<id>` only. Append to the history from `GET /api/servers/:id/metrics`.
+  "server.stats": { serverId: string; sample: MetricSampleDto; diskBytes: number | null };
   //#endregion
 
   //#region M3
@@ -56,12 +58,24 @@ export interface LiveEvents {
   // Stack service states changed. Audience: owner + SERVERS_MANAGE_ALL. Apply in place.
   "server.services": { serverId: string; services: ServiceStatus[] };
   //#endregion
+
+  //#region M4
+  // The whole current list after every join, leave or reset (game stopped). Audience: subscribers of `server:<id>`.
+  "server.players": { serverId: string; players: string[] };
+  // A backup was created, finished, failed, deleted or restored (refetch the list). Audience: owner +
+  // SERVERS_MANAGE_ALL.
+  "backup.updated": { serverId: string; backupId: number | null };
+  // Progress of the running backup or restore, at most every BACKUP_PROGRESS_INTERVAL_SEC. Audience: subscribers of
+  // `server:<id>`. Apply in place.
+  "backup.progress": { serverId: string; backupId: number; operation: BackupOperation; bytes: number; totalBytes: number | null };
+  //#endregion
 }
 
 export type LiveEventName = keyof LiveEvents;
 
 /**
- * Stream topics a client can subscribe to (M2): `server:<uuid>` carries `server.console` and `server.stats`.
+ * Stream topics a client can subscribe to (M2): `server:<uuid>` carries `server.console`, `server.stats`, and since M4
+ * `server.players` and `backup.progress`.
  */
 export type LiveTopic = `server:${string}`;
 

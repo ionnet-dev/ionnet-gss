@@ -98,6 +98,10 @@ function load() {
     RATE_LIMIT_LOGIN_PER_IP: readInt("RATE_LIMIT_LOGIN_PER_IP", 30, 0),
     RATE_LIMIT_LOGIN_FAILURES_PER_USER: readInt("RATE_LIMIT_LOGIN_FAILURES_PER_USER", 10, 0),
     RATE_LIMIT_PUBLIC_PER_IP: readInt("RATE_LIMIT_PUBLIC_PER_IP", 60, 0),
+    /** Largest file upload (M4), in MB; streamed to the host, never buffered, so BODY_LIMIT_KB doesn't apply. */
+    UPLOAD_MAX_MB: readInt("UPLOAD_MAX_MB", 4096, 1),
+    /** Concurrent uploads plus downloads per user (M4); 429 beyond. */
+    TRANSFERS_PER_USER: readInt("TRANSFERS_PER_USER", 4, 1),
 
     // Agents
     ENROL_TOKEN_TTL_MINUTES: readInt("ENROL_TOKEN_TTL_MINUTES", 60, 1),

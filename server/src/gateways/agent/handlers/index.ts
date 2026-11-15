@@ -5,12 +5,16 @@
  */
 import type { AgentToPanelEvents, AgentToPanelRequests } from "@shared/protocol/protocol.gen.ts";
 import type { AgentConnection } from "../AgentConnection.ts";
+import { handleBackupFinished } from "./backupFinished.ts";
+import { handleBackupProgress } from "./backupProgress.ts";
 import { handleEnrol } from "./enrol.ts";
 import { handleHello } from "./hello.ts";
 import { handleHeartbeat } from "./heartbeat.ts";
 import { handleServerConsole } from "./serverConsole.ts";
+import { handleServerPlayer } from "./serverPlayer.ts";
 import { handleServerServices } from "./serverServices.ts";
 import { handleServerState } from "./serverState.ts";
+import { handleServerStats } from "./serverStats.ts";
 
 export type AgentRequestHandler<T extends keyof AgentToPanelRequests> = (
   conn: AgentConnection,
@@ -32,5 +36,8 @@ export const EVENT_HANDLERS: { [T in keyof AgentToPanelEvents]?: AgentEventHandl
   "server.state": handleServerState,
   "server.console": handleServerConsole,
   "server.services": handleServerServices,
-  // M4: "server.stats", "server.player"
+  "server.stats": handleServerStats,
+  "server.player": handleServerPlayer,
+  "backup.progress": handleBackupProgress,
+  "backup.finished": handleBackupFinished,
 };

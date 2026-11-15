@@ -105,6 +105,23 @@ export namespace BaseApi {
   export function DELETE<T>(path: string): Promise<T> {
     return request<T>("DELETE", path);
   }
+
+  /**
+   * PUT a raw text body (`text/plain; charset=utf-8`), e.g. the file editor's save (M4).
+   */
+  export async function PUT_TEXT<T>(path: string, text: string): Promise<T> {
+    throw new Error("Not implemented."); // TODO(builder): like request(), body = text, content-type text/plain; charset=utf-8.
+  }
+
+  /**
+   * PUT a file as the raw body with upload progress (M4). Uses XMLHttpRequest, because fetch can't report upload
+   * progress. Same error handling as `request()` (`ApiError`, 401 event).
+   * @param onProgress Bytes sent so far and the total.
+   * @param signal Aborts the upload (the panel then discards the partial file).
+   */
+  export function UPLOAD<T>(path: string, file: Blob, onProgress?: (sent: number, total: number) => void, signal?: AbortSignal): Promise<T> {
+    return Promise.reject(new Error("Not implemented.")); // TODO(builder)
+  }
 }
 
 export default BaseApi;

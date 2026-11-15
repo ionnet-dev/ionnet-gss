@@ -20,6 +20,8 @@ export const LIMITS = {
   HOST_NAME_MAX: 64,
   SERVER_NAME_MAX: 64,
   TOTP_DIGITS: 6,
+  BACKUP_NAME_MAX: 128, // M4: `backups.name` is STRING(128).
+  METRICS_HISTORY_SAMPLES: 720, // M4: samples the panel keeps per server (one hour at STATS_INTERVAL_SEC).
 } as const;
 
 /**

@@ -202,7 +202,7 @@
     },
     "PlayersSpec": {
       "type": "object",
-      "description": "Console patterns whose first capture group is the player name.",
+      "description": "Console patterns (RE2 syntax: gss-init matches them in Go, on output lines with ANSI codes stripped) whose first capture group is the player name. Validation refuses a pattern without a capture group.",
       "properties": {
         "join": { "type": "string" },
         "leave": { "type": "string" }
@@ -213,7 +213,7 @@
       "properties": {
         "before": { "type": "array", "items": { "type": "string" }, "description": "Console commands sent before the archive is taken." },
         "after": { "type": "array", "items": { "type": "string" } },
-        "exclude": { "type": "array", "items": { "type": "string" }, "description": "Paths below /data; a trailing slash means a folder." }
+        "exclude": { "type": "array", "items": { "type": "string" }, "description": "Paths below /data, relative, `/`-separated; a trailing slash means a folder; `*` and `?` match within one path segment (`logs/`, `cache/`, `*.log`, `world/session.lock`). Applies to data/ only, never to service volumes." }
       }
     },
     "ServiceSpec": {

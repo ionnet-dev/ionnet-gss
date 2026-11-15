@@ -368,14 +368,15 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
   /**
    * Route guard. Reads `Authorization: Bearer <token>`, resolves it with `findByToken`, sets `c.var.user`.
    * `required` (default true): 401 without a valid token. `admin`: 403 unless admin. `permissions`: 403 unless the
-   * user has every listed key (admins always pass).
+   * user has every listed key (admins always pass). A user an outer guard already set is reused (routers mounted below
+   * `/servers` run `ServerController`'s guard too), so the token is looked up once per request.
    */
   public static $middleware(opts?: User.MiddlewareOptions): MiddlewareHandler<AppEnv> {
     opts ??= {};
     const required = opts.required ?? true;
     return async (c, next) => {
       const token = bearerToken(c);
-      const user = token ? await User.findByToken(token) : null;
+      const user = (c.get("user") as User | undefined) ?? (token ? await User.findByToken(token) : null);
       if (!user) {
         if (required) throw HttpError.unauthorized();
         return await next();

@@ -296,7 +296,9 @@ export class AgentConnection {
       case 403: return "forbidden";
       case 404: return "not_found";
       case 409: return "conflict";
+      case 413: return "too_large";
       case 501: return "unsupported";
+      case 507: return "no_space";
       default: return "internal";
     }
   }

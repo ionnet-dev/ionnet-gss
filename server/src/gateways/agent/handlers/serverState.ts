@@ -4,6 +4,7 @@ import {
   type StateChange,
 } from "@shared/protocol/protocol.gen.ts";
 import { GameServerService } from "../../../servers/GameServerService.ts";
+import { MetricsService } from "../../../servers/MetricsService.ts";
 import { AgentRequestError, type AgentConnection } from "../AgentConnection.ts";
 import { requireObject } from "./guards.ts";
 
@@ -12,7 +13,7 @@ const MAX_REASON_CHARS = 2000;
 
 /**
  * `server.state`: shape-check (requireObject, serverId UUID, state in SERVER_STATE_VALUES), then
- * `GameServerService.applyStateChange(conn.hostId, data)`.
+ * `GameServerService.applyStateChange(conn.hostId, data)`, then `MetricsService.onStateChange` (M4: players reset).
  */
 export async function handleServerState(conn: AgentConnection, data: StateChange): Promise<void> {
   if (!conn.hostId) return;
@@ -41,4 +42,5 @@ export async function handleServerState(conn: AgentConnection, data: StateChange
     reason: event.reason?.slice(0, MAX_REASON_CHARS) ?? null,
     installProgress: progress,
   });
+  MetricsService.onStateChange(event.serverId.toLowerCase(), event.state!);
 }

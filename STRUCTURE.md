@@ -13,13 +13,14 @@ Dockerfile             node stage builds client/, deno stage runs server/ and se
 .env.example           every variable, grouped under ##### banners (defaults = dev)
 protocol/
   schema/*.json        JSON Schema: envelope (frame, channels, close codes), host (M1), server (M2),
-                       definition (game.yml blocks), supervisor (agent↔gss-init, M2)
+                       definition (game.yml blocks), supervisor (agent↔gss-init, M2), files + backup (M4)
   generate.ts          generator → shared/protocol/protocol.gen.ts + agent/internal/protocol/protocol_gen.go
 shared/                types + consts used by server and client (no runtime deps)
   constants.ts         APP_NAME, TOKEN_PREFIX, LIMITS, LIVE_CLOSE
   permissions.ts       PERMISSIONS (UPPER_SNAKE keys), ROLES, DEFAULT_USER_PERMISSIONS
   live.ts              /ws/live: LiveEvents map, client/server frames, topics
-  api/*.ts             REST DTOs: common, meta, auth, users (+roles, quota), invites, hosts (+enrol tokens, grants)
+  api/*.ts             REST DTOs: common, meta, auth, users (+roles, quota), invites, hosts (+enrol tokens, grants),
+                       servers, definitions, sources; M4: files, backups, metrics
   protocol/protocol.gen.ts  GENERATED, never edit
   index.ts             barrel (for deno check)
 server/src/
@@ -34,7 +35,8 @@ server/src/
                        + 20261118000000-server-private-network.ts (allow_private_network)
   models/              one class per file (declare attributes, initModel(), finders, serializers) + columns.ts
                        + index.ts (instance, init, every association)
-  controllers/         one namespace per resource exporting `router`; ApiController mounts them
+  controllers/         one namespace per resource exporting `router`; ApiController mounts them (M4: File, Backup,
+                       Metrics below /servers/:id, Download at /downloads)
   gateways/agent/      AgentGateway (static: by host id), AgentConnection (envelope, phases), handlers/ (by type)
   gateways/live/       LiveGateway (static: push(event, data, audience))
   definitions/         DefinitionEngine (pure: parse, resolve extends, variables, limits, image, render, buildSpec),
@@ -43,19 +45,23 @@ server/src/
                        options_from lists, https allowlist + cache)
   jobs/                sourceSync.ts (M3: interval sync of git sources)
   servers/             GameServerService: every server operation (access, quota, ports, provision, lifecycle,
-                       console, agent state → rows + live events, reconcile after hello)
+                       console, agent state → rows + live events, reconcile after hello); M4: ServerAccess (share-aware
+                       levels), agentCall (agent codes → HTTP), FileService, BackupService, MetricsService + MetricRing
+  transfers/           M4: TransferRelay (browser HTTP ⇄ agent chunks, windowed), DownloadTickets (single-use links)
   lib/                 HttpError, http (AppEnv, readBody, paramInt/Uuid, clientIp), RateLimiter, tokens, portPool, totp (M5)
 client/                npm + Vite (Iontronic is a github: dep Deno can't install)
   vite.config.ts       :5200, HMR direct, aliases @/ @shared/, inline theme boot
   src/main.tsx         providers + auth bootstrap + <Router>
   src/routes.tsx       route table: regex paths, lazy pages, requirement() guards
   src/router/          Router.tsx (Router, Link, navigate, useLocation)
-  src/Api/             BaseApi.ts (token+user in localStorage, GET/POST/…) + AuthApi, UserApi, InviteApi, HostApi,
-                       ServerApi, DefinitionApi (M2)
+  src/Api/             BaseApi.ts (token+user in localStorage, GET/POST/…, M4: PUT_TEXT, UPLOAD with progress) +
+                       AuthApi, UserApi, InviteApi, HostApi, ServerApi, DefinitionApi (M2), SourceApi (M3),
+                       FileApi, BackupApi, MetricsApi (M4)
   src/controllers/     Controller (notify), AuthController (session, permissions)
   src/hooks/           useController, useAuth, useResource (load + reload + live-event refetch)
   src/live/            LiveSocket (the /ws/live client, on(event))
-  src/components/      AppLayout (AppShell/Sidebar/TabBar), AuthLayout
+  src/components/      AppLayout (AppShell/Sidebar/TabBar), AuthLayout, … M4: FileManager (+ FileEditor), BackupList,
+                       MetricsPanel (+ MetricChart), PlayerList
   src/pages/<Name>/    Login, Setup, Register, Hosts, HostDetail, Users, Invites, Account, NotFound;
                        M2: Servers (also `/`), ServerCreate, ServerDetail; component Console; M3: Sources
 agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
@@ -63,20 +69,24 @@ agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
   cmd/gss-init         PID 1 in game containers (M2)
   internal/protocol    protocol_gen.go (GENERATED) + envelope.go (build/decode envelopes, NDJSON frames)
   internal/cli         subcommands (Commands table)
-  internal/agent       run wiring: session, heartbeat, panel→agent handlers
+  internal/agent       run wiring: session, heartbeat, panel→agent handlers (files.go: M4 file + transfer handlers)
   internal/panel       WebSocket dial, Enrol, reconnecting Session
   internal/config      config file Store (/etc/ionnet-gss/agent.json)
   internal/hostfacts   Collector (+ _linux.go / _other.go)
   internal/docker      Engine API client over the unix socket (net/http only)
   internal/supervisor  agent's client for gss-init's socket (M2)
   internal/servers     Manager (manager.go), New(Options) + container/network naming and labels (new.go) (M2),
-                       egress.go (bridge names, egress checks before a container or game starts)
+                       egress.go (bridge names, egress checks before a container or game starts); M4: files.go
+                       (Manager.Files), backup.go (operations, restore swap), stats.go (stats loop)
   internal/images      Resolver: image ensure + derived `packages:` images, ionnet-gss-derived:<hash16> (M3)
   internal/stacks      Stack: a server's service containers (Ensure/Start with health wait/Stop/Remove/Status) (M3)
   internal/egress      Firewall: the agent's nftables table `inet ionnet_gss` (ruleset.go: pure script builder;
                        firewall.go: desired state, incremental adds, rebuilds, nft helper container)
   internal/initd       gss-init: Supervisor (initd.go), Console/Game/Launcher/RconClient interfaces (parts.go),
-                       steps/ (install step registry), configs/ (format registry)
+                       steps/ (install step registry), configs/ (format registry), players.go (M4)
+  internal/files       M4: FS (one data folder through os.Root: list/stat/read/write/mkdir/rename/delete, uploads),
+                       Transfers (open transfer table, idle sweep)
+  internal/backups     M4: tar + zstd archives (Create/Extract, Matcher for `exclude`), pure
   internal/paths       host paths (Layout)
   packaging/           gss-agent.service
 images/                build.sh (deno task images:build; local tags only), base/ (Dockerfile builds gss-init from
@@ -208,6 +218,9 @@ Live events and audiences: `shared/live.ts`.
 | Permission | key in `shared/permissions.ts`; grant it to `user` through a migration if default |
 | Setting (env) | `server/src/Config.ts` + `.env.example` (+ `docker-compose.yml`) |
 | Host path | `agent/internal/paths` `Layout` method |
+| Sub-resource of a server (M4) | `controllers/<X>Controller.ts` with its own `User.$middleware()` (reuses the outer user), mounted in `ApiController` as `/servers/:id/<x>`; access through `ServerAccess.get(user, id, level)`; agent calls through `servers/agentCall.ts` |
+| Raw (non-JSON) request body | a regex in the controller's `BODY_PATHS` + a branch in `App.ts`'s `/api/*` body-limit switch |
+| Something to download | a `TransferRelay.DownloadSource` kind + `TransferSource` value (`files.json`) + the agent's `transfer.open` case; links via `DownloadTickets.issue` |
 
 ## Extension points
 
@@ -581,3 +594,160 @@ Order: all four in parallel. A ↔ B meet at `supervisor.json` (`update`), B ↔
 `server.services`, `ServiceSpec`), C ↔ D at `shared/api/*` and `shared/live.ts`. Integration (main): images rebuilt,
 a git source with both Garry's Mod games synced, `garrys-mod-mysql` created from the UI, MySQLOO-style connection to
 `db` works, upgrade after a pushed change.
+
+## M4: operations
+
+### Contracts
+
+- **Access levels** (`servers/ServerAccess.ts`, implemented): owner and SERVERS_MANAGE_ALL hold `manage`; others the
+  role of their `ServerShare` (view < operate < manage); below the level asked → 404. Files and backups: `manage`;
+  metrics: `view`. `GameServerService.getAccessible` stays owner/MANAGE_ALL until the sharing UI moves it onto this.
+  Live topic `server:<id>` still uses `canAccess` (owner/MANAGE_ALL).
+- **Agent calls** from the M4 services go through `servers/agentCall.ts` (implemented): bad_request 400, forbidden 403,
+  not_found 404, conflict 409, too_large 413, no_space 507, timeout 504, dropped 503, unsupported 501, else 502.
+  `ErrorCode` gained `too_large` and `no_space` (`envelope.json`).
+- **File manager** (`files.json`). The agent opens `<server>/data` as an `os.Root` (`internal/files`): every path is
+  walked beneath the root's fd, so `..`, absolute paths and symlinks that lead out are refused (`bad_request`);
+  in-folder symlinks are followed, listed as `symlink` with `linkTarget`, deleted as links. Root agent → new files
+  are `Lchown`ed to GAME_UID. Writes are temp-file + fsync + rename, keep the mode, and check `expectedModifiedAt`
+  (409). Editor cap FILE_TEXT_MAX_BYTES (2 MiB), content base64 on the agent channel (bounded frame size), plain
+  UTF-8 to the browser; the save is `PUT …/files/content` with a `text/plain` body (its own body limit in `App.ts`).
+  Files can change while the game runs; refused (409) only while a restore swaps the folder.
+- **Transfers** (pull-based, no panel buffering). `transfer.open` → per chunk `transfer.read {offset, length}` /
+  `transfer.write {offset, data}` (≤ TRANSFER_CHUNK_BYTES = 512 KiB, base64), at most TRANSFER_WINDOW = 4 in flight per
+  transfer, which is the backpressure (the browser's read rate drives `pull()`, the agent's answers drive the upload
+  body reads) → `transfer.commit` (upload: ranges must cover [0, size) exactly, rename from `UPLOAD_TEMP_DIR`
+  = `.gss/uploads/<transferId>` inside the same root) / `transfer.close`. Responses bypass `AgentConnection`'s event
+  queue, so chunks never wait behind console batches. Downloads: `POST …/download` → `DownloadTickets` (32 random
+  bytes, single use, 60 s, in memory) → `GET /api/downloads/:ticket` (public; `Content-Length`,
+  `application/octet-stream`, `attachment`, `nosniff`). Uploads: `PUT …/files/upload?path=` raw body, Content-Length
+  required, ≤ UPLOAD_MAX_MB (no JSON body limit), XHR on the client for progress. Limits: TRANSFERS_PER_USER (429),
+  TRANSFER_MAX_OPEN per agent (409), free disk ≥ size + UPLOAD_DISK_RESERVE_BYTES and the server's `diskMb` soft limit
+  (507). Agent side closes a transfer after TRANSFER_IDLE_SEC idle, on `CloseServer` (restore) and `CloseAll` (each new
+  panel connection); closing an upload deletes its temp file; agent startup empties `.gss/uploads`.
+- **Backups** (`backup.json`). Archive `<server>/backups/<id>.tar.zst` (tar + zstd via `klauspost/compress`, pure Go,
+  added to go.mod) + sidecar `<id>.json` (`BackupSidecar`: bytes, files, size). Entries: `gss-backup.json`
+  (`BackupManifest`), `data/…`, `services/<name>/…`. Excludes (`backup.exclude`) apply to data/ only, anchored,
+  `*`/`?` per segment, trailing `/` = folder. Running game: `before` commands, BACKUP_SETTLE_SEC (5 s), data/, `after`
+  commands (also on failure). **Running service containers are paused** (`docker pause`) while their volume is
+  archived: a crash-consistent point-in-time copy that InnoDB/Postgres recover from like a power cut; the game's
+  queries stall for that time. Rows: `pending` → `running` (agent accepted) → `done`/`failed`; a refused create
+  deletes its row. **No migration**: `backups` already has every column (`file` = `backups/<id>.tar.zst`).
+- **Restore**: game stopped/crashed/install_failed only; backup `done`. Agent: close the server's transfers, extract
+  into `<server>/restore-<id>/` (os.Root per root, no `..`/absolute/hard links/devices, setuid bits dropped, uid/gid
+  kept only as root), stop services + game container, journal `<server>/restore.json`, swap by rename (same
+  filesystem), start the game container again (gss-init re-reads the restored install marker; game stays stopped),
+  delete the old folders. The container must restart because gss-init (PID 1) keeps running while the game is
+  stopped and its `/data` bind mount pins the old inode. Interrupted swap → agent startup rolls back from the journal.
+- **One operation per server** (`ServerStatus.operation`, also in hello). While set, provision/start/restart/update/
+  reinstall answer 409; stop is allowed during a backup; delete cancels a backup and is refused during a restore.
+- **Backup limit seam**: `BackupService.assertSlot` counts the server's non-failed backups against the owner's
+  `maxBackups` (DEFAULT_QUOTA_BACKUPS when null; admins pass); M5 replaces it with the user-wide `Quota.assertFits`.
+  Backups don't count toward the server's `diskMb` (they aren't in data/); total disk quota is M5.
+- **Metrics**: agent `statsLoop` every STATS_INTERVAL_SEC (5 s) for games starting/running; stacks **summed** (CPU,
+  memory, pids, and memory *limits* summed too, so used/limit stays meaningful), network from the game container only
+  (game↔db traffic would count twice), `diskBytes` every STATS_DISK_INTERVAL_SEC (60 s) from the disk check's
+  measurement. Panel `MetricRing` (720 samples ≈ 1 h, rates from cumulative counters, decrease = restart),
+  in memory only; `server.stats` live on `server:<id>`; history from `GET …/metrics`.
+- **Players**: gss-init `initd/players.go` matches `players.join/leave` (RE2, ANSI stripped, first group = name,
+  ≤ PLAYER_NAME_MAX_CHARS, ≤ PLAYERS_MAX), emits `player` events, keeps the list in `InitStatus.players`, resets it when
+  the game exits (no leave events). Agent: `server.players` in `ServerStatus.players` (hello reseeds the panel after a
+  panel restart). Panel: `MetricsService` list, `server.players` (whole list) on `server:<id>`; cleared when the state
+  leaves starting/running. Definition validation refuses `players` patterns without a capture group.
+- **Live (M4)**: `server.stats { serverId, sample, diskBytes }` and `server.players`, `backup.progress` (topic
+  `server:<id>`), `backup.updated { serverId, backupId }` (owner + SERVERS_MANAGE_ALL).
+- **Hot paths are no-ops until built**: `MetricsService.{recordStats, applyPlayer, onStateChange, seedFromHello}` and
+  `BackupService.{applyProgress, applyFinished, reconcile}` are wired into the handlers/hello now and do nothing, so
+  the dev instance (watch mode) keeps working; new routes answer 501.
+
+### API routes (M4)
+
+Access: `M` = manage level, `V` = view level (else 404).
+
+| Method | Path | Auth | Body | Response |
+| --- | --- | --- | --- | --- |
+| GET | /api/servers/:id/files?path= | M | | `FileListResponse` |
+| GET | /api/servers/:id/files/content?path= | M | | `FileContentResponse`; 413, 415 not text |
+| PUT | /api/servers/:id/files/content?path=&modifiedAt= | M | text/plain ≤ 2 MiB | `FileEntryDto`; 409 changed |
+| POST | /api/servers/:id/files/folder | M | `CreateFolderBody` | 201 `FileEntryDto`; 409 exists |
+| POST | /api/servers/:id/files/rename | M | `RenameFileBody` | `FileEntryDto`; 409 exists |
+| POST | /api/servers/:id/files/delete | M | `DeleteFilesBody` | `OkResponse` |
+| PUT | /api/servers/:id/files/upload?path=&overwrite= | M | raw, Content-Length | 201 `FileEntryDto`; 409, 411, 413, 429, 507 |
+| POST | /api/servers/:id/files/download | M | `DownloadFileBody` | `DownloadTicketResponse`; 409 folder |
+| GET | /api/downloads/:ticket | ticket | | file stream; 404 unknown/expired |
+| GET | /api/servers/:id/backups | M | | `BackupListResponse` |
+| POST | /api/servers/:id/backups | M | `CreateBackupBody` | 202 `BackupDto`; 409 busy/state/limit/offline, 507 |
+| DELETE | /api/servers/:id/backups/:backupId | M | | `OkResponse`; 409 running |
+| POST | /api/servers/:id/backups/:backupId/restore | M | | 202 `RestoreBackupResponse`; 409 not stopped / not done / busy, 507 |
+| POST | /api/servers/:id/backups/:backupId/download | M | | `DownloadTicketResponse`; 409 not done |
+| GET | /api/servers/:id/metrics | V | | `ServerMetricsResponse` |
+
+Client: ServerDetail tabs Overview (`MetricsPanel` + `PlayerList`, default), Console, Files (`FileManager`), Backups
+(`BackupList`), Settings.
+
+### Failure cases (M4)
+
+| Case | What happens |
+| --- | --- |
+| Path escape (`..`, absolute, symlink out) | `os.Root` refuses it at the walk → `bad_request` → 400 "The path leaves the server's folder."; nothing is opened |
+| Symlink swapped by the game mid-operation | each step resolves beneath the root's fd, so a swap can only redirect inside the data folder |
+| Browser aborts a download | stream `cancel()` → `transfer.close`; agent closes the fd |
+| Browser aborts an upload / body shorter than Content-Length | request signal aborts → `transfer.close` → temp file deleted; 400 for a short body |
+| Panel restarts mid-transfer | agent drops it after TRANSFER_IDLE_SEC (temp deleted) |
+| Agent disconnects mid-transfer | pending requests reject → download truncated (Content-Length tells the browser), upload 503; new connection → `CloseAll` |
+| Agent disconnects during backup/restore | operation continues detached; progress dropped, `backup.finished` kept in the outbox; hello carries `ServerStatus.operation` |
+| Agent restarts during a backup | `.partial` removed at startup; hello has no operation → panel marks the row failed ("The host's agent restarted while the backup ran.") |
+| Agent dies during a restore swap | startup reads `restore.json` and rolls back to the old folders; the row stays `done`, the restore is reported failed |
+| Disk full (backup, upload, restore) | checked before start (free ≥ estimate + 1 GiB → else 507); ENOSPC midway → partial/temp/extract removed, `no_space` / finished with error; live data untouched |
+| Restore while running / installing | 409 "Stop the server first." (panel state check; agent checks again) |
+| Start while a restore runs | agent 409 "A restore of this server is running…" |
+| Backup of a server mid-install / creating / deleting | 409 "Wait until the install finishes." |
+| Second backup while one runs | 409 (panel `_operations`, agent `s.operation`) |
+| Backup limit reached | 409 naming the limit; delete an old backup first (no automatic rotation in v1) |
+| Pause of a service container fails | backup fails (no inconsistent DB copy), containers unpaused |
+| Archive written but `backup.finished` lost (agent crash right after) | row failed; delete of a failed row still deletes the file on the host |
+| Text file changed since it was opened | 409; the editor offers reload or overwrite |
+
+### Boundaries added in M4
+
+| From | May import | Never |
+| --- | --- | --- |
+| `servers/{File,Backup,Metrics}Service.ts` | `ServerAccess`, `agentCall`, `transfers/*`, `LiveGateway`, models, `@shared` | Hono `Context`, `AgentGateway` directly (use `agentCall`) |
+| `transfers/*` | `agentCall`, `@shared` | models, controllers (callers check access) |
+| `controllers/{File,Backup,Metrics,Download}Controller.ts` | their service, `transfers/DownloadTickets` + `TransferRelay` (Download only), lib | `agentCall`, models beyond `AuditLog`/`User` |
+| `agent/internal/files` | stdlib, `protocol` | `servers`, `docker`, `panel` |
+| `agent/internal/backups` | stdlib, `klauspost/compress/zstd`, `protocol` | `servers`, `docker`, `panel` |
+| `agent/internal/servers` (M4 files) | `files`, `backups` | `panel`; reports through `Sink` |
+| `agent/internal/agent/files.go` | `servers.Manager`, `files.Transfers`, `protocol` | `os` paths directly (always through `files.FS`) |
+
+### Extension points (M4)
+
+- `TransferSource` + `TransferRelay.DownloadSource`: new downloadable kinds (e.g. a folder as tar later).
+- `BackupService.assertSlot`: the quota seam (M5). Schedules (later) call `BackupService.create` with `createdById`
+  null.
+- `ServerAccess.Level`: sharing UI (M5) only adds rows to `server_shares`.
+- `ServerStats` per-service breakdown: add a `services` list to the schema; the summed fields stay.
+
+## M4 work split
+
+Main-session-only files (as before, plus; all M4 contracts are already in them): `protocol/schema/*` + generated,
+`shared/api/{files,backups,metrics}.ts`, `shared/live.ts`, `shared/constants.ts`, `shared/index.ts`,
+`server/src/{App,Config}.ts`, `.env.example`, compose files, `ApiController.ts`, `gateways/agent/handlers/{index,hello,
+serverState}.ts`, `gateways/agent/AgentConnection.ts`, `models/User.ts`, `servers/{ServerAccess,agentCall}.ts`,
+`agent/go.mod`/`go.sum`, `agent/internal/docker/**` (Pause/Unpause done), `agent/internal/paths/**`,
+`agent/internal/servers/{manager,new,server}.go` (fields and `Status()` done; parcel C may edit `server.go`'s watcher
+for players only), `agent/internal/agent/agent.go`, `client/src/Api/BaseApi.ts` (A fills `PUT_TEXT`/`UPLOAD`, nothing
+else), `client/src/pages/ServerDetail/ServerDetail.tsx` (tabs done). Need a change there? Report it back.
+
+| Parcel | Difficulty / route | Owns | Contract | Verify on its own |
+| --- | --- | --- | --- | --- |
+| **A: files + transfers (agent + panel)** | **Hard** (confinement, concurrency, streaming backpressure): `builder-opus` | `agent/internal/files/**` (+ tests), `agent/internal/agent/files.go`, `agent/internal/servers/files.go`, `server/src/transfers/**`, `server/src/servers/FileService.ts`, `server/src/controllers/{File,Download}Controller.ts`, `BaseApi.PUT_TEXT`/`UPLOAD` bodies | `files.json`, `shared/api/files.ts`, `TransferRelay`/`DownloadTickets` signatures | `go test ./internal/files/...`: table tests with planted symlinks (absolute, `../..`, chained, swapped between calls), `..`, NUL, rename into itself, overwrite rules, ENOSPC via a small tmpfs is optional. Panel on a private port (`PORT=3301 DB_NAME=gss_b`, migrate), a second agent enrolled to it with its own `--config`, data root and `egressTable` (never the dev agent), a hand-provisioned scratch server or a fake server folder: curl list/read/write (409 on stale modifiedAt)/mkdir/rename/delete; upload a 1 GiB file (`curl -T`), watch panel RSS stay flat (`ps -o rss`), kill curl midway → temp gone; download via ticket (`curl -OJ`), `cmp` with the source; second use of a ticket → 404; kill the scratch agent mid-download → truncated + agent restart clears `.gss/uploads` |
+| **B: backups + restore (agent + panel)** | **Hard** (data-loss paths, lifecycle interplay, crash recovery): `builder-opus` | `agent/internal/backups/**` (+ tests), `agent/internal/servers/backup.go`, the `checkIdleLocked` calls in `servers/{lifecycle,provision}.go`, startup cleanup + journal rollback in `servers/restore.go`, `server/src/servers/BackupService.ts`, `server/src/controllers/BackupController.ts`, `gateways/agent/handlers/backup{Progress,Finished}.ts` | `backup.json`, `shared/api/backups.ts`, `Manager.{Create,Restore,Delete}Backup`/`BackupArchive`, `Sink.Backup*`, `TransferRelay.openDownload` (A) for downloads | `go test ./internal/backups/...`: round trip with excludes, symlinks, modes; hostile archives (`../x`, absolute, symlink-then-file, hard link, device) refused. Private panel `PORT=3302 DB_NAME=gss_c` + own scratch agent: Minecraft server → backup while running (console shows save-off/save-all/save-on), backup of `garrys-mod-mysql` (db paused then resumed, `docker inspect` State.Paused false after), restore while running → 409, stop → restore → world back, `kill -9` the agent between the renames (env hook or debugger) → restart rolls back; limit 409 at `DEFAULT_QUOTA_BACKUPS`; download via a ticket once A lands (else `transfer.open` by hand) |
+| **C: metrics + players (agent, gss-init, panel, client)** | Medium: `builder` | `agent/internal/servers/stats.go`, players in `servers/server.go`'s watcher, `agent/internal/initd/players.go` + its wiring in `initd/initd.go` (onGameOutput, exit, statusLocked), `players` validation in `server/src/definitions/DefinitionEngine.ts` (capture group), `server/src/servers/{MetricsService,MetricRing}.ts`, `server/src/controllers/MetricsController.ts`, `gateways/agent/handlers/server{Stats,Player}.ts`, `client/src/Api/MetricsApi.ts`, `client/src/components/{MetricsPanel,PlayerList}/**` | `server.json` (`ServerStats`, `PlayerEvent`, `ServerStatus.players`), `supervisor.json` (`InitStatus.players`), `shared/api/metrics.ts`, live `server.stats`/`server.players` | `go test ./internal/initd/...` (players: join/leave/dup/limit/reset, ANSI lines); private panel `PORT=3303 DB_NAME=gss_d` + own scratch agent: a running Minecraft server → `/ws/live` subscriber gets `server.stats` every 5 s with rates, `diskBytes` once a minute; join with a client (or `say`-free: feed matching lines through a scratch gss-init spec) → `server.players`; stop → list empties; restart the panel → hello reseeds players. Client: `npm run typecheck && npm run build`, headless Playwright with mocked `/metrics` and socket, screenshots light + dark |
+| **D: client Files + Backups tabs** | Medium: `builder` | `client/src/components/{FileManager,BackupList}/**`, `client/src/Api/{File,Backup}Api.ts` | `shared/api/{files,backups}.ts`, live `backup.updated`/`backup.progress`, `BaseApi.PUT_TEXT`/`UPLOAD` (stub-reject until A; mock in tests) | `npm run typecheck && npm run build`; headless Playwright against `deno task dev` with `page.route("/api/servers/*/files*")` / `/backups*` mocks and a mocked socket: breadcrumb navigation, open/edit/save (409 dialog), upload with progress and cancel, overwrite prompt, rename, delete confirm, new folder, download (ticket → `<a download>`); backups list, create, progress bar from `backup.progress`, restore disabled while running, delete confirm. Screenshots light + dark, phone width |
+
+Order: all four in parallel. A ↔ B meet at `transfer.open` with `source: "backup"` (`Manager.BackupArchive`) and at
+`Options.Transfers.CloseServer` (restore); A ↔ D and B ↔ D at `shared/api/*` (D mocks until they land); C stands alone.
+Builders never stop the dev instance (:3200/:5200) or its agent, never `pkill` by pattern, and use their own port,
+scratch DB, agent config, data root and `egressTable`. Integration (main): real Minecraft world restore from the UI on
+this machine, a 1 GiB upload and download through the UI, charts and players live while someone joins.

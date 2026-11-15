@@ -68,6 +68,11 @@ type Client interface {
 	ContainerList(ctx context.Context, label string) ([]ContainerInfo, error)
 	// ContainerStats takes one stats sample (stream=false).
 	ContainerStats(ctx context.Context, name string) (Stats, error)
+	// ContainerPause freezes every process of a running container (cgroup freezer), e.g. a stack's database while its
+	// volume is archived (M4). A paused container is not an error.
+	ContainerPause(ctx context.Context, name string) error
+	// ContainerUnpause thaws a paused container. One that isn't paused is not an error.
+	ContainerUnpause(ctx context.Context, name string) error
 }
 
 // VersionInfo is the subset of GET /version the agent reports.

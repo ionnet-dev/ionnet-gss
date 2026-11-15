@@ -11,6 +11,7 @@ import (
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/config"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/docker"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/egress"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/files"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/hostfacts"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/panel"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/paths"
@@ -26,6 +27,8 @@ type Agent struct {
 	Servers servers.Manager
 	// Outbox carries server events to the panel and buffers state changes while it is away.
 	Outbox *panel.Outbox
+	// Transfers holds the open file transfers (M4, files.go); all are closed when a new panel connection starts.
+	Transfers *files.Transfers
 }
 
 // New builds an agent from a loaded config (defaults applied). Servers live below Config.DataRoot.
@@ -37,18 +40,21 @@ func New(cfg config.Config) (*Agent, error) {
 	}
 	outbox := panel.NewOutbox(panel.DefaultOutboxLimit, panel.DefaultOutboxBytes)
 	layout := paths.Layout{Root: cfg.DataRoot}
+	transfers := files.NewTransfers()
 	firewall := egress.New(egress.Options{Docker: dockerClient, Image: cfg.HelperImage, Dir: layout.NetfilterDir(), Table: cfg.EgressTable})
 	return &Agent{
 		Config: cfg,
 		Docker: dockerClient,
 		Facts:  hostfacts.New(cfg.DataRoot, dockerClient, firewall.Facts),
 		Servers: servers.New(servers.Options{
-			Layout: layout,
-			Docker: dockerClient,
-			Sink:   panelSink{outbox: outbox},
-			Egress: firewall,
+			Layout:    layout,
+			Docker:    dockerClient,
+			Sink:      panelSink{outbox: outbox},
+			Egress:    firewall,
+			Transfers: transfers,
 		}),
-		Outbox: outbox,
+		Outbox:    outbox,
+		Transfers: transfers,
 	}, nil
 }
 
@@ -96,6 +102,8 @@ func (a *Agent) hello(ctx context.Context) (protocol.HelloRequest, error) {
 
 // onConnected starts the heartbeat loop (every hello.HeartbeatSec, until conn.Done()).
 func (a *Agent) onConnected(ctx context.Context, conn panel.Conn, hello protocol.HelloResponse) {
+	// Transfer ids belong to one connection: the panel failed every request of the previous one.
+	a.Transfers.CloseAll()
 	interval := time.Duration(hello.HeartbeatSec) * time.Second
 	if interval <= 0 {
 		interval = defaultHeartbeat
@@ -137,12 +145,13 @@ const (
 	provisionTimeout = time.Duration(protocol.ProvisionTimeoutSec) * time.Second // includes an image pull
 	restartTimeout   = 10 * time.Minute                                          // includes a graceful stop
 	operationTimeout = 2 * time.Minute
+	fileTimeout      = time.Duration(protocol.TransferIdleSec) * time.Second // one file request or chunk
 )
 
 // handlers maps panel → agent request types to their handlers. A new panel → agent request: schema in protocol/,
 // `deno task protocol`, a method on Agent, one entry here.
 func (a *Agent) handlers() panel.Handlers {
-	return panel.Handlers{
+	handlers := panel.Handlers{
 		Requests: map[string]panel.RequestHandler{
 			protocol.MsgServerProvision: serve(provisionTimeout, func(ctx context.Context, req protocol.ProvisionRequest) (any, error) {
 				return a.Servers.Provision(ctx, req)
@@ -168,8 +177,22 @@ func (a *Agent) handlers() panel.Handlers {
 			protocol.MsgServerUpdate: serve(provisionTimeout, func(ctx context.Context, req protocol.ServerRef) (any, error) {
 				return a.Servers.Update(ctx, req.ServerID)
 			}),
+			// M4: backups (servers/backup.go); files and transfers in fileHandlers (files.go).
+			protocol.MsgBackupCreate: serve(operationTimeout, func(ctx context.Context, req protocol.BackupRef) (any, error) {
+				return a.Servers.CreateBackup(ctx, req)
+			}),
+			protocol.MsgBackupRestore: serve(operationTimeout, func(ctx context.Context, req protocol.BackupRef) (any, error) {
+				return a.Servers.RestoreBackup(ctx, req)
+			}),
+			protocol.MsgBackupDelete: serve(operationTimeout, func(ctx context.Context, req protocol.BackupRef) (any, error) {
+				return protocol.Empty{}, a.Servers.DeleteBackup(ctx, req)
+			}),
 		},
 	}
+	for msg, handler := range a.fileHandlers() {
+		handlers.Requests[msg] = handler
+	}
+	return handlers
 }
 
 // serve decodes a request into T and runs fn with its own timeout, detached from the connection's context.
@@ -192,9 +215,9 @@ func serve[T any](timeout time.Duration, fn func(ctx context.Context, req T) (an
 	}
 }
 
-// panelSink forwards server reports through the outbox. While the panel is away state changes, service statuses
-// and player events are kept, console lines are buffered (dropped first; a restarted agent's catch-up arrives this way), and stats are
-// dropped (the next sample replaces them).
+// panelSink forwards server reports through the outbox. While the panel is away state changes, service statuses,
+// backup results and player events are kept, console lines are buffered (dropped first; a restarted agent's catch-up arrives this way), and stats are
+// dropped (the next sample replaces them), like backup progress.
 type panelSink struct {
 	outbox *panel.Outbox
 }
@@ -217,4 +240,12 @@ func (p panelSink) Player(event protocol.PlayerEvent) {
 
 func (p panelSink) Services(change protocol.ServicesChange) {
 	p.outbox.Emit(protocol.MsgServerServices, change, panel.DeliverAlways)
+}
+
+func (p panelSink) BackupProgress(progress protocol.BackupProgress) {
+	p.outbox.Emit(protocol.MsgBackupProgress, progress, panel.DeliverOnline)
+}
+
+func (p panelSink) BackupFinished(finished protocol.BackupFinished) {
+	p.outbox.Emit(protocol.MsgBackupFinished, finished, panel.DeliverAlways)
 }

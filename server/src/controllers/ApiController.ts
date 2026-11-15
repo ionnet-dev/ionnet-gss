@@ -2,6 +2,10 @@ import { Hono } from "hono";
 import type { AppEnv } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { AuthController } from "./AuthController.ts";
+import { BackupController } from "./BackupController.ts";
+import { DownloadController } from "./DownloadController.ts";
+import { FileController } from "./FileController.ts";
+import { MetricsController } from "./MetricsController.ts";
 import { DefinitionController } from "./DefinitionController.ts";
 import { SourceController } from "./SourceController.ts";
 import { ServerController } from "./ServerController.ts";
@@ -26,10 +30,12 @@ export namespace ApiController {
   router.route("/hosts", HostController.router);
   router.route("/enrol-tokens", EnrolTokenController.router);
   router.route("/servers", ServerController.router);
+  router.route("/servers/:id/files", FileController.router); // M4
+  router.route("/servers/:id/backups", BackupController.router); // M4
+  router.route("/servers/:id/metrics", MetricsController.router); // M4
+  router.route("/downloads", DownloadController.router); // M4: public, the ticket is the auth
   router.route("/definitions", DefinitionController.router);
   router.route("/sources", SourceController.router);
-  // M3: router.route("/sources", SourceController.router);
-  // M4: router.route("/servers/:id/files", FileController.router); /backups → BackupController
 
   router.all("*", (c) => {
     throw HttpError.notFound(`No API route for ${c.req.method} ${c.req.path}.`);

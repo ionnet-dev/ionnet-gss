@@ -57,7 +57,8 @@
     },
     "ErrorCode": {
       "type": "string",
-      "enum": ["bad_request", "unauthorized", "forbidden", "not_found", "conflict", "unsupported", "timeout", "internal", "port_in_use"]
+      "description": "M4 added too_large (a file over FILE_TEXT_MAX_BYTES, a chunk over TRANSFER_CHUNK_BYTES: HTTP 413) and no_space (the host's disk or the server's disk limit: HTTP 507).",
+      "enum": ["bad_request", "unauthorized", "forbidden", "not_found", "conflict", "unsupported", "timeout", "internal", "port_in_use", "too_large", "no_space"]
     },
     "PortInUse": {
       "type": "object",

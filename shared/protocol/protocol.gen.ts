@@ -52,6 +52,76 @@ export const CLOSE_UNSUPPORTED_VERSION = 4426;
 export const CLOSE_ENROLLED = 4000;
 
 /**
+ * Archive file extension.
+ */
+export const BACKUP_EXTENSION = ".tar.zst";
+
+/**
+ * Most one `backup.progress` per operation per this many seconds.
+ */
+export const BACKUP_PROGRESS_INTERVAL_SEC = 2;
+
+/**
+ * Wait after the definition's `backup.before` console commands before the archive starts (the game flushes its saves).
+ */
+export const BACKUP_SETTLE_SEC = 5;
+
+/**
+ * First entry of every archive.
+ */
+export const BACKUP_MANIFEST_NAME = "gss-backup.json";
+
+/**
+ * `BackupManifest.format`; a restore refuses archives with a higher one.
+ */
+export const BACKUP_FORMAT_VERSION = 1;
+
+/**
+ * Largest file `files.read` returns and `files.write` accepts (the panel's text editor). Larger files are downloaded and uploaded instead.
+ */
+export const FILE_TEXT_MAX_BYTES = 2097152;
+
+/**
+ * Most entries one `files.list` answer holds; `truncated` says more exist.
+ */
+export const FILES_LIST_MAX_ENTRIES = 5000;
+
+/**
+ * Most paths in one `files.delete`.
+ */
+export const FILES_DELETE_MAX_PATHS = 100;
+
+/**
+ * Largest chunk of one `transfer.read` answer or `transfer.write` request, in raw bytes (about 683 KiB as base64).
+ */
+export const TRANSFER_CHUNK_BYTES = 524288;
+
+/**
+ * Most `transfer.read` / `transfer.write` requests the panel keeps in flight per transfer.
+ */
+export const TRANSFER_WINDOW = 4;
+
+/**
+ * The agent closes a transfer that saw no request for this long (an unfinished upload's temporary file is removed). Also every transfer is closed when the panel connection is replaced.
+ */
+export const TRANSFER_IDLE_SEC = 120;
+
+/**
+ * Most open transfers per agent; `transfer.open` beyond it answers `conflict`.
+ */
+export const TRANSFER_MAX_OPEN = 16;
+
+/**
+ * Free space an upload (or a write) must leave on the host's data disk; otherwise `no_space`.
+ */
+export const UPLOAD_DISK_RESERVE_BYTES = 1073741824;
+
+/**
+ * Folder below the data folder where uploads are written before `transfer.commit` renames them into place (same filesystem, inside the same root). Emptied by the agent at startup.
+ */
+export const UPLOAD_TEMP_DIR = ".gss/uploads";
+
+/**
  * Longest console line text in UTF-8 bytes. gss-init splits longer output; the panel truncates a longer line instead of refusing its batch.
  */
 export const CONSOLE_LINE_MAX_BYTES = 8192;
@@ -75,6 +145,26 @@ export const CONSOLE_BACKLOG_MAX_LINES = 1000;
  * How long the agent works on one `server.provision` (image pull included) before it gives up and answers `timeout`. The panel waits a little longer, so the agent's answer always arrives first.
  */
 export const PROVISION_TIMEOUT_SEC = 900;
+
+/**
+ * How often the agent samples Docker stats of every server whose game is starting or running (M4).
+ */
+export const STATS_INTERVAL_SEC = 5;
+
+/**
+ * How often a sample carries `diskBytes` (data/ + services/, the disk check's measurement); null in the samples between.
+ */
+export const STATS_DISK_INTERVAL_SEC = 60;
+
+/**
+ * Most players gss-init tracks per server; joins beyond it are ignored until someone leaves.
+ */
+export const PLAYERS_MAX = 1000;
+
+/**
+ * Longer captured names are cut.
+ */
+export const PLAYER_NAME_MAX_CHARS = 64;
 
 /**
  * Where gss-init reads its spec (read-only mount).
@@ -166,8 +256,11 @@ export interface ErrorBody {
   port?: PortInUse;
 }
 
-export type ErrorCode = "bad_request" | "unauthorized" | "forbidden" | "not_found" | "conflict" | "unsupported" | "timeout" | "internal" | "port_in_use";
-export const ERROR_CODE_VALUES: readonly ErrorCode[] = ["bad_request", "unauthorized", "forbidden", "not_found", "conflict", "unsupported", "timeout", "internal", "port_in_use"];
+/**
+ * M4 added too_large (a file over FILE_TEXT_MAX_BYTES, a chunk over TRANSFER_CHUNK_BYTES: HTTP 413) and no_space (the host's disk or the server's disk limit: HTTP 507).
+ */
+export type ErrorCode = "bad_request" | "unauthorized" | "forbidden" | "not_found" | "conflict" | "unsupported" | "timeout" | "internal" | "port_in_use" | "too_large" | "no_space";
+export const ERROR_CODE_VALUES: readonly ErrorCode[] = ["bad_request", "unauthorized", "forbidden", "not_found", "conflict", "unsupported", "timeout", "internal", "port_in_use", "too_large", "no_space"];
 
 /**
  * A host port something else already holds (M3: Docker's bind failed). The panel retries the allocation once without it.
@@ -181,6 +274,103 @@ export interface PortInUse {
  * No payload.
  */
 export type Empty = Record<string, never>;
+
+//#endregion
+
+//#region backup.json
+export type BackupOperation = "create" | "restore";
+export const BACKUP_OPERATION_VALUES: readonly BackupOperation[] = ["create", "restore"];
+
+export interface BackupRef {
+  serverId: string;
+  /**
+   * The panel's `backups.id`; the archive is `<backupId>.tar.zst`, so no path ever travels.
+   */
+  backupId: number;
+}
+
+/**
+ * The operation a server runs right now.
+ */
+export interface BackupOperationStatus {
+  serverId: string;
+  backupId: number;
+  operation: BackupOperation;
+  startedAt: string;
+  /**
+   * Uncompressed bytes processed so far.
+   */
+  bytes: number;
+  /**
+   * Estimate: create = the last disk measurement of data/ + services/; restore = the sidecar's `bytes`. null when unknown.
+   */
+  totalBytes: number | null;
+}
+
+export interface BackupProgress {
+  serverId: string;
+  backupId: number;
+  operation: BackupOperation;
+  bytes: number;
+  totalBytes: number | null;
+  at: string;
+}
+
+export interface BackupFinished {
+  serverId: string;
+  backupId: number;
+  operation: BackupOperation;
+  ok: boolean;
+  /**
+   * create: size of the finished archive; null otherwise.
+   */
+  sizeBytes: number | null;
+  /**
+   * Readable cause when not ok, e.g. `The host's disk is full (2.1 GB free, about 6 GB needed).`
+   */
+  error: string | null;
+  at: string;
+}
+
+/**
+ * `gss-backup.json`, the first archive entry.
+ */
+export interface BackupManifest {
+  /**
+   * BACKUP_FORMAT_VERSION at creation.
+   */
+  format: number;
+  serverId: string;
+  backupId: number;
+  createdAt: string;
+  definition: DefinitionRef;
+  specHash: string;
+  /**
+   * Top-level folders in the archive: `data`, `services/<name>`…
+   */
+  roots: string[];
+  /**
+   * The game was running while the archive was taken (before/after commands were sent).
+   */
+  running: boolean;
+}
+
+/**
+ * `<backupId>.json` next to the archive, written after it is complete; the restore's disk check reads it.
+ */
+export interface BackupSidecar {
+  manifest: BackupManifest;
+  /**
+   * Uncompressed bytes of every regular file archived.
+   */
+  bytes: number;
+  files: number;
+  /**
+   * Archive size.
+   */
+  sizeBytes: number;
+  finishedAt: string;
+}
 
 //#endregion
 
@@ -465,7 +655,7 @@ export interface RconSpec {
 }
 
 /**
- * Console patterns whose first capture group is the player name.
+ * Console patterns (RE2 syntax: gss-init matches them in Go, on output lines with ANSI codes stripped) whose first capture group is the player name. Validation refuses a pattern without a capture group.
  */
 export interface PlayersSpec {
   join?: string;
@@ -479,7 +669,7 @@ export interface BackupSpec {
   before?: string[];
   after?: string[];
   /**
-   * Paths below /data; a trailing slash means a folder.
+   * Paths below /data, relative, `/`-separated; a trailing slash means a folder; `*` and `?` match within one path segment (`logs/`, `cache/`, `*.log`, `world/session.lock`). Applies to data/ only, never to service volumes.
    */
   exclude?: string[];
 }
@@ -537,6 +727,184 @@ export interface ServiceLimits {
   memoryMb?: number;
   cpuMillis?: number;
   pids?: number;
+}
+
+//#endregion
+
+//#region files.json
+/**
+ * other = sockets, devices, fifos: listed, never opened.
+ */
+export type FileType = "file" | "dir" | "symlink" | "other";
+export const FILE_TYPE_VALUES: readonly FileType[] = ["file", "dir", "symlink", "other"];
+
+export interface FileEntry {
+  name: string;
+  /**
+   * Relative to the data folder, `/`-separated, no leading slash; `""` is the data folder itself.
+   */
+  path: string;
+  type: FileType;
+  /**
+   * Bytes; 0 for folders.
+   */
+  size: number;
+  /**
+   * RFC 3339 with nanoseconds, UTC. Pass it back unchanged as `expectedModifiedAt`.
+   */
+  modifiedAt: string;
+  /**
+   * Permission bits (e.g. 420 = 0644).
+   */
+  mode: number;
+  /**
+   * symlink only: where it points, as stored (it may lead out of the data folder; following it is refused then).
+   */
+  linkTarget: string | null;
+}
+
+export interface FilesPathRequest {
+  serverId: string;
+  /**
+   * Relative to the data folder; `""` = the data folder.
+   */
+  path: string;
+}
+
+export interface FilesListResponse {
+  /**
+   * The listed folder, cleaned.
+   */
+  path: string;
+  entries: FileEntry[];
+  /**
+   * More than `FILES_LIST_MAX_ENTRIES` entries exist; only the first ones (in order) are listed.
+   */
+  truncated: boolean;
+}
+
+export interface FilesReadResponse {
+  entry: FileEntry;
+  /**
+   * Not UTF-8 text (or holds a NUL byte): `contentBase64` is empty.
+   */
+  binary: boolean;
+  contentBase64: string;
+}
+
+export interface FilesWriteRequest {
+  serverId: string;
+  path: string;
+  /**
+   * At most `FILE_TEXT_MAX_BYTES` once decoded.
+   */
+  contentBase64: string;
+  /**
+   * The `modifiedAt` the editor loaded; a different current value answers `conflict`. null = create or overwrite without checking.
+   */
+  expectedModifiedAt: string | null;
+}
+
+export interface FilesRenameRequest {
+  serverId: string;
+  from: string;
+  /**
+   * Full new path (a move when the folder differs). The parent must exist.
+   */
+  to: string;
+  /**
+   * Replace an existing file at `to` (never a folder).
+   */
+  overwrite: boolean;
+}
+
+export interface FilesDeleteRequest {
+  serverId: string;
+  /**
+   * At most `FILES_DELETE_MAX_PATHS`; `""` is refused.
+   */
+  paths: string[];
+}
+
+export type TransferDirection = "download" | "upload";
+export const TRANSFER_DIRECTION_VALUES: readonly TransferDirection[] = ["download", "upload"];
+
+/**
+ * file: a path in the data folder; backup: a finished backup archive (download only).
+ */
+export type TransferSource = "file" | "backup";
+export const TRANSFER_SOURCE_VALUES: readonly TransferSource[] = ["file", "backup"];
+
+export interface TransferOpenRequest {
+  /**
+   * Chosen by the panel.
+   */
+  transferId: string;
+  serverId: string;
+  direction: TransferDirection;
+  source: TransferSource;
+  /**
+   * source file: the file to download, or the upload's final path (its folder must exist).
+   */
+  path?: string;
+  /**
+   * source backup: the panel's backup id.
+   */
+  backupId?: number;
+  /**
+   * upload: exact byte count (the browser's Content-Length).
+   */
+  size?: number;
+  /**
+   * upload: replace an existing file at `path` on commit.
+   */
+  overwrite?: boolean;
+}
+
+export interface TransferOpenResponse {
+  transferId: string;
+  /**
+   * Base name of the file (`<backupId>.tar.zst` for a backup; the panel names that download after the server and the backup itself).
+   */
+  name: string;
+  /**
+   * download: bytes to read (the panel sends it as Content-Length); upload: the announced size.
+   */
+  size: number;
+}
+
+export interface TransferReadRequest {
+  transferId: string;
+  offset: number;
+  /**
+   * At most `TRANSFER_CHUNK_BYTES`.
+   */
+  length: number;
+}
+
+export interface TransferChunk {
+  offset: number;
+  /**
+   * Shorter than asked only at the end of the file.
+   */
+  dataBase64: string;
+  /**
+   * offset + length reached the size from `transfer.open`.
+   */
+  eof: boolean;
+}
+
+export interface TransferWriteRequest {
+  transferId: string;
+  offset: number;
+  /**
+   * At most `TRANSFER_CHUNK_BYTES` once decoded.
+   */
+  dataBase64: string;
+}
+
+export interface TransferRef {
+  transferId: string;
 }
 
 //#endregion
@@ -742,6 +1110,14 @@ export interface ServerStatus {
    * Stack services (M3); empty for single-container servers.
    */
   services: ServiceStatus[];
+  /**
+   * Players online now, in join order (M4, from gss-init's `InitStatus.players`). Absent from older agents; empty when the game isn't running.
+   */
+  players?: string[];
+  /**
+   * The backup or restore running right now (M4). In `hello`, a panel backup row that is pending/running but not named here failed (the agent restarted).
+   */
+  operation?: BackupOperationStatus | null;
 }
 
 /**
@@ -969,19 +1345,34 @@ export interface StatsBatch {
   servers: ServerStats[];
 }
 
+/**
+ * One sample of a server. Stacks are summed over the game container and every running service container (CPU, memory, memory limit, pids); network counts the game container only, so traffic between the game and its services isn't counted twice.
+ */
 export interface ServerStats {
   serverId: string;
   /**
    * 100 = one CPU fully used.
    */
   cpuPercent: number;
+  /**
+   * Without reclaimable page cache, like `docker stats`.
+   */
   memoryBytes: number;
+  /**
+   * Sum of the counted containers' limits.
+   */
   memoryLimitBytes: number;
+  /**
+   * Cumulative bytes received since the game container started; the panel derives rates and treats a decrease as a restart.
+   */
   netRxBytes: number;
+  /**
+   * Cumulative bytes sent, like `netRxBytes`.
+   */
   netTxBytes: number;
   pids: number;
   /**
-   * Size of the data folder; null when not measured in this sample (it is measured once a minute).
+   * data/ + services/ as the disk check measured it; null when not part of this sample (every STATS_DISK_INTERVAL_SEC).
    */
   diskBytes: number | null;
 }
@@ -1077,6 +1468,10 @@ export interface InitStatus {
    * Cause of install_failed / crashed.
    */
   reason: string | null;
+  /**
+   * Players online now, in join order (M4). Emptied when the game process exits.
+   */
+  players?: string[];
 }
 
 export interface InitStopRequest {
@@ -1143,6 +1538,14 @@ export interface AgentToPanelRequests {
  */
 export interface AgentToPanelEvents {
   /**
+   * Bytes processed so far, at most every BACKUP_PROGRESS_INTERVAL_SEC. Dropped while the panel is away. (M4)
+   */
+  "backup.progress": BackupProgress;
+  /**
+   * An operation ended (ok or not). Never dropped. (M4)
+   */
+  "backup.finished": BackupFinished;
+  /**
    * Every `heartbeatSec` seconds after a successful hello. (M1)
    */
   "heartbeat": Heartbeat;
@@ -1155,11 +1558,11 @@ export interface AgentToPanelEvents {
    */
   "server.state": StateChange;
   /**
-   * Docker stats for every running server, every 5 seconds. (M2)
+   * Docker stats for every server whose game is starting or running, every STATS_INTERVAL_SEC (one batch per agent; servers without a sample are left out). Dropped while the panel is away. (M4)
    */
   "server.stats": StatsBatch;
   /**
-   * A player joined or left (from the definition's `players` patterns). (M4)
+   * A player joined or left (from the definition's `players` patterns). The list resets when the game process stops; the current list is also in `ServerStatus.players`. (M4)
    */
   "server.player": PlayerEvent;
   /**
@@ -1172,6 +1575,66 @@ export interface AgentToPanelEvents {
  * Requests `panel` sends on the `agent` channel. Panel and agent, over the WebSocket the agent dials to /ws/agent.
  */
 export interface PanelToAgentRequests {
+  /**
+   * Archive the data folder (minus the spec's `backup.exclude`) and every stack service volume. While the game runs: `backup.before` commands, BACKUP_SETTLE_SEC, archive data/, `backup.after` commands (also after a failure); running service containers are paused while their volume is archived (crash-consistent copy). Refused (`conflict`) while installing, while another operation runs, or with too little free disk (`no_space`). Answers when it has begun. (M4)
+   */
+  "backup.create": { request: BackupRef; response: BackupOperationStatus };
+  /**
+   * Replace the data folder (and the service volumes the archive holds) with the archive's. Only while the game is stopped, crashed or install_failed (`conflict` otherwise). Extracts beside the live folders, then stops the containers, swaps by rename (journal in `<server>/restore.json`, rolled back at agent startup when interrupted), and starts the game container again (the game stays stopped). Answers when it has begun. (M4)
+   */
+  "backup.restore": { request: BackupRef; response: BackupOperationStatus };
+  /**
+   * Remove an archive and its sidecar (a missing one is not an error). `conflict` while that backup is being created or restored. (M4)
+   */
+  "backup.delete": { request: BackupRef; response: Empty };
+  /**
+   * List one folder (not recursive), folders first, then by name. (M4)
+   */
+  "files.list": { request: FilesPathRequest; response: FilesListResponse };
+  /**
+   * One entry. A symlink is reported as itself (`symlink`, with `linkTarget`). (M4)
+   */
+  "files.stat": { request: FilesPathRequest; response: FileEntry };
+  /**
+   * A whole regular file of at most `FILE_TEXT_MAX_BYTES` (`too_large` otherwise). `binary` is set (and no content sent) when it isn't UTF-8 text or holds a NUL byte. (M4)
+   */
+  "files.read": { request: FilesPathRequest; response: FilesReadResponse };
+  /**
+   * Replace (or create) a regular file atomically: temporary file in the same folder, then rename. Keeps an existing file's mode; new files are 0644 and owned by GAME_UID. `conflict` when `expectedModifiedAt` is set and differs. (M4)
+   */
+  "files.write": { request: FilesWriteRequest; response: FileEntry };
+  /**
+   * Create one folder (0755, GAME_UID); the parent must exist. `conflict` when the name is taken. (M4)
+   */
+  "files.mkdir": { request: FilesPathRequest; response: FileEntry };
+  /**
+   * Rename or move within the data folder. `conflict` when the target exists and `overwrite` is false, or when a folder would move into itself. (M4)
+   */
+  "files.rename": { request: FilesRenameRequest; response: FileEntry };
+  /**
+   * Delete files and folders (folders recursively). A symlink is removed, never its target. The data folder itself can't be deleted. (M4)
+   */
+  "files.delete": { request: FilesDeleteRequest; response: Empty };
+  /**
+   * Start a download (a regular file in the data folder, or a finished backup archive) or an upload (into `UPLOAD_TEMP_DIR`, checked against free disk and the server's disk limit first). (M4)
+   */
+  "transfer.open": { request: TransferOpenRequest; response: TransferOpenResponse };
+  /**
+   * One chunk of a download, by offset (random access, so several may be in flight). (M4)
+   */
+  "transfer.read": { request: TransferReadRequest; response: TransferChunk };
+  /**
+   * One chunk of an upload, by offset. Chunks may arrive out of order; ranges must not overlap or pass the announced size. (M4)
+   */
+  "transfer.write": { request: TransferWriteRequest; response: Empty };
+  /**
+   * Finish an upload: check that the written ranges cover exactly [0, size), fsync, rename into place (honouring `overwrite`), hand it to GAME_UID, close the transfer. (M4)
+   */
+  "transfer.commit": { request: TransferRef; response: FileEntry };
+  /**
+   * Abort or finish a transfer: close the file; an uncommitted upload's temporary file is removed. Unknown ids are not an error. (M4)
+   */
+  "transfer.close": { request: TransferRef; response: Empty };
   /**
    * Create or update a server from a resolved spec: data folder, image (pull or derived build), network, container. Idempotent for an unchanged `specHash`. (M2)
    */
@@ -1272,7 +1735,7 @@ export interface InitToAgentEvents {
    */
   "state": StateChange;
   /**
-   * A `players` pattern matched. (M4)
+   * A `players` pattern matched on a game output line (ANSI stripped; first capture group = name, cut to PLAYER_NAME_MAX_CHARS). A join of a name already listed and a leave of an unknown name send nothing. No leave events are sent when the game exits: the list just resets. (M4)
    */
   "player": PlayerEvent;
 }
@@ -1281,6 +1744,23 @@ export interface InitToAgentEvents {
  * Every message type, in schema order.
  */
 export const MESSAGES: readonly MessageSpec[] = [
+  { channel: "agent", type: "backup.create", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "backup.restore", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "backup.delete", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "backup.progress", kind: "event", from: "agent", milestone: 4 },
+  { channel: "agent", type: "backup.finished", kind: "event", from: "agent", milestone: 4 },
+  { channel: "agent", type: "files.list", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "files.stat", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "files.read", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "files.write", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "files.mkdir", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "files.rename", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "files.delete", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "transfer.open", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "transfer.read", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "transfer.write", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "transfer.commit", kind: "request", from: "panel", milestone: 4 },
+  { channel: "agent", type: "transfer.close", kind: "request", from: "panel", milestone: 4 },
   { channel: "agent", type: "enrol", kind: "request", from: "agent", milestone: 1 },
   { channel: "agent", type: "hello", kind: "request", from: "agent", milestone: 1 },
   { channel: "agent", type: "heartbeat", kind: "event", from: "agent", milestone: 1 },
@@ -1293,7 +1773,7 @@ export const MESSAGES: readonly MessageSpec[] = [
   { channel: "agent", type: "server.backlog", kind: "request", from: "panel", milestone: 2 },
   { channel: "agent", type: "server.console", kind: "event", from: "agent", milestone: 2 },
   { channel: "agent", type: "server.state", kind: "event", from: "agent", milestone: 2 },
-  { channel: "agent", type: "server.stats", kind: "event", from: "agent", milestone: 2 },
+  { channel: "agent", type: "server.stats", kind: "event", from: "agent", milestone: 4 },
   { channel: "agent", type: "server.player", kind: "event", from: "agent", milestone: 4 },
   { channel: "agent", type: "server.update", kind: "request", from: "panel", milestone: 3 },
   { channel: "agent", type: "server.services", kind: "event", from: "agent", milestone: 3 },

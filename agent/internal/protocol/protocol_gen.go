@@ -29,6 +29,34 @@ const (
 	CloseUnsupportedVersion = 4426
 	// CloseEnrolled WebSocket close code: enrolment finished; the socket was only for the enrol request.
 	CloseEnrolled = 4000
+	// BackupExtension archive file extension.
+	BackupExtension = ".tar.zst"
+	// BackupProgressIntervalSec most one backup.progress per operation per this many seconds.
+	BackupProgressIntervalSec = 2
+	// BackupSettleSec wait after the definition's backup.before console commands before the archive starts (the game flushes its saves).
+	BackupSettleSec = 5
+	// BackupManifestName first entry of every archive.
+	BackupManifestName = "gss-backup.json"
+	// BackupFormatVersion BackupManifest.format; a restore refuses archives with a higher one.
+	BackupFormatVersion = 1
+	// FileTextMaxBytes largest file files.read returns and files.write accepts (the panel's text editor). Larger files are downloaded and uploaded instead.
+	FileTextMaxBytes = 2097152
+	// FilesListMaxEntries most entries one files.list answer holds; truncated says more exist.
+	FilesListMaxEntries = 5000
+	// FilesDeleteMaxPaths most paths in one files.delete.
+	FilesDeleteMaxPaths = 100
+	// TransferChunkBytes largest chunk of one transfer.read answer or transfer.write request, in raw bytes (about 683 KiB as base64).
+	TransferChunkBytes = 524288
+	// TransferWindow most transfer.read / transfer.write requests the panel keeps in flight per transfer.
+	TransferWindow = 4
+	// TransferIdleSec the agent closes a transfer that saw no request for this long (an unfinished upload's temporary file is removed). Also every transfer is closed when the panel connection is replaced.
+	TransferIdleSec = 120
+	// TransferMaxOpen most open transfers per agent; transfer.open beyond it answers conflict.
+	TransferMaxOpen = 16
+	// UploadDiskReserveBytes free space an upload (or a write) must leave on the host's data disk; otherwise no_space.
+	UploadDiskReserveBytes = 1073741824
+	// UploadTempDir folder below the data folder where uploads are written before transfer.commit renames them into place (same filesystem, inside the same root). Emptied by the agent at startup.
+	UploadTempDir = ".gss/uploads"
 	// ConsoleLineMaxBytes longest console line text in UTF-8 bytes. gss-init splits longer output; the panel truncates a longer line instead of refusing its batch.
 	ConsoleLineMaxBytes = 8192
 	// ConsoleBatchMaxLines most lines in one server.console batch or one backlog response.
@@ -39,6 +67,14 @@ const (
 	ConsoleBacklogMaxLines = 1000
 	// ProvisionTimeoutSec how long the agent works on one server.provision (image pull included) before it gives up and answers timeout. The panel waits a little longer, so the agent's answer always arrives first.
 	ProvisionTimeoutSec = 900
+	// StatsIntervalSec how often the agent samples Docker stats of every server whose game is starting or running (M4).
+	StatsIntervalSec = 5
+	// StatsDiskIntervalSec how often a sample carries diskBytes (data/ + services/, the disk check's measurement); null in the samples between.
+	StatsDiskIntervalSec = 60
+	// PlayersMax most players gss-init tracks per server; joins beyond it are ignored until someone leaves.
+	PlayersMax = 1000
+	// PlayerNameMaxChars longer captured names are cut.
+	PlayerNameMaxChars = 64
 	// InitSpecPath where gss-init reads its spec (read-only mount).
 	InitSpecPath = "/gss/spec/spec.json"
 	// InitFilesDir definition files (hooks, templates) under their definition-relative path, e.g. /gss/spec/files/hooks/install.sh. Hook paths in the spec are relative to this folder.
@@ -92,7 +128,7 @@ type ErrorBody struct {
 	Port *PortInUse `json:"port,omitempty"`
 }
 
-// ErrorCode is defined in protocol/schema/envelope.json.
+// ErrorCode M4 added too_large (a file over FILE_TEXT_MAX_BYTES, a chunk over TRANSFER_CHUNK_BYTES: HTTP 413) and no_space (the host's disk or the server's disk limit: HTTP 507).
 type ErrorCode string
 
 // ErrorCode values.
@@ -106,6 +142,8 @@ const (
 	ErrorCodeTimeout      ErrorCode = "timeout"
 	ErrorCodeInternal     ErrorCode = "internal"
 	ErrorCodePortInUse    ErrorCode = "port_in_use"
+	ErrorCodeTooLarge     ErrorCode = "too_large"
+	ErrorCodeNoSpace      ErrorCode = "no_space"
 )
 
 // PortInUse A host port something else already holds (M3: Docker's bind failed). The panel retries the allocation once without it.
@@ -116,6 +154,83 @@ type PortInUse struct {
 
 // Empty no payload.
 type Empty struct {
+}
+
+// BackupOperation is defined in protocol/schema/backup.json.
+type BackupOperation string
+
+// BackupOperation values.
+const (
+	BackupOperationCreate  BackupOperation = "create"
+	BackupOperationRestore BackupOperation = "restore"
+)
+
+// BackupRef is defined in protocol/schema/backup.json.
+type BackupRef struct {
+	ServerID string `json:"serverId"`
+	// BackupID the panel's backups.id; the archive is <backupId>.tar.zst, so no path ever travels.
+	BackupID int64 `json:"backupId"`
+}
+
+// BackupOperationStatus the operation a server runs right now.
+type BackupOperationStatus struct {
+	ServerID  string          `json:"serverId"`
+	BackupID  int64           `json:"backupId"`
+	Operation BackupOperation `json:"operation"`
+	StartedAt time.Time       `json:"startedAt"`
+	// Bytes uncompressed bytes processed so far.
+	Bytes int64 `json:"bytes"`
+	// TotalBytes estimate: create = the last disk measurement of data/ + services/; restore = the sidecar's bytes. null when unknown.
+	TotalBytes *int64 `json:"totalBytes"`
+}
+
+// BackupProgress is defined in protocol/schema/backup.json.
+type BackupProgress struct {
+	ServerID   string          `json:"serverId"`
+	BackupID   int64           `json:"backupId"`
+	Operation  BackupOperation `json:"operation"`
+	Bytes      int64           `json:"bytes"`
+	TotalBytes *int64          `json:"totalBytes"`
+	At         time.Time       `json:"at"`
+}
+
+// BackupFinished is defined in protocol/schema/backup.json.
+type BackupFinished struct {
+	ServerID  string          `json:"serverId"`
+	BackupID  int64           `json:"backupId"`
+	Operation BackupOperation `json:"operation"`
+	Ok        bool            `json:"ok"`
+	// SizeBytes create: size of the finished archive; null otherwise.
+	SizeBytes *int64 `json:"sizeBytes"`
+	// Error readable cause when not ok, e.g. The host's disk is full (2.1 GB free, about 6 GB needed).
+	Error *string   `json:"error"`
+	At    time.Time `json:"at"`
+}
+
+// BackupManifest gss-backup.json, the first archive entry.
+type BackupManifest struct {
+	// Format BACKUP_FORMAT_VERSION at creation.
+	Format     int64         `json:"format"`
+	ServerID   string        `json:"serverId"`
+	BackupID   int64         `json:"backupId"`
+	CreatedAt  time.Time     `json:"createdAt"`
+	Definition DefinitionRef `json:"definition"`
+	SpecHash   string        `json:"specHash"`
+	// Roots top-level folders in the archive: data, services/<name>…
+	Roots []string `json:"roots"`
+	// Running the game was running while the archive was taken (before/after commands were sent).
+	Running bool `json:"running"`
+}
+
+// BackupSidecar <backupId>.json next to the archive, written after it is complete; the restore's disk check reads it.
+type BackupSidecar struct {
+	Manifest BackupManifest `json:"manifest"`
+	// Bytes uncompressed bytes of every regular file archived.
+	Bytes int64 `json:"bytes"`
+	Files int64 `json:"files"`
+	// SizeBytes archive size.
+	SizeBytes  int64     `json:"sizeBytes"`
+	FinishedAt time.Time `json:"finishedAt"`
 }
 
 // GameDefinition one game.yml, as written in a source repo.
@@ -347,7 +462,7 @@ type RconSpec struct {
 	Password string `json:"password"`
 }
 
-// PlayersSpec console patterns whose first capture group is the player name.
+// PlayersSpec console patterns (RE2 syntax: gss-init matches them in Go, on output lines with ANSI codes stripped) whose first capture group is the player name. Validation refuses a pattern without a capture group.
 type PlayersSpec struct {
 	Join  string `json:"join,omitempty"`
 	Leave string `json:"leave,omitempty"`
@@ -358,7 +473,7 @@ type BackupSpec struct {
 	// Before console commands sent before the archive is taken.
 	Before []string `json:"before,omitempty"`
 	After  []string `json:"after,omitempty"`
-	// Exclude paths below /data; a trailing slash means a folder.
+	// Exclude paths below /data, relative, /-separated; a trailing slash means a folder; * and ? match within one path segment (logs/, cache/, *.log, world/session.lock). Applies to data/ only, never to service volumes.
 	Exclude []string `json:"exclude,omitempty"`
 }
 
@@ -393,6 +508,158 @@ type ServiceLimits struct {
 	MemoryMB  int64 `json:"memoryMb,omitempty"`
 	CPUMillis int64 `json:"cpuMillis,omitempty"`
 	Pids      int64 `json:"pids,omitempty"`
+}
+
+// FileType other = sockets, devices, fifos: listed, never opened.
+type FileType string
+
+// FileType values.
+const (
+	FileTypeFile    FileType = "file"
+	FileTypeDir     FileType = "dir"
+	FileTypeSymlink FileType = "symlink"
+	FileTypeOther   FileType = "other"
+)
+
+// FileEntry is defined in protocol/schema/files.json.
+type FileEntry struct {
+	Name string `json:"name"`
+	// Path relative to the data folder, /-separated, no leading slash; "" is the data folder itself.
+	Path string   `json:"path"`
+	Type FileType `json:"type"`
+	// Size bytes; 0 for folders.
+	Size int64 `json:"size"`
+	// ModifiedAt RFC 3339 with nanoseconds, UTC. Pass it back unchanged as expectedModifiedAt.
+	ModifiedAt time.Time `json:"modifiedAt"`
+	// Mode permission bits (e.g. 420 = 0644).
+	Mode int64 `json:"mode"`
+	// LinkTarget symlink only: where it points, as stored (it may lead out of the data folder; following it is refused then).
+	LinkTarget *string `json:"linkTarget"`
+}
+
+// FilesPathRequest is defined in protocol/schema/files.json.
+type FilesPathRequest struct {
+	ServerID string `json:"serverId"`
+	// Path relative to the data folder; "" = the data folder.
+	Path string `json:"path"`
+}
+
+// FilesListResponse is defined in protocol/schema/files.json.
+type FilesListResponse struct {
+	// Path the listed folder, cleaned.
+	Path    string      `json:"path"`
+	Entries []FileEntry `json:"entries"`
+	// Truncated more than FILES_LIST_MAX_ENTRIES entries exist; only the first ones (in order) are listed.
+	Truncated bool `json:"truncated"`
+}
+
+// FilesReadResponse is defined in protocol/schema/files.json.
+type FilesReadResponse struct {
+	Entry FileEntry `json:"entry"`
+	// Binary not UTF-8 text (or holds a NUL byte): contentBase64 is empty.
+	Binary        bool   `json:"binary"`
+	ContentBase64 string `json:"contentBase64"`
+}
+
+// FilesWriteRequest is defined in protocol/schema/files.json.
+type FilesWriteRequest struct {
+	ServerID string `json:"serverId"`
+	Path     string `json:"path"`
+	// ContentBase64 at most FILE_TEXT_MAX_BYTES once decoded.
+	ContentBase64 string `json:"contentBase64"`
+	// ExpectedModifiedAt the modifiedAt the editor loaded; a different current value answers conflict. null = create or overwrite without checking.
+	ExpectedModifiedAt *string `json:"expectedModifiedAt"`
+}
+
+// FilesRenameRequest is defined in protocol/schema/files.json.
+type FilesRenameRequest struct {
+	ServerID string `json:"serverId"`
+	From     string `json:"from"`
+	// To full new path (a move when the folder differs). The parent must exist.
+	To string `json:"to"`
+	// Overwrite replace an existing file at to (never a folder).
+	Overwrite bool `json:"overwrite"`
+}
+
+// FilesDeleteRequest is defined in protocol/schema/files.json.
+type FilesDeleteRequest struct {
+	ServerID string `json:"serverId"`
+	// Paths at most FILES_DELETE_MAX_PATHS; "" is refused.
+	Paths []string `json:"paths"`
+}
+
+// TransferDirection is defined in protocol/schema/files.json.
+type TransferDirection string
+
+// TransferDirection values.
+const (
+	TransferDirectionDownload TransferDirection = "download"
+	TransferDirectionUpload   TransferDirection = "upload"
+)
+
+// TransferSource file: a path in the data folder; backup: a finished backup archive (download only).
+type TransferSource string
+
+// TransferSource values.
+const (
+	TransferSourceFile   TransferSource = "file"
+	TransferSourceBackup TransferSource = "backup"
+)
+
+// TransferOpenRequest is defined in protocol/schema/files.json.
+type TransferOpenRequest struct {
+	// TransferID chosen by the panel.
+	TransferID string            `json:"transferId"`
+	ServerID   string            `json:"serverId"`
+	Direction  TransferDirection `json:"direction"`
+	Source     TransferSource    `json:"source"`
+	// Path source file: the file to download, or the upload's final path (its folder must exist).
+	Path string `json:"path,omitempty"`
+	// BackupID source backup: the panel's backup id.
+	BackupID int64 `json:"backupId,omitempty"`
+	// Size upload: exact byte count (the browser's Content-Length).
+	Size int64 `json:"size,omitempty"`
+	// Overwrite upload: replace an existing file at path on commit.
+	Overwrite bool `json:"overwrite,omitempty"`
+}
+
+// TransferOpenResponse is defined in protocol/schema/files.json.
+type TransferOpenResponse struct {
+	TransferID string `json:"transferId"`
+	// Name base name of the file (<backupId>.tar.zst for a backup; the panel names that download after the server and the backup itself).
+	Name string `json:"name"`
+	// Size download: bytes to read (the panel sends it as Content-Length); upload: the announced size.
+	Size int64 `json:"size"`
+}
+
+// TransferReadRequest is defined in protocol/schema/files.json.
+type TransferReadRequest struct {
+	TransferID string `json:"transferId"`
+	Offset     int64  `json:"offset"`
+	// Length at most TRANSFER_CHUNK_BYTES.
+	Length int64 `json:"length"`
+}
+
+// TransferChunk is defined in protocol/schema/files.json.
+type TransferChunk struct {
+	Offset int64 `json:"offset"`
+	// DataBase64 shorter than asked only at the end of the file.
+	DataBase64 string `json:"dataBase64"`
+	// Eof offset + length reached the size from transfer.open.
+	Eof bool `json:"eof"`
+}
+
+// TransferWriteRequest is defined in protocol/schema/files.json.
+type TransferWriteRequest struct {
+	TransferID string `json:"transferId"`
+	Offset     int64  `json:"offset"`
+	// DataBase64 at most TRANSFER_CHUNK_BYTES once decoded.
+	DataBase64 string `json:"dataBase64"`
+}
+
+// TransferRef is defined in protocol/schema/files.json.
+type TransferRef struct {
+	TransferID string `json:"transferId"`
 }
 
 // HostFacts what the agent knows about its machine. Collected at enrol, hello and every heartbeat.
@@ -548,6 +815,10 @@ type ServerStatus struct {
 	Reason *string `json:"reason"`
 	// Services stack services (M3); empty for single-container servers.
 	Services []ServiceStatus `json:"services"`
+	// Players players online now, in join order (M4, from gss-init's InitStatus.players). Absent from older agents; empty when the game isn't running.
+	Players []string `json:"players,omitempty"`
+	// Operation the backup or restore running right now (M4). In hello, a panel backup row that is pending/running but not named here failed (the agent restarted).
+	Operation *BackupOperationStatus `json:"operation,omitempty"`
 }
 
 // ServiceState docker's view of one stack service. missing = no container (not provisioned yet, or removed by hand).
@@ -742,17 +1013,21 @@ type StatsBatch struct {
 	Servers []ServerStats `json:"servers"`
 }
 
-// ServerStats is defined in protocol/schema/server.json.
+// ServerStats one sample of a server. Stacks are summed over the game container and every running service container (CPU, memory, memory limit, pids); network counts the game container only, so traffic between the game and its services isn't counted twice.
 type ServerStats struct {
 	ServerID string `json:"serverId"`
 	// CPUPercent 100 = one CPU fully used.
-	CPUPercent       float64 `json:"cpuPercent"`
-	MemoryBytes      int64   `json:"memoryBytes"`
-	MemoryLimitBytes int64   `json:"memoryLimitBytes"`
-	NetRxBytes       int64   `json:"netRxBytes"`
-	NetTxBytes       int64   `json:"netTxBytes"`
-	Pids             int64   `json:"pids"`
-	// DiskBytes size of the data folder; null when not measured in this sample (it is measured once a minute).
+	CPUPercent float64 `json:"cpuPercent"`
+	// MemoryBytes without reclaimable page cache, like docker stats.
+	MemoryBytes int64 `json:"memoryBytes"`
+	// MemoryLimitBytes sum of the counted containers' limits.
+	MemoryLimitBytes int64 `json:"memoryLimitBytes"`
+	// NetRxBytes cumulative bytes received since the game container started; the panel derives rates and treats a decrease as a restart.
+	NetRxBytes int64 `json:"netRxBytes"`
+	// NetTxBytes cumulative bytes sent, like netRxBytes.
+	NetTxBytes int64 `json:"netTxBytes"`
+	Pids       int64 `json:"pids"`
+	// DiskBytes data/ + services/ as the disk check measured it; null when not part of this sample (every STATS_DISK_INTERVAL_SEC).
 	DiskBytes *int64 `json:"diskBytes"`
 }
 
@@ -822,6 +1097,8 @@ type InitStatus struct {
 	InstallProgress *InstallProgress `json:"installProgress"`
 	// Reason cause of install_failed / crashed.
 	Reason *string `json:"reason"`
+	// Players players online now, in join order (M4). Emptied when the game process exits.
+	Players []string `json:"players,omitempty"`
 }
 
 // InitStopRequest is defined in protocol/schema/supervisor.json.
@@ -850,6 +1127,40 @@ type InitBacklogRequest struct {
 
 // Message types.
 const (
+	// MsgBackupCreate: panel → agent, request BackupRef, response BackupOperationStatus (M4).
+	MsgBackupCreate = "backup.create"
+	// MsgBackupRestore: panel → agent, request BackupRef, response BackupOperationStatus (M4).
+	MsgBackupRestore = "backup.restore"
+	// MsgBackupDelete: panel → agent, request BackupRef, response Empty (M4).
+	MsgBackupDelete = "backup.delete"
+	// MsgBackupProgress: agent → panel, event BackupProgress (M4).
+	MsgBackupProgress = "backup.progress"
+	// MsgBackupFinished: agent → panel, event BackupFinished (M4).
+	MsgBackupFinished = "backup.finished"
+	// MsgFilesList: panel → agent, request FilesPathRequest, response FilesListResponse (M4).
+	MsgFilesList = "files.list"
+	// MsgFilesStat: panel → agent, request FilesPathRequest, response FileEntry (M4).
+	MsgFilesStat = "files.stat"
+	// MsgFilesRead: panel → agent, request FilesPathRequest, response FilesReadResponse (M4).
+	MsgFilesRead = "files.read"
+	// MsgFilesWrite: panel → agent, request FilesWriteRequest, response FileEntry (M4).
+	MsgFilesWrite = "files.write"
+	// MsgFilesMkdir: panel → agent, request FilesPathRequest, response FileEntry (M4).
+	MsgFilesMkdir = "files.mkdir"
+	// MsgFilesRename: panel → agent, request FilesRenameRequest, response FileEntry (M4).
+	MsgFilesRename = "files.rename"
+	// MsgFilesDelete: panel → agent, request FilesDeleteRequest, response Empty (M4).
+	MsgFilesDelete = "files.delete"
+	// MsgTransferOpen: panel → agent, request TransferOpenRequest, response TransferOpenResponse (M4).
+	MsgTransferOpen = "transfer.open"
+	// MsgTransferRead: panel → agent, request TransferReadRequest, response TransferChunk (M4).
+	MsgTransferRead = "transfer.read"
+	// MsgTransferWrite: panel → agent, request TransferWriteRequest, response Empty (M4).
+	MsgTransferWrite = "transfer.write"
+	// MsgTransferCommit: panel → agent, request TransferRef, response FileEntry (M4).
+	MsgTransferCommit = "transfer.commit"
+	// MsgTransferClose: panel → agent, request TransferRef, response Empty (M4).
+	MsgTransferClose = "transfer.close"
 	// MsgEnrol: agent → panel, request EnrolRequest, response EnrolResponse (M1).
 	MsgEnrol = "enrol"
 	// MsgHello: agent → panel, request HelloRequest, response HelloResponse (M1).
@@ -874,7 +1185,7 @@ const (
 	MsgServerConsole = "server.console"
 	// MsgServerState: agent → panel, event StateChange (M2).
 	MsgServerState = "server.state"
-	// MsgServerStats: agent → panel, event StatsBatch (M2).
+	// MsgServerStats: agent → panel, event StatsBatch (M4).
 	MsgServerStats = "server.stats"
 	// MsgServerPlayer: agent → panel, event PlayerEvent (M4).
 	MsgServerPlayer = "server.player"
@@ -917,6 +1228,23 @@ type MessageSpec struct {
 
 // Messages lists every message type, in schema order.
 var Messages = []MessageSpec{
+	{Channel: "agent", Type: "backup.create", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "backup.restore", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "backup.delete", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "backup.progress", Kind: MessageKindEvent, From: "agent", Milestone: 4},
+	{Channel: "agent", Type: "backup.finished", Kind: MessageKindEvent, From: "agent", Milestone: 4},
+	{Channel: "agent", Type: "files.list", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "files.stat", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "files.read", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "files.write", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "files.mkdir", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "files.rename", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "files.delete", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "transfer.open", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "transfer.read", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "transfer.write", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "transfer.commit", Kind: MessageKindRequest, From: "panel", Milestone: 4},
+	{Channel: "agent", Type: "transfer.close", Kind: MessageKindRequest, From: "panel", Milestone: 4},
 	{Channel: "agent", Type: "enrol", Kind: MessageKindRequest, From: "agent", Milestone: 1},
 	{Channel: "agent", Type: "hello", Kind: MessageKindRequest, From: "agent", Milestone: 1},
 	{Channel: "agent", Type: "heartbeat", Kind: MessageKindEvent, From: "agent", Milestone: 1},
@@ -929,7 +1257,7 @@ var Messages = []MessageSpec{
 	{Channel: "agent", Type: "server.backlog", Kind: MessageKindRequest, From: "panel", Milestone: 2},
 	{Channel: "agent", Type: "server.console", Kind: MessageKindEvent, From: "agent", Milestone: 2},
 	{Channel: "agent", Type: "server.state", Kind: MessageKindEvent, From: "agent", Milestone: 2},
-	{Channel: "agent", Type: "server.stats", Kind: MessageKindEvent, From: "agent", Milestone: 2},
+	{Channel: "agent", Type: "server.stats", Kind: MessageKindEvent, From: "agent", Milestone: 4},
 	{Channel: "agent", Type: "server.player", Kind: MessageKindEvent, From: "agent", Milestone: 4},
 	{Channel: "agent", Type: "server.update", Kind: MessageKindRequest, From: "panel", Milestone: 3},
 	{Channel: "agent", Type: "server.services", Kind: MessageKindEvent, From: "agent", Milestone: 3},

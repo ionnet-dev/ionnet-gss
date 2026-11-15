@@ -68,7 +68,7 @@
     {
       "channel": "supervisor", "type": "player", "kind": "event", "from": "supervisor", "milestone": 4,
       "data": "PlayerEvent",
-      "description": "A `players` pattern matched."
+      "description": "A `players` pattern matched on a game output line (ANSI stripped; first capture group = name, cut to PLAYER_NAME_MAX_CHARS). A join of a name already listed and a leave of an unknown name send nothing. No leave events are sent when the game exits: the list just resets."
     }
   ],
   "$defs": {
@@ -114,7 +114,8 @@
         "restarts": { "type": "integer", "description": "Auto-restarts in the current window." },
         "lastSeq": { "type": "integer", "description": "`seq` of the newest console line." },
         "installProgress": { "oneOf": [{ "$ref": "server.json#/$defs/InstallProgress" }, { "type": "null" }] },
-        "reason": { "type": ["string", "null"], "description": "Cause of install_failed / crashed." }
+        "reason": { "type": ["string", "null"], "description": "Cause of install_failed / crashed." },
+        "players": { "type": "array", "items": { "type": "string" }, "description": "Players online now, in join order (M4). Emptied when the game process exits." }
       },
       "required": ["state", "since", "pid", "exitCode", "installed", "restarts", "lastSeq", "installProgress", "reason"]
     },
