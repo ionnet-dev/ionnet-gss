@@ -9,7 +9,7 @@ import { GameServerService } from "../servers/GameServerService.ts";
 /**
  * `/api/servers`. Thin: validate the shape, call `GameServerService`, answer. Access checks live in the service.
  * Audit: `server.created`, `server.updated`, `server.started`, `server.stopped`, `server.restarted`,
- * `server.reinstalled`, `server.deleted`. `allowPrivateNetwork` is in the details of a create and of an update that
+ * `server.reinstalled`, `server.upgraded`, `server.game_updated`, `server.deleted`. `allowPrivateNetwork` is in the details of a create and of an update that
  * sent it.
  */
 /**
@@ -107,11 +107,22 @@ export namespace ServerController {
 
   /**
    * POST /api/servers/:id/upgrade  UpgradeServerBody → UpgradeServerResponse (M3). 409 unless stopped / crashed /
-   * install_failed, 404 unknown target, 400 when kept values don't fit the new version. Audit `server.upgraded`.
+   * install_failed, 404 unknown target, 400 when a kept or replacement value doesn't fit the new version. Audit
+   * `server.upgraded` (replaced keys, never values).
    */
   router.post("/:id/upgrade", async (c) => {
     const body = await readBody<UpgradeServerBody>(c);
-    return c.json(await GameServerService.upgrade(c.var.user, paramUuid(c, "id"), body));
+    const id = paramUuid(c, "id");
+    const before = await GameServerService.detail(c.var.user, id);
+    const result = await GameServerService.upgrade(c.var.user, id, body);
+    await audit(c, "server.upgraded", id, result.server.host.id, {
+      name: result.server.name,
+      from: before.definition.commit,
+      to: result.server.definition.commit,
+      reinstall: result.reinstall,
+      variables: Object.keys(body.variables ?? {}), // Keys only: values can be secrets.
+    });
+    return c.json(result);
   });
 
   /**
@@ -119,7 +130,9 @@ export namespace ServerController {
    * 400 when the game has neither. Audit `server.game_updated`.
    */
   router.post("/:id/update", async (c) => {
-    return c.json(await GameServerService.updateGame(c.var.user, paramUuid(c, "id")));
+    const server = await GameServerService.updateGame(c.var.user, paramUuid(c, "id"));
+    await auditDto(c, "server.game_updated", server);
+    return c.json(server);
   });
 
   /**

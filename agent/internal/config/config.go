@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/egress"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/paths"
 )
 
@@ -32,6 +33,9 @@ type Config struct {
 	// HelperImage defaults to paths.DefaultHelperImage: the image of the nft helper container that applies the
 	// egress filtering table. It is pulled only when missing.
 	HelperImage string `json:"helperImage,omitempty"`
+	// EgressTable defaults to egress.TableName (`ionnet_gss`): the nftables table (family inet) this agent owns.
+	// Only one agent may manage a given table, so a second agent on the same host (a test instance) needs its own.
+	EgressTable string `json:"egressTable,omitempty"`
 }
 
 // WithDefaults returns a copy with empty optional fields filled in.
@@ -44,6 +48,9 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.HelperImage == "" {
 		c.HelperImage = paths.DefaultHelperImage
+	}
+	if c.EgressTable == "" {
+		c.EgressTable = egress.TableName
 	}
 	return c
 }
@@ -89,6 +96,11 @@ func (s *FileStore) Load() (Config, error) {
 	}
 	if c.PanelURL == "" || c.HostID == "" || c.Credential == "" {
 		return Config{}, fmt.Errorf("config %s is missing panelUrl, hostId or credential: re-enrol with --force", s.path)
+	}
+	if c.EgressTable != "" {
+		if err := egress.ValidTable(c.EgressTable); err != nil {
+			return Config{}, fmt.Errorf("config %s: egressTable: %w", s.path, err)
+		}
 	}
 	return c, nil
 }

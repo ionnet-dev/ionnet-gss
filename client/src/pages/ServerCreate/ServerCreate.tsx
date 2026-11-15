@@ -1,13 +1,14 @@
-import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useMemo, useState } from "react";
-import { Button, Card, CardBody, CardFooter, CardHeader, EmptyState, Grid, Icon, Input, Spinner, Stack, Switch } from "@ionnet/iontronic/react";
-import { ArrowLeft, Check, Gamepad2, Server } from "@ionnet/iontronic/icons";
-import { LIMITS } from "@shared/constants.ts";
+import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Badge, Button, Card, CardBody, CardFooter, CardHeader, EmptyState, Grid, Icon, Input, Spinner, Stack, Switch } from "@ionnet/iontronic/react";
+import { ArrowLeft, Check, Database, Gamepad2, Server } from "@ionnet/iontronic/icons";
 import type { DefinitionDto } from "@shared/api/definitions.ts";
+import { LIMITS } from "@shared/constants.ts";
 import type { HostDto } from "@shared/api/hosts.ts";
 import { DefinitionApi } from "@/Api/DefinitionApi.ts";
 import { HostApi } from "@/Api/HostApi.ts";
 import { ServerApi } from "@/Api/ServerApi.ts";
-import { formatBytes } from "@/components/Format/format.ts";
+import { formatBytes, formatCommit } from "@/components/Format/format.ts";
+import { useNotify } from "@/components/Notify/useNotify.ts";
 import FormError from "@/components/FormError/FormError.tsx";
 import LoadError from "@/components/LoadError/LoadError.tsx";
 import PageHeader from "@/components/PageHeader/PageHeader.tsx";
@@ -20,6 +21,7 @@ import VariableForm, {
   fromDefinition,
   initialValues,
   toValues,
+  useVariableOptions,
   validate,
 } from "@/components/VariableForm/VariableForm.tsx";
 import { navigate, type RouteMatch } from "@/router/Router.tsx";
@@ -42,6 +44,21 @@ export default function ServerCreate(_props: Props) {
   const unavailable = (hosts.data?.length ?? 0) - usable.length;
   const host = usable.find((candidate) => candidate.id === hostId) ?? null;
   const definition = definitions.data?.find((candidate) => candidate.id === definitionId) ?? null;
+  const notify = useNotify();
+  const picked = useRef<DefinitionDto | null>(null);
+
+  // A sync can replace the picked game with a newer version while the form is open: follow it, with a heads-up.
+  useEffect(() => {
+    if (definitionId === null || !definitions.data || definition) return;
+    const previous = picked.current;
+    const successor = previous && definitions.data.find((candidate) => candidate.gameId === previous.gameId && candidate.source === previous.source);
+    if (successor) {
+      picked.current = successor;
+      setDefinitionId(successor.id);
+      notify.ok(`${successor.name} was updated`, "A new version was synced just now, so the form starts again with it.");
+    }
+    else setDefinitionId(null);
+  }, [definitions.data, definitionId, definition]);
 
   // A single usable host needs no choosing.
   useEffect(() => {
@@ -87,7 +104,7 @@ export default function ServerCreate(_props: Props) {
           {definitions.data && definitions.data.length > 0 && (
             <Grid minChildWidth="16rem" gap="12" role="radiogroup" aria-label="Game">
               {definitions.data.map((candidate) => (
-                <ChoiceCard key={candidate.id} selected={candidate.id === definitionId} onSelect={() => setDefinitionId(candidate.id)} title={candidate.name} icon={Gamepad2}>
+                <ChoiceCard key={candidate.id} selected={candidate.id === definitionId} onSelect={() => { picked.current = candidate; setDefinitionId(candidate.id); }} title={gameTitle(candidate)} icon={Gamepad2}>
                   {gameFacts(candidate)}
                 </ChoiceCard>
               ))}
@@ -111,10 +128,59 @@ function hostFacts(host: HostDto): string {
   return parts.join(" · ");
 }
 
-function gameFacts(definition: DefinitionDto): string {
+function gameTitle(definition: DefinitionDto): ReactNode {
+  return (
+    <Stack direction="row" gap="8" align="center" wrap>
+      <span>{definition.name}</span>
+      {definition.isStack && <Badge size="sm" tone="info" icon={Database}>Stack</Badge>}
+    </Stack>
+  );
+}
+
+/**
+ * Ports, then where the definition comes from: its source and version.
+ */
+function gameFacts(definition: DefinitionDto): ReactNode {
   const published = definition.ports.filter((port) => !port.internal);
-  if (published.length === 0) return `${definition.variables.length} settings`;
-  return `Port ${published.map((port) => `${port.default ?? "auto"}/${port.proto}`).join(", ")}`;
+  const ports = published.length === 0
+    ? `${definition.variables.length} settings`
+    : `Port ${published.map((port) => `${port.default ?? "auto"}/${port.proto}`).join(", ")}`;
+  const source = definition.sourceKind === "local" ? "Built in" : `${definition.source} · ${formatCommit(definition.commit)}`;
+  return (
+    <>
+      <span>{ports}</span>
+      <span className="io-mono" style={{ display: "block" }}>{source}</span>
+    </>
+  );
+}
+
+/**
+ * What a stack brings along, so the user knows a database comes with the game and what it costs in memory.
+ */
+function ServicesNote(props: { definition: DefinitionDto }) {
+  const { definition } = props;
+  if (!definition.isStack) return null;
+  const services = definition.services;
+  const memoryMb = services.reduce((sum, service) => sum + (service.memoryMb ?? 0), 0);
+  return (
+    <Stack direction="row" gap="12" align="start" role="note">
+      <Icon icon={Database} size="md" />
+      <Stack gap="4">
+        <strong>{services.length === 1 ? "Comes with an extra container" : "Comes with extra containers"}</strong>
+        <ul style={{ margin: 0, paddingLeft: "var(--io-space-16)" }}>
+          {services.map((service) => (
+            <li key={service.name}>
+              <span className="io-mono">{service.name}</span> <span className="io-text-muted">({service.image}{service.memoryMb ? `, up to ${formatBytes(service.memoryMb * 1024 * 1024)} of memory` : ""})</span>
+            </li>
+          ))}
+        </ul>
+        <span className="io-text-muted">
+          {memoryMb > 0 ? `Together they use up to ${formatBytes(memoryMb * 1024 * 1024)} of memory on top of the game's, which counts against your quota. ` : ""}
+          They start before the game and can only be reached from it.
+        </span>
+      </Stack>
+    </Stack>
+  );
 }
 
 function Step(props: { number: number; title: string; done: boolean; children: ReactNode }) {
@@ -130,7 +196,7 @@ function Step(props: { number: number; title: string; done: boolean; children: R
   );
 }
 
-function ChoiceCard(props: { selected: boolean; onSelect: () => void; title: string; icon: typeof Server; children: ReactNode }) {
+function ChoiceCard(props: { selected: boolean; onSelect: () => void; title: ReactNode; icon: typeof Server; children: ReactNode }) {
   const { selected, onSelect, title, icon, children } = props;
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key !== "Enter" && event.key !== " ") return;
@@ -149,9 +215,10 @@ function ChoiceCard(props: { selected: boolean; onSelect: () => void; title: str
  */
 function Details(props: { host: HostDto; definition: DefinitionDto }) {
   const { host, definition } = props;
-  const variables = useMemo(() => fromDefinition(definition), [definition]);
+  const base = useMemo(() => fromDefinition(definition), [definition]);
+  const variables = useVariableOptions(definition.id, base);
   const [name, setName] = useState("");
-  const [values, setValues] = useState<FormValues>(() => initialValues(variables));
+  const [values, setValues] = useState<FormValues>(() => initialValues(base));
   const [errors, setErrors] = useState<FormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -189,7 +256,7 @@ function Details(props: { host: HostDto; definition: DefinitionDto }) {
 
   return (
     <Card>
-      <CardHeader leading={<span className="io-mono io-text-muted" aria-hidden="true">3</span>} title="Set it up" description={`${definition.name} on ${host.name}`} />
+      <CardHeader leading={<span className="io-mono io-text-muted" aria-hidden="true">3</span>} title="Set it up" description={`${definition.name}${definition.sourceKind === "git" ? ` (${definition.source} · ${formatCommit(definition.commit)})` : ""} on ${host.name}`} />
       <form onSubmit={submit} noValidate>
         <CardBody>
           <Stack gap="24">
@@ -213,6 +280,7 @@ function Details(props: { host: HostDto; definition: DefinitionDto }) {
                 setErrors((current) => (key in current ? Object.fromEntries(Object.entries(current).filter(([field]) => field !== key)) : current));
               }}
             />
+            <ServicesNote definition={definition} />
             {canAllowPrivateNetwork && (
               <Switch label={PRIVATE_NETWORK_LABEL} description={PRIVATE_NETWORK_DESCRIPTION} checked={allowPrivateNetwork} onCheckedChange={setAllowPrivateNetwork} disabled={busy} />
             )}

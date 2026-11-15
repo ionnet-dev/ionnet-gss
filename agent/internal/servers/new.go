@@ -9,17 +9,19 @@ import (
 
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/docker"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/egress"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/images"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/paths"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/protocol"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/stacks"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/supervisor"
 )
 
 // Container conventions (M2). Every container and network carries LabelServer so Restore can find them.
 const (
-	LabelServer  = "ionnet-gss.server"  // value: server UUID
-	LabelSpec    = "ionnet-gss.spec"    // value: spec hash
+	LabelServer  = stacks.LabelServer   // value: server UUID
+	LabelSpec    = stacks.LabelSpec     // value: spec hash
 	LabelName    = "ionnet-gss.name"    // value: display name (informational)
-	LabelService = "ionnet-gss.service" // value: stack service key; absent on the game container
+	LabelService = stacks.LabelService  // value: stack service key; absent on the game container
 	LabelCleanup = "ionnet-gss.cleanup" // value: server UUID; short-lived file cleanup container
 )
 
@@ -46,6 +48,11 @@ type Options struct {
 	// Egress filters restricted servers' bridges (egress.go). nil = no filtering, so restricted servers refuse to
 	// start.
 	Egress egress.Firewall
+	// Images resolves the image of a game container, derived images for `packages` included (M3). nil =
+	// images.New(Docker).
+	Images images.Resolver
+	// Stacks runs the `services` of a stack (M3). nil = stacks.New on Layout and Docker.
+	Stacks stacks.Stack
 }
 
 // Timing (M2).
@@ -67,14 +74,16 @@ const (
 
 // New returns the Manager. Call Restore before serving requests.
 //
-// Provision, in order: validate spec (paths, ports, limits), write <server>/spec/spec.json (InitSpec) and
-// spec/files/** (0755 for executable), create data/ and run/ (see ownership in fs.go), ensure the image (inspect,
-// pull only when missing; non-empty `packages` → unsupported until derived builds land), ensure the network
+// Provision, in order: validate spec (paths, ports, limits, packages, services), write <server>/spec/spec.json
+// (InitSpec) and spec/files/** (0755 for executable), create data/ and run/ (see ownership in fs.go), resolve the
+// image (images.Resolver: pull only when missing; with `packages` the cached derived image, built on first use and
+// again when the base image changed, which also recreates a stopped server's container), ensure the network
 // (bridge BridgeName) and its egress filtering (egress.go: a restricted server doesn't start without it),
 // (re)create the container when the spec hash label differs: memory/CPU/PID limits, CapDrop ALL + InitCapabilities,
 // no Docker socket, binds data→/data, spec→/gss/spec:ro, run→/gss/run, published ports host=container, Tty off
-// (gss-init owns the pty). Then start it so gss-init runs install (reinstall or first provision) and stays idle.
-// The container keeps running while the game is stopped: it is gss-init's lifetime, not the game's.
+// (gss-init owns the pty). Then the stack's service containers (created, not started:
+// services.go), and start the game container so gss-init runs install (reinstall or first provision) and stays
+// idle. The container keeps running while the game is stopped: it is gss-init's lifetime, not the game's.
 func New(opts Options) Manager {
 	if opts.Dial == nil {
 		opts.Dial = func(socketPath string) (supervisor.Client, error) {
@@ -83,16 +92,23 @@ func New(opts Options) Manager {
 			return supervisor.Dial(ctx, socketPath)
 		}
 	}
+	if opts.Stacks == nil {
+		opts.Stacks = stacks.New(opts.Layout, opts.Docker, NetworkName)
+	}
 	m := &manager{
-		opts:    opts,
 		servers: map[string]*server{},
 		dirty:   make(chan struct{}, 1),
 		quit:    make(chan struct{}),
 		saved:   make(chan struct{}),
 	}
+	if opts.Images == nil {
+		opts.Images = images.New(opts.Docker, m.buildNetwork)
+	}
+	m.opts = opts
 	go m.saveLoop()
 	go m.diskLoop()
 	go m.healLoop()
+	go m.servicesLoop()
 	return m
 }
 

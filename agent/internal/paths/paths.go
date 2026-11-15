@@ -75,8 +75,5 @@ func (l Layout) ServerBackups(serverID string) string {
 	return filepath.Join(l.ServerDir(serverID), "backups")
 }
 
-// SteamcmdCache is the per-host steamcmd install shared by every steamcmd game (M3).
-func (l Layout) SteamcmdCache() string { return filepath.Join(l.Root, "cache", "steamcmd") }
-
 // NetfilterDir holds the last nftables script the agent applied (bind-mounted read-only into the nft helper).
 func (l Layout) NetfilterDir() string { return filepath.Join(l.Root, "netfilter") }

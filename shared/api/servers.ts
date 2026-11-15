@@ -61,6 +61,11 @@ export interface ServerVariableDto {
    */
   value: VariableValue | null;
   isSet: boolean;
+  /**
+   * true = the choices come from the definition's `options_from`; fetch them for this server's pinned definition.
+   */
+  optionsFrom: boolean;
+  pattern: string | null; // Regular expression a free-text value must match. null = none.
 }
 
 export interface GameServerDetailResponse extends GameServerDto {
@@ -86,15 +91,25 @@ export interface GameServerDetailResponse extends GameServerDto {
    * The definition has `steamcmd` steps or an `update` hook, so `POST /api/servers/:id/update` applies.
    */
   canUpdateGame: boolean;
+  /**
+   * The game was installed at least once. `update` also runs from `install_failed` when this is true (a failed
+   * update can be retried).
+   */
+  installed: boolean;
 }
 
 /**
  * `POST /api/servers/:id/upgrade`. Stopped only (409). Re-resolves the variables against the new version (new keys
- * get defaults/generated secrets, removed keys are dropped, invalid kept values → 400 naming them) and re-provisions,
- * with `reinstall` when the resolved install steps or a `reinstall` variable changed.
+ * get defaults/generated secrets, removed keys are dropped, `variables` replace kept values, invalid values → 400
+ * naming them) and re-provisions, with `reinstall` when the resolved install steps or a `reinstall` variable changed.
  */
 export interface UpgradeServerBody {
   definitionId?: number; // Default: the latest active version of the same source and game.
+  /**
+   * Replacement values by key, merged over the kept ones: for a kept value the new version rejects (the 400 names
+   * it as `"Label" (key)`). Same rules as `UpdateServerBody.variables`.
+   */
+  variables?: Record<string, VariableValue>;
 }
 
 export interface UpgradeServerResponse {

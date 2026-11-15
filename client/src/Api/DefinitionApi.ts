@@ -21,8 +21,11 @@ export namespace DefinitionApi {
     return BaseApi.GET(`/definitions/${id}/options/${encodeURIComponent(key)}`);
   }
 
+  /**
+   * Every active definition, refetched when a source sync changes them.
+   */
   export function useDefinitions() {
-    return useResource(list, []);
+    return useResource(list, [], { liveEvents: ["definitions.updated"] });
   }
 }
 

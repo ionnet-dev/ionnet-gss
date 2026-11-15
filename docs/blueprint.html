@@ -50,7 +50,7 @@ li { margin-bottom: 4px; }
 
 <div class="wrap">
 <header>
-  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 and 2 done, milestone 3 starting</p>
+  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 and 2 done, milestone 3 built and in review</p>
   <h1>Ionnet GSS</h1>
   <p class="lead">Ionnet Game Server Studio. A game server manager: one control panel, an agent on every Host Machine, and one Docker container or stack per Game Server. Each game is a folder of configuration in a git repo, so adding a game means pushing a folder.</p>
   <p>This page is the design we agreed in three rounds of questions, plus the defaults I filled in around them. Rows tagged <span class="tag you">you chose</span> are settled. Rows tagged <span class="tag mine">my default</span> were my proposals, which you accepted on 2026-11-15.</p>
@@ -370,7 +370,8 @@ services:
     <tr><td>M1 Spine</td><td>Done</td><td>Panel sign-in, users, invites, hosts, enrol tokens and live updates; Go agent enrol, run, heartbeat and reconnect; web pages. Reviewed, 15 findings fixed, committed as <code>84cfb97</code>.</td></tr>
     <tr><td>M2 First server</td><td>Done</td><td>Base and Minecraft images, <code>gss-init</code>, agent Docker side, definition engine, game server API, servers pages with live console. Reviewed, 14 findings fixed, committed as <code>1ac1557</code>.</td></tr>
     <tr><td>Outbound block</td><td>Done</td><td>Private, host and link-local destinations are rejected by default; admin switch per server. Committed as <code>a6b884f</code>. Not separately reviewed yet.</td></tr>
-    <tr><td>M3 Definitions</td><td>Starting</td><td>Git sources, remaining config formats, steamcmd, Garry's Mod and the stack.</td></tr>
+    <tr><td>M3 Definitions</td><td>Built, in review</td><td>Git sources with pinning and upgrade, <code>ini</code>/<code>json</code>/<code>yaml</code>/<code>cfg</code> formats, steamcmd, derived images for packages, stacks, dynamic dropdowns, Garry's Mod and Garry's Mod + MariaDB. Not committed yet.</td></tr>
+    <tr><td>M4 Operations</td><td>Next</td><td>File manager, backups and restore, metrics and players.</td></tr>
   </table></div>
   <h3>M1 proof, real output from this machine</h3>
   <pre><code>$ gss-agent enrol --panel http://localhost:3200 --token gss_enrol_… --config …/agent.json
@@ -416,6 +417,34 @@ game port 25565 from the host   → accepts connections
 host facts: egress { filtering: true, restricted: 1 }
 agent log:  applied the egress table table="inet ionnet_gss" restricted=1</code></pre>
   <p>The rules live in one nftables table the agent owns, <code>inet ionnet_gss</code>, applied through a short-lived helper container. The builder showed the rest of this machine's ruleset was identical before and after its tests. A server that may not reach private networks refuses to start on a host where filtering is broken.</p>
+  <h3>M3 proof, real output from this machine</h3>
+  <pre><code>Garry's Mod (steamcmd app 4020)
+  downloading … of 6.89 GB → Success! App '4020' fully installed   (90 s)
+  starting → running in 6 s
+  A2S_INFO from 127.0.0.1:25600: map=gm_construct folder=garrysmod game='Sandbox' players=0/16
+  stop: Sent the stop command "quit" → The game stopped (exit code 0)
+
+hostile hostname  Evil' ; rcon_password 'x' // $(touch /data/pwned) `id` …
+  server.cfg holds it as one quoted value; /data/pwned does not exist;
+  rcon_password kept its generated value
+
+Garry's Mod + MariaDB (stack)
+  db started 21:33:25, healthy 21:33:35; game started 21:33:36
+  SQL login from the game container as gmod@db over TLSv1.3: ok
+  from both containers: 1.1.1.1:443 connects; host, LAN, router: No route to host
+
+Git source
+  second commit → "update available"; upgrade with a value the new version
+  rejects → 400 naming it; with a replacement → 200, server.properties updated</code></pre>
+  <p>Run by the integration builder on a scratch panel and agent, then removed (about 14 GB freed). The firewall table was deleted afterwards and the rest of the ruleset matched the saved baseline.</p>
+  <h3>What running real servers turned up in M3</h3>
+  <div class="scroll"><table>
+    <tr><th>Found</th><th>Outcome</th></tr>
+    <tr><td>Data root on a RAM disk</td><td>steamcmd was killed at the memory limit, because files written to tmpfs count as the container's memory. The agent now warns at startup. Hosts must keep the data root on disk.</td></tr>
+    <tr><td>Garry's Mod packages</td><td>The extra 32-bit packages were not needed; the base image runs the Source server as is.</td></tr>
+    <tr><td>Minecraft memory</td><td>Paper is killed on start at 1024 MB. The minimum is now 1536 MB.</td></tr>
+    <tr><td>Ports used by other software</td><td>The allocator handed out 27015 while another container on the host held it. The create failed and rolled back cleanly. Open: make the panel skip ports the host reports as busy.</td></tr>
+  </table></div>
   <h3>How M2 was tested</h3>
   <div class="scroll"><table>
     <tr><th>Part</th><th>Tested against</th><th>Result</th></tr>
@@ -445,7 +474,11 @@ agent log:  applied the egress table table="inet ionnet_gss" restricted=1</code>
     <tr><td>Deleting</td><td>A server stays in a <code>deleting</code> state with its ports held until the host confirms, so a slow or offline host cannot leave an orphan or bring a deleted server back.</td></tr>
     <tr><td>Template filters</td><td>User text in a start command must use <code>{{vars.x|sh}}</code>; <code>|json</code> exists for config templates. A definition that skips the filter fails validation.</td></tr>
     <tr><td>Disk limit</td><td>Checked about once a minute; a server over its limit is stopped with the measured size as the reason.</td></tr>
-    <tr><td>steamcmd</td><td>Decided for M3: each server keeps its own copy under its data folder. A shared writable copy would let one tenant tamper with another's install.</td></tr>
+    <tr><td>steamcmd</td><td>Each server keeps its own copy under its data folder (about 130 MB, counted in its disk limit). A shared writable copy would let one tenant tamper with another's install.</td></tr>
+    <tr><td>Dynamic dropdowns</td><td>The panel fetches the choices from an https URL the definition declares, on an allowlist of hosts, capped and cached. This replaces the hook idea in the example above. If the fetch fails, the field becomes free text checked against a pattern.</td></tr>
+    <tr><td>Stacks</td><td>Service containers share the server's network under the service name, are never published, start before the game and stop after it. Default limits are 512 MB and half a core, counted against host capacity.</td></tr>
+    <tr><td>Git sources</td><td>The panel reads definition files straight from the fetched commit without checking anything out, so repository hooks, symlinks and filters never touch the panel host. Adding a source syncs it.</td></tr>
+    <tr><td>Upgrades</td><td>A server moves to a newer definition version only while stopped, and reinstalls only when install steps or a reinstall-flagged setting changed.</td></tr>
   </table></div>
 </section>
 </div>

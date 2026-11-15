@@ -17,6 +17,7 @@ import { AgentCloseError, type AgentConnection, AgentRequestError } from "../Age
 import { AgentGateway } from "../AgentGateway.ts";
 import { pushHostUpdated } from "../hostEvents.ts";
 import { requireFacts, requireObject } from "./guards.ts";
+import { parseServices } from "./serverServices.ts";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_SERVERS = 1000;
@@ -56,7 +57,7 @@ function parseServers(value: unknown): ServerStatus[] {
       specHash: status.specHash,
       installProgress: progress,
       reason: status.reason?.slice(0, 2000) ?? null,
-      services: [], // TODO(builder): C (M3) — validate and keep status.services (≤ 4, name/image/state checked).
+      services: parseServices(status.services, `hello servers[${i}]`),
     };
   });
 }

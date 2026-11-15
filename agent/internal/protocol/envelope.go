@@ -43,6 +43,13 @@ func NewErrorResponse(req Envelope, code ErrorCode, message string) Envelope {
 	return Envelope{Kind: MessageKindResponse, ID: req.ID, Type: req.Type, Ok: false, Error: &ErrorBody{Code: code, Message: message}}
 }
 
+// NewRemoteErrorResponse builds a failed response to req from a RemoteError, details included.
+func NewRemoteErrorResponse(req Envelope, remote *RemoteError) Envelope {
+	resp := NewErrorResponse(req, remote.Code, remote.Message)
+	resp.Error.Port = remote.Port
+	return resp
+}
+
 // DecodeData unmarshals an envelope's data into T.
 func DecodeData[T any](env Envelope) (T, error) {
 	var out T
@@ -59,6 +66,8 @@ func DecodeData[T any](env Envelope) (T, error) {
 type RemoteError struct {
 	Code    ErrorCode
 	Message string
+	// Port is set with ErrorCodePortInUse.
+	Port *PortInUse
 }
 
 func (e *RemoteError) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
@@ -71,7 +80,7 @@ func ErrorFromResponse(env Envelope) error {
 	if env.Error == nil {
 		return &RemoteError{Code: ErrorCodeInternal, Message: "response failed without an error body"}
 	}
-	return &RemoteError{Code: env.Error.Code, Message: env.Error.Message}
+	return &RemoteError{Code: env.Error.Code, Message: env.Error.Message, Port: env.Error.Port}
 }
 
 // ErrFrameTooLarge is returned by ReadFrame for a line over the limit.

@@ -6,6 +6,7 @@ import {
   Model,
   type Sequelize,
 } from "sequelize";
+import type { SourceDefinitionDto, SourceDto } from "@shared/api/sources.ts";
 import { ID, jsonColumn } from "./columns.ts";
 
 /**
@@ -46,6 +47,31 @@ export class Source extends Model<InferAttributes<Source>, InferCreationAttribut
       createdAt: DataTypes.DATE,
       updatedAt: DataTypes.DATE,
     }, { sequelize, tableName: "sources" });
+  }
+
+  /**
+   * The Sources page's view. The token never leaves the server (`hasToken` only).
+   * @param extra `syncing` comes from `DefinitionSync`; `definitions` are the active versions with their server counts.
+   */
+  public toClientJSON(extra: { syncing: boolean; definitions: SourceDefinitionDto[] }): SourceDto {
+    return {
+      id: this.id,
+      name: this.name,
+      kind: this.kind,
+      url: this.url,
+      branch: this.branch,
+      path: this.path,
+      enabled: this.enabled,
+      hasToken: this.authToken !== null && this.authToken !== "",
+      syncIntervalMin: this.syncIntervalMin,
+      syncing: extra.syncing,
+      lastSyncAt: this.lastSyncAt?.toISOString() ?? null,
+      lastCommit: this.lastCommit,
+      lastError: this.lastError,
+      definitionErrors: this.definitionErrors,
+      definitions: extra.definitions,
+      createdAt: this.createdAt.toISOString(),
+    };
   }
 }
 

@@ -51,6 +51,8 @@ type Client interface {
 	// MAX_QUEUED_CONSOLE / MAX_QUEUED_CONSOLE_BYTES of console lines (then a Gap), so a slow reader never stalls
 	// responses and never grows memory without bound.
 	Events() <-chan Event
+	// Update re-runs the steamcmd steps and the update hook. gss-init refuses it unless the game is stopped.
+	Update(ctx context.Context) (protocol.InitStatus, error)
 	Close() error
 }
 
@@ -125,6 +127,12 @@ func (c *client) Stop(ctx context.Context, kill bool, reason string) (protocol.I
 
 func (c *client) Input(ctx context.Context, line string) error {
 	return c.request(ctx, protocol.InitMsgInput, protocol.InputLine{Line: line}, nil)
+}
+
+func (c *client) Update(ctx context.Context) (protocol.InitStatus, error) {
+	var res protocol.InitStatus
+	err := c.request(ctx, protocol.InitMsgUpdate, protocol.Empty{}, &res)
+	return res, err
 }
 
 func (c *client) Backlog(ctx context.Context, req protocol.InitBacklogRequest) (protocol.BacklogResponse, error) {

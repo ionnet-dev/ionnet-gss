@@ -304,7 +304,11 @@ gss-init ─state/console (NDJSON, /gss/run/init.sock)─► agent ─server.sta
   30 s for a provision (the agent gives up first and answers), and for restart/delete the definition's
   `stop.timeout` + 15 s (`docker stop` grace) + 90 s.
 - **Disk:** the soft `limits.diskMb` is checked at start (409) and about once a minute while running (one server at a
-  time, in its own goroutine); a running server over it is stopped with the measured size as `stateReason`.
+  time, in its own goroutine); a running server over it is stopped with the measured size as `stateReason`. The size
+  is `data/` plus a stack's `services/` volumes (M3). Volumes the agent can't read (another uid, 0700, for a non-root
+  agent) are measured by a short-lived `du -sb` container (the game's image, root with DAC_READ_SEARCH only, no
+  network, read-only bind, label `ionnet-gss.measure`) at most every 5 minutes in the background; a start waits for the
+  first measurement.
 - **Settings** change only while stopped (409 otherwise) and re-provision; a `reinstall` variable sets
   `reinstall: true`.
 - **Console:** the client subscribes to `server:<id>` (LiveGateway handles a socket's frames one at a time, checks
@@ -325,12 +329,15 @@ send it on create/update (403 otherwise, even for the current value); it is audi
 `server.updated` details), changes only while stopped, and travels as `ServerSpec.allowPrivateNetwork`, so it is part
 of the spec hash and a change re-provisions. An agent that gets no field treats the server as restricted.
 
-- **Table:** `inet ionnet_gss`, owned completely by the agent (`internal/egress`). Docker's tables and the operator's
-  rules are never read, flushed or reordered. Base chains `forward` and `input` at priority `filter - 10` (before
+- **Table:** `inet ionnet_gss` (agent config `egressTable`, an nft identifier; a second agent on the same host, e.g. a
+  test instance, needs its own), owned completely by the agent (`internal/egress`). Docker's tables and the operator's
+  rules are never read, flushed or reordered. Its comment carries a revision hash of the fixed part (`egress.Revision`). Base chains `forward` and `input` at priority `filter - 10` (before
   iptables-nft's filter chains at 0); an accept there only skips our checks, Docker's chains still run.
   - `set restricted` (ifname): bridges of restricted servers. `set intra` (ifname . ifname): the same bridge in and
     out. `set private4` / `set private6` (interval): 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12,
-    192.168/16, 224/4, 240/4; ::, ::1, ::ffff:0:0/96, fc00::/7, fe80::/10, fec0::/10, ff00::/8.
+    192.168/16, 224/4, 240/4; ::/96 (::, ::1, IPv4-compatible), ::ffff:0:0/96 (mapped), ::ffff:0:0:0/96 (SIIT),
+    100::/64, 2001::/32 (Teredo), 2002::/16 (6to4), fc00::/7, fe80::/10, fec0::/10, ff00::/8, and every private4
+    range embedded in NAT64 `64:ff9b::/96` (64:ff9b::10.0.0.0/104 …; public NAT64 destinations stay reachable).
   - `forward`: `ct state established,related accept` (replies to players on private LANs who came in through a
     published port) → not from a restricted bridge: accept → `iifname . oifname @intra` accept (game ↔ its stack's
     containers) → out through `docker0` or `gss-*`: reject → private destination: reject.
@@ -351,19 +358,45 @@ of the spec hash and a change re-provisions. An agent that gets no field treats 
 - **When:** `Restore` rebuilds the whole table atomically (`add table; delete table; table { … }` in one transaction)
   from the servers on disk before it starts any container, and waits for it before hello. Creating a network or
   starting a restricted server's container or game adds its bridge incrementally (`add element`, idempotent; skipped
-  when applied in the last 30 s); a failed add (table gone) falls back to a rebuild. Allowing private access and
-  deleting a server remove the entry with a rebuild. Containers of servers the agent has no folder for stay out.
+  when applied in the last 30 s); a failed add (table gone) falls back to a rebuild. Every path that reaches gss-init
+  (start, restart, update, provision/reinstall of a running container: `servers.up` / `ensureContainer`) checks the
+  rules first, and a container the watcher sees (re)started is checked again (held back when that fails). Allowing
+  private access and deleting a server remove the entry with a rebuild. Containers of servers the agent has no folder
+  for stay out.
+- **Check:** `Firewall.Heal` runs every minute: `nft -j list table` in the helper, compared with what the agent applied
+  (revision comment, both base chains with their rule counts, private set sizes, exactly the restricted bridges in
+  `restricted` and `intra`). A missing or different table is rebuilt at once (logged as a warning); facts come from
+  that check, so `checkedAt` moves every minute and `filtering` is false only while a rebuild fails.
+- **No restart policy:** game containers are created with restart policy `no` (like services); `Restore` drops an
+  older agent's `unless-stopped` in place (`docker update`, no restart). After a reboot or a Docker restart nothing
+  runs until the agent has rebuilt the table; `Restore` then starts the containers and autostart games, and the
+  watcher starts a game container whose gss-init exited while the agent runs (backoff 10 s → 5 min; the game itself
+  stays stopped/crashed as before). A plain agent restart leaves running containers alone.
+- **Builds:** derived images (`packages:`) build on the agent's `gss-build` network (bridge `gss-build`, label
+  `ionnet-gss.build`), which is always in the restricted set (key `build`), so `apt-get` reaches the public mirrors
+  only. One named network is kept between builds (an idle bridge costs nothing); a build fails (409) while filtering
+  doesn't work.
 - **Fail closed:** when the table can't be applied, a restricted server's container and game don't start: the
   request gets a 409 with the cause and the agent re-sends the current state with it as `stateReason`. Allowed
-  servers start anyway. A broken table is retried every minute (`Firewall.Heal`). Host facts carry
+  servers start anyway. When `Restore`'s rebuild fails (or a server's network can't be inspected), restricted servers
+  are held back: a running container is stopped gracefully (with its services), a stopped one isn't started, and the
+  state says why; the watcher starts them (and autostart games) once the rules apply. A broken table is retried every
+  minute (`Firewall.Heal`). Host facts carry
   `egress { filtering, restricted, error, checkedAt }` (null before the first apply, or from an older agent); the
   panel validates it and shows it on the Host page with a warning when it doesn't work.
-- **Limits:** one agent per host manages the table (a second agent's rebuild drops the first one's bridges). The
-  table is kernel state: after a reboot Docker restarts game containers (`unless-stopped`) before the agent rebuilds
-  it, so gss-init (and an install it resumes) runs unfiltered for those seconds; games don't start until the agent
-  says so. An operator who flushes the whole ruleset (e.g. `systemctl restart nftables` with `flush ruleset`) also
-  removes this table; the next restricted start notices and rebuilds it. Hosts need nf_tables with `nft_ct`,
-  `nft_reject_inet` and set support (stock Debian/Ubuntu/Arch kernels).
+- **Limits:** one agent per table (a second agent's rebuild drops the first one's bridges; give it its own
+  `egressTable`). An operator who flushes the whole ruleset (e.g. `systemctl restart nftables` with `flush ruleset`)
+  removes this table: restricted servers run unfiltered until the next check (at most about a minute). A table that
+  vanishes and then can't be rebuilt leaves already running servers running (facts and the Host page say so; new
+  starts are refused). An operator's `docker start` of a game container is checked by the watcher right after, not
+  before. Only private destinations are refused: a neighbour on a *public* address (another customer's VM in the same
+  datacenter subnet, the host's own public IP) is reachable like any internet host, so a server can't be kept from
+  probing it; and through the host's public IP a server reaches other servers' published ports (by design: that is
+  how players reach them) but not the host's own services (`input` chain). Docker's embedded DNS (127.0.0.11) answers
+  from the host namespace, so a server can resolve names through the host's private resolvers (only DNS answers, no
+  connections). Other IPv6 translation prefixes (local-use NAT64 `64:ff9b:1::/48`, an operator's own NAT64 prefix)
+  are not covered. Hosts need nf_tables with `nft_ct`, `nft_reject_inet` and set support (stock Debian/Ubuntu/Arch
+  kernels).
 
 ### API routes (M2)
 
@@ -435,17 +468,34 @@ Minecraft server created from the UI on this machine, joinable at the shown addr
   submodules or symlinks, header-only token, timeout, size and file limits). Sync = `DefinitionSync.syncSource`
   (one at a time per source; `jobs/sourceSync.ts` on the interval, `POST /api/sources/:id/sync` on demand). A
   game that fails validation keeps its previous active row; its error is in `definitionErrors[gameId]`.
-- **Pinning and upgrade.** A server keeps its `definitionId` (one version). `updateAvailable` + `latestDefinition`
-  on the detail; `POST /api/servers/:id/upgrade` while stopped re-resolves the variables and re-provisions
-  (`reinstall` when the install steps or a `reinstall` variable changed).
+- **Pinning and upgrade.** A server keeps its `definitionId` (one version; the built-in source's rows are updated in
+  place, commit `"local"`). `updateAvailable` + `latestDefinition` on the detail; `POST /api/servers/:id/upgrade`
+  while stopped re-resolves the variables (kept values, then `UpgradeServerBody.variables` over them; a value the new
+  version rejects → 400 naming it as `"Label" (key)`, and the client's "Apply update" asks for just those) and
+  re-provisions (`reinstall` when the install steps or a `reinstall` variable changed). Dropped ports are freed only
+  after the agent took the new spec; on failure the old spec is provisioned again (best effort) and the upgrade's new
+  ports freed; if that also fails both sets stay held until `start` (which re-provisions when the agent's last
+  `specHash` differs from the row's) or the hello's reconcile settles it.
+- **Per-server lock** (`GameServerService.withLock`, a keyed promise chain): create's provision, update, upgrade,
+  start, restart, reinstall, updateGame, delete (and its retry) and each reconcile take turns per server. `stop` doesn't
+  wait for it, so it can still cancel a long stack start or an install (the agent orders requests per server itself).
+- **Patterns** (`pattern`, `options_from.include`) run on JS's backtracking engine, so validation refuses a repeated
+  group that contains a quantifier or `|`, more than 3 unbounded quantifiers, look-around and back references, and
+  patterns over 200 characters; a value over 1024 characters never matches (checked before any match). Worst case left:
+  about 100 ms for 1024 characters with 3 unbounded quantifiers. The sound fix is V8's linear engine
+  (`--enable-experimental-regexp-engine`, flag `l`), not enabled yet.
+- **Image fields** (`image`, `services.*.image`) may only template a select variable with static `options`;
+  `options_from` selects count as user text for shell quoting (`|sh` required).
 - **`options_from`** (decided: panel-side fetcher, no hooks). `OptionsSource {url, items, value, where, include,
   reverse, limit}`; https host on OPTIONS_FETCH_HOSTS; ≤ 2 MiB; 10 s; cached OPTIONS_CACHE_MIN; static `options`
   first; on fetch failure the value must match the variable's new `pattern`. Route
   `GET /api/definitions/:id/options/:key`. Replaces the blueprint's `options_from: { hook }`.
-- **steamcmd** (gss-init): per-server copy in `INIT_STEAMCMD_DIR` (`/data/.gss/steamcmd`), fetched from
-  `STEAMCMD_URL`, anonymous login only, `+force_install_dir <dir>` (below /data), `+app_update <app> [-beta b]
-  [validate]`, progress lines to the console, install progress per step. `server.update` (panel → agent) and
-  supervisor `update` re-run only the steamcmd steps + the `update` hook while stopped (`POST /api/servers/:id/update`).
+- **steamcmd** (gss-init): per-server copy in `INIT_STEAMCMD_DIR` (`/data/.gss/steamcmd`; no per-host cache),
+  fetched from `STEAMCMD_URL`, anonymous login only, `+force_install_dir <dir>` (below /data), `+app_update <app>
+  [-beta b] [validate]`, up to `STEAMCMD_ATTEMPTS` (3) tries, progress lines to the console, install progress per
+  step. `server.update` (panel → agent) and supervisor `update` re-run only the steamcmd steps + the `update` hook
+  while stopped or crashed, and from `install_failed` when the game was installed before (retrying a failed update;
+  panel: `installedAt`, detail `installed`) (`POST /api/servers/:id/update`).
 - **Config formats** (gss-init `configs/`): addressing per `ConfigFormat` (properties/cfg literal keys; ini
   `section.key`; json/yaml dotted paths). cfg = Source-engine `key "value"` lines (quotes escaped, comments kept).
   yaml uses `gopkg.in/yaml.v3` (in go.mod) node editing to keep comments. Only managed keys change; a missing file is
@@ -454,7 +504,8 @@ Minecraft server created from the UI on this machine, joinable at the shown addr
   50), cached as `ionnet-gss-derived:<hash16>`; build lines go to the console with `seq: 0`.
 - **`services:`** → `stacks.Stack`: ≤ 4, containers `gss-<id>-<name>` on the server's bridge with alias `<name>`,
   never published, same hardening, `ServiceSpec.limits` (panel always fills them; they count toward quota usage),
-  volume at `<server>/services/<name>`, healthcheck wait before the game starts. Status travels in
+  volume at `<server>/services/<name>` (delete with `keepData` keeps `services/` as well as `data/` and `backups/`),
+  healthcheck wait before the game starts. Status travels in
   `ServerStatus.services` (hello, every response) and the `server.services` event → `game_servers.services_status` →
   live `server.services`. The egress rules must keep intra-bridge traffic (game ↔ db) allowed.
 - **Migration** `20261119000000-m3-sources.ts`: `sources.auth_token`, `sources.sync_interval_min`,
@@ -473,10 +524,12 @@ Minecraft server created from the UI on this machine, joinable at the shown addr
 | POST | /api/sources/:id/sync | P:SOURCES_MANAGE | | `SyncSourceResponse`; 409 already syncing |
 | GET | /api/definitions/:id/options/:key | S | | `VariableOptionsResponse` |
 | POST | /api/servers/:id/upgrade | O | `UpgradeServerBody` | `UpgradeServerResponse`; 409 not stopped, 400 values |
-| POST | /api/servers/:id/update | O | | `GameServerDto`; 409 not stopped, 400 nothing to update |
+| POST | /api/servers/:id/update | O | | `GameServerDto`; 409 running / never installed, 400 nothing to update |
 
-`DefinitionDto` gains `sourceKind` and `isStack`; `GameServerDetailResponse` gains `latestDefinition`, `source`,
-`services` and `canUpdateGame`. Client route `/sources` (nav: Manage → Sources).
+`DefinitionDto` gains `sourceKind`, `isStack` and `services`; `ServerVariableDto` gains `optionsFrom` and `pattern`
+(the settings form loads an `options_from` list from `GET /api/definitions/<server.definition.id>/options/<key>`);
+`GameServerDetailResponse` gains `latestDefinition`, `source`, `services`, `canUpdateGame` and `installed`;
+`UpgradeServerBody` gains `variables`. Client route `/sources` (nav: Manage → Sources).
 
 ### Boundaries added in M3
 
@@ -494,6 +547,21 @@ Minecraft server created from the UI on this machine, joinable at the shown addr
   (+ migration for the enum).
 - `OptionsSource` selectors: new keys in `definition.json` + `OptionsFetcher.select`.
 - `configs.Registry` / `steps.Registry` (gss-init), `stacks.Stack` (agent), `images.Resolver` (agent).
+
+### Host notes (M3)
+
+- The agent's data root must be on a disk-backed filesystem: files written to tmpfs/ramfs are charged to the writing
+  container's memory cgroup, so a steamcmd install is OOM-killed at the game's memory limit. `gss-agent run` warns.
+- **Ports taken by other software:** host facts carry `boundPorts {tcp, udp}` (listening TCP and unconnected UDP
+  sockets in the host namespace, from `/proc/net/{tcp,udp}{,6}`, ≤ 4096 each) and `PortAllocation.allocate` skips
+  them (a pinned port that is bound gets a 409). A port taken between two heartbeats makes Docker's bind fail: the
+  agent answers `port_in_use {proto, port}` (`ErrorBody.port`) and create and upgrade allocate around it once (pinned
+  ports aren't moved). A start of an existing server whose port was taken since still fails with the bind error.
+- **Console duplicates (Garry's Mod):** srcds itself prints every warning twice on a terminal, first in red
+  (`ESC[38;2;255;90;90m`) and then again in the default colour (`ESC[39m`), e.g. "No account token specified…" and
+  "Server ranking in server browser will be negatively impacted…". Seen in a raw `script` PTY capture of srcds_run
+  outside gss; the pipeline forwards each line once.
+- Garry's Mod (`games/garrys-mod`) needs no `packages`: srcds is 32-bit and the base image's lib32 runtime is enough.
 
 ## M3 work split
 

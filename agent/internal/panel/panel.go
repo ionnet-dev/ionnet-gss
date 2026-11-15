@@ -492,7 +492,7 @@ func (c *wsConn) serve(req protocol.Envelope) {
 		var remote *protocol.RemoteError
 		switch {
 		case errors.As(err, &remote):
-			resp = protocol.NewErrorResponse(req, remote.Code, remote.Message)
+			resp = protocol.NewRemoteErrorResponse(req, remote)
 		case err != nil:
 			slog.Error("request handler failed", "type", req.Type, "error", err)
 			resp = protocol.NewErrorResponse(req, protocol.ErrorCodeInternal, err.Error())

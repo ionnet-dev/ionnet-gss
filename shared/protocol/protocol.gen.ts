@@ -160,10 +160,22 @@ export interface ErrorBody {
    * Readable sentence that tells the operator what to do.
    */
   message: string;
+  /**
+   * Set with `port_in_use`: the host port Docker could not bind.
+   */
+  port?: PortInUse;
 }
 
-export type ErrorCode = "bad_request" | "unauthorized" | "forbidden" | "not_found" | "conflict" | "unsupported" | "timeout" | "internal";
-export const ERROR_CODE_VALUES: readonly ErrorCode[] = ["bad_request", "unauthorized", "forbidden", "not_found", "conflict", "unsupported", "timeout", "internal"];
+export type ErrorCode = "bad_request" | "unauthorized" | "forbidden" | "not_found" | "conflict" | "unsupported" | "timeout" | "internal" | "port_in_use";
+export const ERROR_CODE_VALUES: readonly ErrorCode[] = ["bad_request", "unauthorized", "forbidden", "not_found", "conflict", "unsupported", "timeout", "internal", "port_in_use"];
+
+/**
+ * A host port something else already holds (M3: Docker's bind failed). The panel retries the allocation once without it.
+ */
+export interface PortInUse {
+  proto: PortProto;
+  port: number;
+}
 
 /**
  * No payload.
@@ -555,6 +567,10 @@ export interface HostFacts {
    * Egress filtering for game servers. null = not checked yet (the agent is still starting) or an agent older than this field; the panel stores a missing value as null.
    */
   egress: EgressFacts | null;
+  /**
+   * Host ports other software already holds, so the panel's allocator skips them (M3). null = not read (not Linux) or an agent older than this field; the panel stores a missing value as null.
+   */
+  boundPorts: BoundPorts | null;
 }
 
 export interface OsFacts {
@@ -632,6 +648,14 @@ export interface EgressFacts {
    * When the table was last applied or the last attempt failed.
    */
   checkedAt: string;
+}
+
+/**
+ * Ports bound in the host's network namespace (`/proc/net/{tcp,tcp6,udp,udp6}`): listening TCP sockets and unconnected UDP sockets, sorted and unique, at most 4096 each. Ports Docker publishes for the agent's own servers are included (they are allocated anyway).
+ */
+export interface BoundPorts {
+  tcp: number[];
+  udp: number[];
 }
 
 export interface DockerFacts {
@@ -1216,7 +1240,7 @@ export interface AgentToInitRequests {
    */
   "backlog": { request: InitBacklogRequest; response: BacklogResponse };
   /**
-   * Run only the `steamcmd` steps (in order) and then the `update` hook, as an install would (state `installing` with progress, then `stopped`; failure → `install_failed`). Refused unless stopped. (M3)
+   * Run only the `steamcmd` steps (in order) and then the `update` hook, as an install would (state `installing` with progress, then `stopped`; failure → `install_failed`). Allowed while stopped or crashed, and from `install_failed` when the game was installed before (retrying a failed update); refused otherwise. (M3)
    */
   "update": { request: Empty; response: InitStatus };
   /**

@@ -1,5 +1,6 @@
 // Package configs applies `configs` mappings before every start (M2/M3): only the managed keys change; everything
-// else in the file stays the user's. One applier per ConfigFormat.
+// else in the file stays the user's. One applier per ConfigFormat; key addressing per format is documented on
+// ConfigFormat in protocol/schema/definition.json and on each applier.
 package configs
 
 import (
@@ -29,6 +30,10 @@ type Applier interface {
 // `deno task protocol`, an <format>.go applier here, one entry below.
 var Registry = map[protocol.ConfigFormat]Applier{
 	protocol.ConfigFormatProperties: propertiesApplier{},
+	protocol.ConfigFormatIni:        iniApplier{},
+	protocol.ConfigFormatJSON:       jsonApplier{},
+	protocol.ConfigFormatYaml:       yamlApplier{},
+	protocol.ConfigFormatCfg:        cfgApplier{},
 	protocol.ConfigFormatTemplate:   templateApplier{},
 }
 
@@ -46,7 +51,7 @@ func ApplyAll(env Env, mappings []protocol.ConfigMapping) error {
 		}
 		applier := Find(m.Format)
 		if applier == nil {
-			return fmt.Errorf("config %s: format %q is not supported yet (M2 supports properties and template; ini, json, yaml and cfg land in M3)", m.File, m.Format)
+			return fmt.Errorf("config %s: format %q is not supported by this gss-init (it knows properties, ini, json, yaml, cfg and template)", m.File, m.Format)
 		}
 		if err := applier.Apply(env, name, m); err != nil {
 			return fmt.Errorf("config %s: %w", m.File, err)

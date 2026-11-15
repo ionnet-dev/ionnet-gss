@@ -27,6 +27,22 @@ func newReaper() *reaper {
 	return &reaper{waiters: map[int]chan syscall.WaitStatus{}}
 }
 
+var (
+	theReaper   *reaper
+	reaperStart sync.Once
+)
+
+// processReaper returns the process's reaper, running from the first call on. wait4(-1) collects every child of the
+// process, so a second reaper (another Supervisor in the same process, as in tests) would steal the first one's
+// exits.
+func processReaper() *reaper {
+	reaperStart.Do(func() {
+		theReaper = newReaper()
+		go theReaper.run()
+	})
+	return theReaper
+}
+
 // run reaps on every SIGCHLD (and every few seconds, in case a signal was coalesced away) until the process exits.
 func (r *reaper) run() {
 	if os.Getpid() != 1 {

@@ -33,9 +33,10 @@
         "memory": { "$ref": "#/$defs/MemoryFacts" },
         "disk": { "$ref": "#/$defs/DiskFacts" },
         "docker": { "oneOf": [{ "$ref": "#/$defs/DockerFacts" }, { "type": "null" }], "description": "null = Docker is not reachable on this host." },
-        "egress": { "oneOf": [{ "$ref": "#/$defs/EgressFacts" }, { "type": "null" }], "description": "Egress filtering for game servers. null = not checked yet (the agent is still starting) or an agent older than this field; the panel stores a missing value as null." }
+        "egress": { "oneOf": [{ "$ref": "#/$defs/EgressFacts" }, { "type": "null" }], "description": "Egress filtering for game servers. null = not checked yet (the agent is still starting) or an agent older than this field; the panel stores a missing value as null." },
+        "boundPorts": { "oneOf": [{ "$ref": "#/$defs/BoundPorts" }, { "type": "null" }], "description": "Host ports other software already holds, so the panel's allocator skips them (M3). null = not read (not Linux) or an agent older than this field; the panel stores a missing value as null." }
       },
-      "required": ["hostname", "agentVersion", "uptimeSec", "os", "cpu", "memory", "disk", "docker", "egress"]
+      "required": ["hostname", "agentVersion", "uptimeSec", "os", "cpu", "memory", "disk", "docker", "egress", "boundPorts"]
     },
     "OsFacts": {
       "type": "object",
@@ -85,6 +86,15 @@
         "checkedAt": { "type": "string", "format": "date-time", "description": "When the table was last applied or the last attempt failed." }
       },
       "required": ["filtering", "restricted", "error", "checkedAt"]
+    },
+    "BoundPorts": {
+      "type": "object",
+      "description": "Ports bound in the host's network namespace (`/proc/net/{tcp,tcp6,udp,udp6}`): listening TCP sockets and unconnected UDP sockets, sorted and unique, at most 4096 each. Ports Docker publishes for the agent's own servers are included (they are allocated anyway).",
+      "properties": {
+        "tcp": { "type": "array", "items": { "type": "integer" } },
+        "udp": { "type": "array", "items": { "type": "integer" } }
+      },
+      "required": ["tcp", "udp"]
     },
     "DockerFacts": {
       "type": "object",

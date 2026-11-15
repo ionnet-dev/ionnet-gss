@@ -46,7 +46,8 @@ export interface CreateSourceBody {
 }
 
 /**
- * The built-in source accepts only `enabled`. `token: null` clears it; omitted keeps it.
+ * The built-in source accepts only `enabled`. `token: null` clears it; omitted keeps it, except that a `url` on
+ * another host clears it (the token isn't sent to a host it wasn't made for).
  */
 export interface UpdateSourceBody {
   name?: string;

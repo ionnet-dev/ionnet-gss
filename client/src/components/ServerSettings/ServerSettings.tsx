@@ -13,6 +13,7 @@ import VariableForm, {
   fromServer,
   initialValues,
   toValues,
+  useVariableOptions,
   validate,
 } from "@/components/VariableForm/VariableForm.tsx";
 import { useAuth } from "@/hooks/useAuth.ts";
@@ -60,8 +61,9 @@ export default function ServerSettings(props: ServerSettingsProps) {
 function SettingsForm(props: { server: GameServerDetailResponse; editable: boolean; onChanged: () => Promise<void> }) {
   const { server, editable, onChanged } = props;
   const notify = useNotify();
-  const variables = useMemo(() => fromServer(server.variables), [server.variables]);
-  const initial = useMemo(() => initialValues(variables), [variables]);
+  const declared = useMemo(() => fromServer(server.variables), [server.variables]);
+  const variables = useVariableOptions(server.definition.id, declared);
+  const initial = useMemo(() => initialValues(declared), [declared]);
 
   const [name, setName] = useState(server.name);
   const [values, setValues] = useState<FormValues>(initial);

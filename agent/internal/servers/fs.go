@@ -213,9 +213,18 @@ func writeFileAtomic(file string, content []byte, mode fs.FileMode) error {
 
 // dirSize is the apparent size of every regular file below dir. Unreadable entries are skipped.
 func dirSize(dir string) int64 {
-	var total int64
+	total, _ := walkSize(dir)
+	return total
+}
+
+// walkSize is dirSize that also reports whether an entry below dir could not be read (a folder another uid owns
+// with mode 0700, such as a stack service's volume for a non-root agent). A missing dir is 0, not denied.
+func walkSize(dir string) (total int64, denied bool) {
 	_ = filepath.WalkDir(dir, func(_ string, entry fs.DirEntry, err error) error {
 		if err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				denied = true
+			}
 			return nil
 		}
 		if entry.Type().IsRegular() {
@@ -225,16 +234,16 @@ func dirSize(dir string) int64 {
 		}
 		return nil
 	})
-	return total
+	return total, denied
 }
 
-// removeServerFolder deletes the server's folder, or with keepData everything but data/ (and backups/), so
-// Restore no longer finds a manifest there.
+// removeServerFolder deletes the server's folder, or with keepData everything but data/, backups/ and services/
+// (a stack's database is the server's data too), so Restore no longer finds a manifest there.
 func removeServerFolder(layout paths.Layout, serverID string, keepData bool) error {
 	dir := layout.ServerDir(serverID)
 	var err error
 	if keepData {
-		for _, part := range []string{layout.ServerManifest(serverID), layout.ServerSpec(serverID), layout.ServerRun(serverID), filepath.Join(dir, "services")} {
+		for _, part := range []string{layout.ServerManifest(serverID), layout.ServerSpec(serverID), layout.ServerRun(serverID)} {
 			if removeErr := os.RemoveAll(part); removeErr != nil {
 				err = removeErr
 			}

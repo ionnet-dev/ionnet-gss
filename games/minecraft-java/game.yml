@@ -12,8 +12,16 @@ variables:
     reinstall: true
   - key: version
     label: Minecraft version
-    description: A release like 1.21.4, or "latest" for the newest release.
-    type: string
+    description: A release, or "latest" for the newest one. The list comes from Mojang; if it can't be loaded, type a release like 1.21.4.
+    type: select
+    options: [latest]
+    options_from:
+      url: https://piston-meta.mojang.com/mc/game/version_manifest_v2.json
+      items: versions
+      value: id
+      where: { type: release }
+      limit: 150
+    pattern: '[0-9]+\.[0-9]+(\.[0-9]+)?'
     default: latest
     reinstall: true
   - key: java
@@ -29,7 +37,7 @@ variables:
     description: The container's memory limit. The Java heap gets 75% of it; the rest is the JVM's own overhead.
     unit: MB
     default: 2048
-    min: 1024
+    min: 1536 # At 1024 MB Paper's first start (jar patching) is OOM-killed: 768 MB heap plus JVM overhead.
     max: 65536
     bind: limits.memory
   - key: motd

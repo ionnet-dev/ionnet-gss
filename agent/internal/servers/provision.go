@@ -1,17 +1,18 @@
 package servers
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/docker"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/images"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/protocol"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/stacks"
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -39,11 +40,11 @@ func validateRequest(req *protocol.ProvisionRequest) error {
 	if req.SpecHash == "" {
 		return remoteError(protocol.ErrorCodeBadRequest, "specHash is empty.")
 	}
-	if len(spec.Packages) > 0 {
-		return remoteError(protocol.ErrorCodeUnsupported, "Definitions with `packages` need derived images, which this gss-agent version can't build yet; use an image that already has them.")
+	if _, err := images.ValidatePackages(spec.Packages); err != nil {
+		return remoteError(protocol.ErrorCodeBadRequest, "spec.packages: %v.", err)
 	}
-	if len(spec.Services) > 0 {
-		return remoteError(protocol.ErrorCodeUnsupported, "Definitions with `services` (stacks) are not supported by this gss-agent version yet.")
+	if err := stacks.Validate(spec.Services); err != nil {
+		return remoteError(protocol.ErrorCodeBadRequest, "spec.services: %v.", err)
 	}
 	if spec.Image == "" || strings.ContainsAny(spec.Image, " \t\n") {
 		return remoteError(protocol.ErrorCodeBadRequest, "spec.image %q is not an image reference.", spec.Image)
@@ -118,6 +119,22 @@ func (m *manager) Provision(ctx context.Context, req protocol.ProvisionRequest) 
 		return protocol.ServerStatus{}, remoteError(protocol.ErrorCodeConflict, "Server %s is %s. Stop it before changing its settings or reinstalling.", id, current.State)
 	}
 
+	progress := m.consoleWriter(s)
+	defer progress.Close()
+	// The image to run: with `packages`, a derived image that changes when its base image does. A stopped server
+	// moves to it now; a running one keeps its container until it is stopped and provisioned again.
+	image, err := m.opts.Images.Ensure(ctx, req.Spec.Image, req.Spec.Packages, progress)
+	if err != nil {
+		return protocol.ServerStatus{}, err
+	}
+	if exists && !recreate && info.Image != image {
+		if info.Running && isActive(current.State) {
+			slog.Info("the server's image changed; it moves to the new one when it is provisioned while stopped", "server", id, "image", image)
+		} else {
+			recreate = true
+		}
+	}
+
 	if changed || recreate {
 		if err := writeServerFolder(m.opts.Layout, req); err != nil {
 			return protocol.ServerStatus{}, err
@@ -132,6 +149,15 @@ func (m *manager) Provision(ctx context.Context, req protocol.ProvisionRequest) 
 
 	if err := m.ensureContainer(ctx, s, recreate); err != nil {
 		return protocol.ServerStatus{}, err
+	}
+	// Services are created (and recreated when their spec changed) now, and start with the game.
+	if err := m.opts.Stacks.Ensure(ctx, id, req.Spec.Services, progress); err != nil {
+		m.refreshServices(ctx, s, true)
+		return protocol.ServerStatus{}, err
+	}
+	m.refreshServices(ctx, s, true)
+	if recreate {
+		m.pruneImagesLater()
 	}
 	s.startWatching()
 	client, err := s.waitConnected(ctx, readyTimeout)
@@ -167,7 +193,7 @@ func (m *manager) Provision(ctx context.Context, req protocol.ProvisionRequest) 
 	if err := m.saveState(); err != nil {
 		slog.Warn("could not write the agent state file", "error", err)
 	}
-	return statusFrom(id, req.SpecHash, st), nil
+	return s.withServices(statusFrom(id, req.SpecHash, st)), nil
 }
 
 // ensureContainer makes the server's container exist for its current spec and run (gss-init idles while the game
@@ -185,7 +211,9 @@ func (m *manager) ensureContainer(ctx context.Context, s *server, recreate bool)
 	}
 	if exists && !recreate {
 		if info.Running {
-			return nil
+			// Already up (started earlier, by an operator, or left running by a previous agent): its rules must still be
+			// in place before anything reaches gss-init (provision, reinstall, update, start).
+			return m.guardEgress(ctx, s)
 		}
 		network, err := m.ensureNetwork(ctx, id)
 		if err != nil {
@@ -195,20 +223,24 @@ func (m *manager) ensureContainer(ctx context.Context, s *server, recreate bool)
 			return err
 		}
 		if err := m.opts.Docker.ContainerStart(ctx, name); err != nil {
-			return err
+			return portError(req, err)
 		}
 		s.wake()
 		return nil
 	}
 
-	if err := m.ensureImage(ctx, req.Spec.Image); err != nil {
-		return err
-	}
 	network, err := m.ensureNetwork(ctx, id)
 	if err != nil {
 		return err
 	}
 	if err := m.applyEgress(ctx, s, network.Bridge); err != nil {
+		return err
+	}
+	// Right before the create, so a Prune running meanwhile still sees the image as just used.
+	progress := m.consoleWriter(s)
+	defer progress.Close()
+	image, err := m.opts.Images.Ensure(ctx, req.Spec.Image, req.Spec.Packages, progress)
+	if err != nil {
 		return err
 	}
 	if exists {
@@ -224,20 +256,20 @@ func (m *manager) ensureContainer(ctx context.Context, s *server, recreate bool)
 	if err := os.Remove(m.opts.Layout.ServerSocket(id)); err != nil && !os.IsNotExist(err) && !os.IsPermission(err) {
 		return fmt.Errorf("remove stale socket: %w", err)
 	}
-	if _, err := m.opts.Docker.ContainerCreate(ctx, m.containerSpec(req)); err != nil {
+	if _, err := m.opts.Docker.ContainerCreate(ctx, m.containerSpec(req, image)); err != nil {
 		return err
 	}
 	s.resetConsole()
 	if err := m.opts.Docker.ContainerStart(ctx, name); err != nil {
-		return err
+		return portError(req, err)
 	}
 	s.wake()
-	slog.Info("created game container", "server", id, "container", name, "image", req.Spec.Image)
+	slog.Info("created game container", "server", id, "container", name, "image", image)
 	return nil
 }
 
-// containerSpec is the game container for a provision request.
-func (m *manager) containerSpec(req protocol.ProvisionRequest) docker.ContainerSpec {
+// containerSpec is the game container for a provision request, running image (the spec's, or its derived image).
+func (m *manager) containerSpec(req protocol.ProvisionRequest, image string) docker.ContainerSpec {
 	spec := req.Spec
 	id := spec.ServerID
 	layout := m.opts.Layout
@@ -250,15 +282,16 @@ func (m *manager) containerSpec(req protocol.ProvisionRequest) docker.ContainerS
 	}
 	return docker.ContainerSpec{
 		Name:  ContainerName(id),
-		Image: spec.Image,
+		Image: image,
 		Labels: map[string]string{
 			LabelServer: id,
 			LabelSpec:   req.SpecHash,
 			LabelName:   spec.Name,
 		},
 		Network: NetworkName(id),
-		// gss-init must come back after a Docker or host restart; the agent decides whether the game starts.
-		Restart: "unless-stopped",
+		// No restart policy: after a reboot or a Docker restart nothing starts before the agent has rebuilt the egress
+		// table; Restore (and the watcher, for a gss-init that exits while the agent runs) starts it again.
+		Restart: "no",
 		Binds: []string{
 			layout.ServerData(id) + ":" + protocol.InitDataPath,
 			layout.ServerSpec(id) + ":/gss/spec:ro",
@@ -272,51 +305,15 @@ func (m *manager) containerSpec(req protocol.ProvisionRequest) docker.ContainerS
 	}
 }
 
-// ensureImage pulls ref only when it is not present locally (locally built `:dev` tags are never pulled).
-func (m *manager) ensureImage(ctx context.Context, ref string) error {
-	ok, err := m.opts.Docker.ImageExists(ctx, ref)
-	if err != nil {
-		return err
-	}
-	if ok {
-		return nil
-	}
-	slog.Info("pulling image", "image", ref)
-	progress := newLogWriter("image", ref)
-	defer progress.Close()
-	if err := m.opts.Docker.ImagePull(ctx, ref, progress); err != nil {
-		return fmt.Errorf("image %s is not on this host and could not be pulled (check the name and that the host can reach its registry): %w", ref, err)
-	}
-	slog.Info("pulled image", "image", ref)
-	return nil
-}
-
-// logWriter turns progress lines into debug log records.
-type logWriter struct {
-	pipe *io.PipeWriter
-	done chan struct{}
-}
-
-func newLogWriter(key, value string) *logWriter {
-	reader, writer := io.Pipe()
-	w := &logWriter{pipe: writer, done: make(chan struct{})}
+// pruneImagesLater removes derived images no container uses any more, in the background.
+func (m *manager) pruneImagesLater() {
 	go func() {
-		defer close(w.done)
-		scanner := bufio.NewScanner(reader)
-		for scanner.Scan() {
-			slog.Debug(scanner.Text(), key, value)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := m.opts.Images.Prune(ctx); err != nil {
+			slog.Warn("could not remove unused derived images", "error", err)
 		}
-		_, _ = io.Copy(io.Discard, reader)
 	}()
-	return w
-}
-
-func (w *logWriter) Write(p []byte) (int, error) { return w.pipe.Write(p) }
-
-func (w *logWriter) Close() error {
-	err := w.pipe.Close()
-	<-w.done
-	return err
 }
 
 // short abbreviates a hash for logs.

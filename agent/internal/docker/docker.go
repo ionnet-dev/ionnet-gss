@@ -28,8 +28,17 @@ type Client interface {
 	ImageExists(ctx context.Context, ref string) (bool, error)
 	// ImagePull pulls ref, streaming progress lines to progress (may be nil).
 	ImagePull(ctx context.Context, ref string, progress io.Writer) error
-	// ImageBuild builds tag from a Dockerfile given as text (derived images for `packages:`).
-	ImageBuild(ctx context.Context, tag, dockerfile string, progress io.Writer) error
+	// ImageBuild builds tag from a Dockerfile given as text (derived images for `packages:`), with labels set on the
+	// image through the API (never through the Dockerfile). network is the network the build's RUN steps use (empty =
+	// Docker's default bridge).
+	ImageBuild(ctx context.Context, tag, dockerfile string, labels map[string]string, network string, progress io.Writer) error
+	// ImageInspect returns an image's id, tags, default user and labels, or ok=false when it is not present (M3).
+	ImageInspect(ctx context.Context, ref string) (info ImageInfo, ok bool, err error)
+	// ImageList lists local images whose reference matches (e.g. "ionnet-gss-derived") (M3).
+	ImageList(ctx context.Context, reference string) ([]ImageInfo, error)
+	// ImageRemove removes an image without force: an image a container (running or not) uses is a conflict
+	// (IsConflict), a missing one is not an error (M3).
+	ImageRemove(ctx context.Context, ref string) error
 	// NetworkEnsure creates the per-server bridge network if missing (with labels and driver options, e.g.
 	// BridgeNameOption) and returns it. An existing network is returned as it is.
 	NetworkEnsure(ctx context.Context, name string, labels, options map[string]string) (NetworkInfo, error)
@@ -52,6 +61,9 @@ type Client interface {
 	ContainerLogs(ctx context.Context, name string, tail, maxBytes int) (string, error)
 	// ContainerInspect returns the container's state, or ok=false when it does not exist.
 	ContainerInspect(ctx context.Context, name string) (info ContainerInfo, ok bool, err error)
+	// ContainerSetRestart changes a container's restart policy in place ("no", "unless-stopped"…) without restarting
+	// it.
+	ContainerSetRestart(ctx context.Context, name, policy string) error
 	// ContainerList lists containers (running or not) with the given label (e.g. "ionnet-gss.server").
 	ContainerList(ctx context.Context, label string) ([]ContainerInfo, error)
 	// ContainerStats takes one stats sample (stream=false).
@@ -122,6 +134,16 @@ type ContainerInfo struct {
 	StartedAt string
 	// Health is State.Health.Status from inspect: "starting", "healthy", "unhealthy", or "" without a healthcheck (M3).
 	Health string
+	// RestartPolicy is HostConfig.RestartPolicy.Name from inspect ("no", "unless-stopped"…; "" = no). Empty in lists.
+	RestartPolicy string
+}
+
+// ImageInfo is the subset of image inspect/list the agent uses (M3).
+type ImageInfo struct {
+	ID     string
+	Tags   []string
+	User   string // Config.User from inspect; empty = root. Empty in lists.
+	Labels map[string]string
 }
 
 // Stats is one sample, already converted from Docker's cumulative counters.

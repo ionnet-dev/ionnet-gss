@@ -66,3 +66,11 @@ export function formatUptime(seconds: number): string {
   if (hours > 0) return `${hours} h ${minutes % 60} min`;
   return `${minutes} min`;
 }
+
+/**
+ * A definition version for display: `a1b2c3d` for a git commit, `Built in` for the built-in source's `local`.
+ */
+export function formatCommit(commit: string | null): string {
+  if (!commit) return "Not synced";
+  return commit === "local" ? "Built in" : commit.slice(0, 7);
+}

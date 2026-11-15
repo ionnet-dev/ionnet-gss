@@ -23,6 +23,7 @@ type createBody struct {
 	User             string              `json:"User,omitempty"`
 	Tty              bool                `json:"Tty"`
 	ExposedPorts     map[string]struct{} `json:"ExposedPorts,omitempty"`
+	Healthcheck      *healthConfig       `json:"Healthcheck,omitempty"`
 	HostConfig       hostConfig          `json:"HostConfig"`
 	NetworkingConfig *networkingConfig   `json:"NetworkingConfig,omitempty"`
 }
@@ -41,6 +42,19 @@ type hostConfig struct {
 	SecurityOpt   []string                 `json:"SecurityOpt"`
 	Init          bool                     `json:"Init"`
 	LogConfig     logConfig                `json:"LogConfig"`
+}
+
+// healthConfig is Config.Healthcheck; durations in nanoseconds.
+type healthConfig struct {
+	Test     []string `json:"Test"`
+	Interval int64    `json:"Interval,omitempty"`
+	Timeout  int64    `json:"Timeout,omitempty"`
+	Retries  int      `json:"Retries,omitempty"`
+}
+
+// healthTimeout bounds one healthcheck run: twice the interval, within 5-30 s (Docker's default is 30 s).
+func healthTimeout(interval time.Duration) time.Duration {
+	return min(max(2*interval, 5*time.Second), 30*time.Second)
 }
 
 type logConfig struct {
@@ -98,6 +112,14 @@ func (c *unixClient) ContainerCreate(ctx context.Context, spec ContainerSpec) (s
 	sort.Strings(keys)
 	for _, key := range keys {
 		body.Env = append(body.Env, key+"="+spec.Env[key])
+	}
+	if check := spec.Healthcheck; check != nil {
+		body.Healthcheck = &healthConfig{
+			Test:     []string{"CMD-SHELL", check.Command},
+			Interval: int64(check.Interval),
+			Timeout:  int64(healthTimeout(check.Interval)),
+			Retries:  check.Retries,
+		}
 	}
 	if spec.MemoryBytes > 0 {
 		body.HostConfig.Memory = spec.MemoryBytes
@@ -189,11 +211,19 @@ func (c *unixClient) ContainerInspect(ctx context.Context, name string) (Contain
 			Image  string            `json:"Image"`
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
+		HostConfig struct {
+			RestartPolicy struct {
+				Name string `json:"Name"`
+			} `json:"RestartPolicy"`
+		} `json:"HostConfig"`
 		State struct {
 			Status    string `json:"Status"`
 			Running   bool   `json:"Running"`
 			ExitCode  int    `json:"ExitCode"`
 			StartedAt string `json:"StartedAt"`
+			Health    *struct {
+				Status string `json:"Status"`
+			} `json:"Health"`
 		} `json:"State"`
 	}
 	err := c.get(ctx, "/containers/"+name+"/json", &res)
@@ -203,16 +233,30 @@ func (c *unixClient) ContainerInspect(ctx context.Context, name string) (Contain
 	if err != nil {
 		return ContainerInfo{}, false, fmt.Errorf("inspect container %s: %w", name, err)
 	}
+	health := ""
+	if res.State.Health != nil {
+		health = res.State.Health.Status
+	}
 	return ContainerInfo{
-		ID:        res.ID,
-		Name:      strings.TrimPrefix(res.Name, "/"),
-		Image:     res.Config.Image,
-		Labels:    res.Config.Labels,
-		Running:   res.State.Running,
-		ExitCode:  res.State.ExitCode,
-		Status:    res.State.Status,
-		StartedAt: res.State.StartedAt,
+		ID:            res.ID,
+		Name:          strings.TrimPrefix(res.Name, "/"),
+		Image:         res.Config.Image,
+		Labels:        res.Config.Labels,
+		Running:       res.State.Running,
+		ExitCode:      res.State.ExitCode,
+		Status:        res.State.Status,
+		StartedAt:     res.State.StartedAt,
+		Health:        health,
+		RestartPolicy: res.HostConfig.RestartPolicy.Name,
 	}, true, nil
+}
+
+func (c *unixClient) ContainerSetRestart(ctx context.Context, name, policy string) error {
+	body := map[string]any{"RestartPolicy": map[string]any{"Name": policy}}
+	if err := c.call(ctx, http.MethodPost, "/containers/"+name+"/update", nil, body, nil); err != nil {
+		return fmt.Errorf("set the restart policy of container %s: %w", name, err)
+	}
+	return nil
 }
 
 func (c *unixClient) ContainerList(ctx context.Context, label string) ([]ContainerInfo, error) {

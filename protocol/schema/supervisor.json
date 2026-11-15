@@ -48,7 +48,7 @@
     {
       "channel": "supervisor", "type": "update", "kind": "request", "from": "agent", "milestone": 3,
       "request": "Empty", "response": "InitStatus",
-      "description": "Run only the `steamcmd` steps (in order) and then the `update` hook, as an install would (state `installing` with progress, then `stopped`; failure → `install_failed`). Refused unless stopped."
+      "description": "Run only the `steamcmd` steps (in order) and then the `update` hook, as an install would (state `installing` with progress, then `stopped`; failure → `install_failed`). Allowed while stopped or crashed, and from `install_failed` when the game was installed before (retrying a failed update); refused otherwise."
     },
     {
       "channel": "supervisor", "type": "reload", "kind": "request", "from": "agent", "milestone": 2,

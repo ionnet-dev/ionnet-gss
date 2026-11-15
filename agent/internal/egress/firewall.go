@@ -32,6 +32,8 @@ const (
 	freshFor = 30 * time.Second
 	// logBytes is how much of nft's output goes into an error.
 	logBytes = 2048
+	// listBytes bounds a table listing (about 6 KiB plus 80 bytes per restricted bridge).
+	listBytes = 1 << 20
 )
 
 // Firewall keeps the agent's nftables table in step with the servers it manages. Methods are safe for concurrent
@@ -44,14 +46,19 @@ type Firewall interface {
 	Restrict(ctx context.Context, serverID, bridge string) error
 	// Release drops a server's entry (allowPrivateNetwork, or the server was deleted).
 	Release(ctx context.Context, serverID string) error
-	// Heal rebuilds the table when the last apply failed (called about once a minute).
+	// Heal checks the table in the kernel (called about once a minute): it rebuilds it when the last apply failed,
+	// or when the table is missing or differs from what the agent applied (an operator flushed the ruleset, an
+	// older agent's table, a set edited by hand).
 	Heal(ctx context.Context)
-	// Facts is the host facts' `egress`; nil until the first apply finished.
+	// Facts is the host facts' `egress`, from the last apply or check; nil until the first apply finished.
 	Facts() *protocol.EgressFacts
+	// Table is the name of the agent's table (family inet).
+	Table() string
 }
 
-// Runner applies an nft script on the host and returns nft's output.
-type Runner func(ctx context.Context, script string) (string, error)
+// Runner runs an nft script on the host and returns nft's output: `nft -f`, or `nft -j -f` with list set (the
+// script only lists, and the JSON output is returned whole).
+type Runner func(ctx context.Context, script string, list bool) (string, error)
 
 // Options configure New.
 type Options struct {
@@ -70,6 +77,9 @@ type Options struct {
 func New(opts Options) Firewall {
 	if opts.Table == "" {
 		opts.Table = TableName
+	}
+	if err := ValidTable(opts.Table); err != nil {
+		panic(err) // The config is validated before; this is a programming error.
 	}
 	f := &firewall{table: opts.Table, run: opts.Run, desired: map[string]string{}}
 	if f.run == nil {
@@ -124,7 +134,7 @@ func (f *firewall) Restrict(ctx context.Context, serverID, bridge string) error 
 		if err != nil {
 			return err
 		}
-		_, err = f.run(ctx, script)
+		_, err = f.run(ctx, script, false)
 		if err == nil {
 			f.record(nil, serverID)
 			return nil
@@ -153,15 +163,49 @@ func (f *firewall) Heal(ctx context.Context) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.factsMu.Lock()
-	broken := f.checked && !f.healthy
+	checked, healthy := f.checked, f.healthy
 	f.factsMu.Unlock()
-	if !broken {
-		return
+	if !checked {
+		return // Restore's Sync has not run yet.
+	}
+	if healthy {
+		err := f.check(ctx)
+		if err == nil {
+			f.record(nil, "")
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Warn("the egress table is not as the agent applied it; rebuilding it", "table", "inet "+f.table, "reason", err)
+		f.record(fmt.Errorf("the table was changed outside the agent (%w); rebuilding it", err), "")
 	}
 	if err := f.rebuild(ctx); err == nil {
 		slog.Info("egress filtering works again", "table", "inet "+f.table, "restricted", len(f.desired))
 	}
 }
+
+// check lists the kernel's table and compares it with desired. Caller holds f.mu.
+func (f *firewall) check(ctx context.Context) error {
+	script, err := ListScript(f.table)
+	if err != nil {
+		return err
+	}
+	output, err := f.run(ctx, script, true)
+	if err != nil {
+		if strings.Contains(output, "No such file or directory") || strings.Contains(err.Error(), "No such file or directory") {
+			return errTableMissing
+		}
+		return err
+	}
+	bridges := make([]string, 0, len(f.desired))
+	for _, bridge := range f.desired {
+		bridges = append(bridges, bridge)
+	}
+	return checkListing(output, f.table, bridges)
+}
+
+func (f *firewall) Table() string { return f.table }
 
 func (f *firewall) Facts() *protocol.EgressFacts {
 	f.factsMu.Lock()
@@ -198,7 +242,7 @@ func (f *firewall) rebuild(ctx context.Context) error {
 	if err != nil {
 		return f.fail(err)
 	}
-	if _, err := f.run(ctx, script); err != nil {
+	if _, err := f.run(ctx, script, false); err != nil {
 		return f.fail(err)
 	}
 	f.factsMu.Lock()
@@ -249,7 +293,7 @@ func (f *firewall) record(err error, serverID string) {
 // namespace, root with NET_ADMIN only (every other capability dropped, no-new-privileges), the script bind-mounted
 // read-only. A missing image is pulled first. The container is removed afterwards, whatever happened.
 func HelperRunner(client docker.Client, image, dir string) Runner {
-	return func(ctx context.Context, script string) (string, error) {
+	return func(ctx context.Context, script string, list bool) (string, error) {
 		if client == nil {
 			return "", errors.New("Docker is not reachable")
 		}
@@ -268,13 +312,17 @@ func HelperRunner(client docker.Client, image, dir string) Runner {
 			return "", fmt.Errorf("name the helper container: %w", err)
 		}
 		name := "gss-nft-" + hex.EncodeToString(suffix)
+		cmd, maxOutput := []string{"-f", "/gss/ruleset.nft"}, logBytes
+		if list {
+			cmd, maxOutput = []string{"-j", "-f", "/gss/ruleset.nft"}, listBytes
+		}
 		ctx, cancel := context.WithTimeout(ctx, helperTimeout)
 		defer cancel()
 		_, err = client.ContainerCreate(ctx, docker.ContainerSpec{
 			Name:        name,
 			Image:       image,
 			Entrypoint:  []string{"nft"},
-			Cmd:         []string{"-f", "/gss/ruleset.nft"},
+			Cmd:         cmd,
 			Labels:      map[string]string{LabelHelper: "nft"},
 			Network:     "host",
 			Binds:       []string{file + ":/gss/ruleset.nft:ro"},
@@ -298,7 +346,7 @@ func HelperRunner(client docker.Client, image, dir string) Runner {
 		if err != nil {
 			return "", err
 		}
-		output, logErr := client.ContainerLogs(ctx, name, 50, logBytes)
+		output, logErr := client.ContainerLogs(ctx, name, 50, maxOutput)
 		output = strings.TrimSpace(output)
 		if code != 0 {
 			if output == "" && logErr != nil {

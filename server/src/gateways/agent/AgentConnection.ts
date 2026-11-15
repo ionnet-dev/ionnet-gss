@@ -9,6 +9,7 @@ import {
   MAX_FRAME_BYTES,
   type PanelToAgentEvents,
   type PanelToAgentRequests,
+  type PortInUse,
 } from "@shared/protocol/protocol.gen.ts";
 import { Config } from "../../Config.ts";
 import { HttpError } from "../../lib/HttpError.ts";
@@ -211,7 +212,7 @@ export class AgentConnection {
       pending.resolve(envelope.data);
     }
     else {
-      pending.reject(new AgentRequestError(envelope.error?.code ?? "internal", envelope.error?.message ?? "The host reported an error."));
+      pending.reject(new AgentRequestError(envelope.error?.code ?? "internal", envelope.error?.message ?? "The host reported an error.", AgentConnection.portOf(envelope.error?.port)));
     }
   }
 
@@ -278,6 +279,16 @@ export class AgentConnection {
     return new AgentRequestError("internal", "The panel failed to handle the request.");
   }
 
+  /**
+   * The `port_in_use` detail of an agent's error, when it is well-formed.
+   */
+  private static portOf(value: unknown): PortInUse | undefined {
+    if (typeof value !== "object" || value === null) return undefined;
+    const { proto, port } = value as Record<string, unknown>;
+    if ((proto !== "tcp" && proto !== "udp") || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) return undefined;
+    return { proto, port: port as number };
+  }
+
   private static codeForStatus(status: number): ErrorCode {
     switch (status) {
       case 400: return "bad_request";
@@ -309,6 +320,8 @@ export class AgentRequestError extends Error {
   constructor(
     public readonly code: ErrorCode,
     message: string,
+    /** With `port_in_use`: the host port Docker couldn't bind. */
+    public readonly port?: PortInUse,
   ) {
     super(message);
     this.name = "AgentRequestError";

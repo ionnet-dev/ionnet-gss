@@ -21,7 +21,8 @@ import (
 const dockerProbeTimeout = 3 * time.Second
 
 // collect reads /etc/os-release, uname, /proc/cpuinfo, /proc/loadavg, /proc/meminfo, /proc/uptime, statfs(dataRoot)
-// (the nearest existing parent when dataRoot does not exist yet) and docker.Version (nil facts on error).
+// (the nearest existing parent when dataRoot does not exist yet), /proc/net/{tcp,udp}{,6} (bound ports) and
+// docker.Version (nil facts on error).
 func collect(ctx context.Context, dataRoot string, dockerClient docker.Client) (protocol.HostFacts, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -46,8 +47,9 @@ func collect(ctx context.Context, dataRoot string, dockerClient docker.Client) (
 			Threads: int64(runtime.NumCPU()),
 			Load1:   readLoad1(),
 		},
-		Memory: memory,
-		Disk:   disk,
+		Memory:     memory,
+		Disk:       disk,
+		BoundPorts: readBoundPorts(),
 	}
 
 	if dockerClient != nil {
@@ -194,6 +196,29 @@ func readDisk(dataRoot string) (protocol.DiskFacts, error) {
 		parent := filepath.Dir(path)
 		if parent == path {
 			return protocol.DiskFacts{}, fmt.Errorf("stat the filesystem of %s: %w", dataRoot, err)
+		}
+		path = parent
+	}
+}
+
+// Filesystem magic numbers (statfs f_type) of memory-backed filesystems.
+const (
+	tmpfsMagic = 0x01021994
+	ramfsMagic = 0x858458f6
+)
+
+// IsMemoryBacked reports whether dataRoot (or its nearest existing parent) is on tmpfs or ramfs. Files written there
+// are charged to the writing container's memory cgroup, so a large game install is OOM-killed at the memory limit.
+func IsMemoryBacked(dataRoot string) bool {
+	path := dataRoot
+	for {
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(path, &stat); err == nil {
+			return stat.Type == tmpfsMagic || stat.Type == ramfsMagic
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return false
 		}
 		path = parent
 	}

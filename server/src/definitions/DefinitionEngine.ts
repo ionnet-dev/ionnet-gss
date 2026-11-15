@@ -19,6 +19,8 @@ import {
 } from "@shared/protocol/protocol.gen.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { sha256Hex } from "../lib/tokens.ts";
+import { OptionsFetcher } from "./OptionsFetcher.ts";
+import { Patterns } from "./patterns.ts";
 
 export namespace DefinitionEngine {
   export type Value = string | number | boolean;
@@ -64,6 +66,33 @@ export namespace DefinitionEngine {
   const PLACEHOLDER = /\{\{\s*([^{}]*?)\s*\}\}/g;
   const PLACEHOLDER_PATH = /^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)+$/;
   const MIN_INSTALL_TIMEOUT_SEC = 60;
+  /**
+   * Debian package names (policy 5.6.1: lowercase letters, digits, `+ - .`, at least two characters, starting with a
+   * letter or digit, not ending in a dash), optionally with the `:i386` architecture. Mirrors the agent's
+   * `images.ValidatePackages`.
+   */
+  const PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]*[a-z0-9+.](:i386)?$/;
+  const MAX_PACKAGES = 50;
+  const MAX_PACKAGE_LENGTH = 63;
+  const MAX_SERVICES = 4;
+  const SERVICE_NAME_PATTERN = /^[a-z]([a-z0-9-]{0,29}[a-z0-9])?$/; // A DNS label: no leading digit, no trailing dash.
+  const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+  const VOLUME_PATTERN = /^\/[A-Za-z0-9._/-]{1,254}$/;
+  /**
+   * Most seconds a service healthcheck's `startTimeout` may be (the agent's `stacks.MaxStartTimeout`: a start must
+   * answer within the provision timeout).
+   */
+  export const MAX_SERVICE_START_TIMEOUT = 600;
+  const STEAM_BETA_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+  const CFG_KEY_PATTERN = /^[A-Za-z0-9_.+-]{1,64}$/;
+  const INI_KEY_PATTERN = /^[A-Za-z0-9_.-]{1,128}$/;
+  const PATH_KEY_PATTERN = /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/;
+  const MAX_ENV_VARS = 64;
+  const MAX_ENV_VALUE = 4096;
+  /**
+   * Limits a service gets when game.yml sets none (definition.json ServiceLimits).
+   */
+  export const DEFAULT_SERVICE_LIMITS = { memoryMb: 512, cpuMillis: 500, pids: 256 };
 
   /**
    * Template filters: `{{vars.motd|sh}}` quotes a value for `/bin/sh` (POSIX single quotes), `{{vars.motd|json}}`
@@ -80,7 +109,7 @@ export namespace DefinitionEngine {
    */
   const TEMPLATED_KEYS = ["image", "install", "configs", "hooks", "start", "ready", "stop", "console", "players", "backup", "services"] as const;
   const DEFINITION_KEYS = ["id", "name", "extends", "image", "packages", "variables", "ports", "install_timeout", ...TEMPLATED_KEYS.filter((k) => k !== "image")];
-  const VARIABLE_KEYS = ["key", "label", "description", "type", "options", "options_from", "default", "unit", "min", "max", "reinstall", "admin_only", "bind", "generate"];
+  const VARIABLE_KEYS = ["key", "label", "description", "type", "options", "options_from", "pattern", "default", "unit", "min", "max", "reinstall", "admin_only", "bind", "generate"];
   const PORT_KEYS = ["name", "proto", "default", "internal"];
   const INSTALL_KEYS = ["steamcmd", "download", "extract", "write", "hook"];
   const CONFIG_KEYS = ["file", "format", "set", "template"];
@@ -108,8 +137,8 @@ export namespace DefinitionEngine {
   /**
    * Check what only a complete definition can satisfy: a `start` command, internal ports with a default, every
    * `{{…}}` placeholder naming a declared variable, a declared port or `server.id` / `server.name` (with a known
-   * filter), and no user text (string and secret variables, `server.name`) unquoted where a shell runs it: `start`,
-   * `stop.command` and hook paths need `|sh`.
+   * filter), no user text (string and secret variables, `options_from` selects, `server.name`) unquoted where a shell
+   * runs it (`start`, `stop.command` and hook paths need `|sh`), and no placeholder in an image but a static select.
    * @throws Error naming the file and the problem.
    */
   export function validate(def: GameDefinition, path: string): void {
@@ -121,6 +150,8 @@ export namespace DefinitionEngine {
         throw new Error(`${path}: the internal port "${port.name}" needs a "default" (internal ports are not allocated).`);
       }
     }
+    if ((def.packages ?? []).length > MAX_PACKAGES) throw new Error(`${path}: "packages" lists ${def.packages!.length} packages; at most ${MAX_PACKAGES} are allowed.`);
+    if (Object.keys(def.services ?? {}).length > MAX_SERVICES) throw new Error(`${path}: "services" lists ${Object.keys(def.services!).length} services; at most ${MAX_SERVICES} are allowed.`);
     const varKeys = new Set((def.variables ?? []).map((v) => v.key));
     const portNames = new Set((def.ports ?? []).map((p) => p.name));
     for (const key of TEMPLATED_KEYS) {
@@ -132,9 +163,26 @@ export namespace DefinitionEngine {
       });
     }
 
-    // User text reaching a shell must be quoted. Select options are the author's own, numbers and booleans are safe.
-    const userText = new Set(["server.name", ...(def.variables ?? []).filter((v) => v.type === "string" || v.type === "secret").map((v) => `vars.${v.key}`)]);
-    const shellStrings: [string, unknown][] = [["start", def.start], ["stop.command", def.stop?.command], ["hooks", def.hooks], ["install", (def.install ?? []).map((step) => step.hook)]];
+    // Image references choose what runs: only a select with static options (the author's own list) may appear there.
+    const imageVars = new Set((def.variables ?? []).filter((v) => v.type === "select" && v.options !== undefined && v.options_from === undefined).map((v) => `vars.${v.key}`));
+    const imageStrings: [string, unknown][] = [["image", def.image], ...Object.entries(def.services ?? {}).map(([name, service]) => [`services.${name}.image`, service.image] as [string, unknown])];
+    for (const [where, text] of imageStrings) {
+      if (typeof text !== "string") continue;
+      for (const match of text.matchAll(PLACEHOLDER)) {
+        const { path: name } = splitPlaceholder(match[1]);
+        if (!imageVars.has(name)) {
+          throw new Error(`${path}: ${where}: {{${match[1]}}} can't be used in an image; only a select variable with a static options list can choose the image.`);
+        }
+      }
+    }
+
+    // User text reaching a shell must be quoted. Static select options are the author's own, numbers and booleans are
+    // safe; an `options_from` list comes from a remote site, so it counts as user text.
+    const userText = new Set(["server.name", ...(def.variables ?? []).filter((v) => v.type === "string" || v.type === "secret" || v.options_from !== undefined).map((v) => `vars.${v.key}`)]);
+    const shellStrings: [string, unknown][] = [["start", def.start], ["stop.command", def.stop?.command], ["hooks", def.hooks], ["install", (def.install ?? []).map((step) => step.hook)],
+      ["services.command", Object.values(def.services ?? {}).map((service) => service.command)],
+      ["services.healthcheck", Object.values(def.services ?? {}).map((service) => service.healthcheck?.command)],
+    ];
     for (const [key, value] of shellStrings) {
       visitStrings(value, key, (text, where) => {
         for (const match of text.matchAll(PLACEHOLDER)) {
@@ -241,7 +289,13 @@ export namespace DefinitionEngine {
       fail("install_timeout", `must be a whole number of seconds, at least ${MIN_INSTALL_TIMEOUT_SEC}.`);
     }
     if (raw.packages !== undefined) {
-      list(raw.packages, "packages").forEach((item, i) => str(item, `packages[${i}]`, false));
+      const packages = list(raw.packages, "packages");
+      if (packages.length > MAX_PACKAGES) fail("packages", `lists ${packages.length} packages; at most ${MAX_PACKAGES} are allowed.`);
+      packages.forEach((item, i) => {
+        if (typeof item !== "string" || item.length > MAX_PACKAGE_LENGTH || !PACKAGE_PATTERN.test(item)) {
+          fail(`packages[${i}]`, `must be a Debian package name (lowercase letters, digits and + - . only, not ending in -, optionally with :i386), e.g. libsdl2-2.0-0 or libc6:i386. Got ${JSON.stringify(item)}.`);
+        }
+      });
     }
 
     if (raw.variables !== undefined) {
@@ -271,7 +325,14 @@ export namespace DefinitionEngine {
         if (item.options_from !== undefined) {
           if (item.type !== "select") fail(`${at} options_from`, "is only for type select.");
           if (!isRecord(item.options_from)) return fail(`${at} options_from`, "must be a mapping with a url.");
-          // TODO(builder): C (M3) — validate OptionsSource: https url on OPTIONS_FETCH_HOSTS, paths, include RE2, limit ≤ 500.
+          const problem = OptionsFetcher.problem(item.options_from);
+          if (problem) fail(`${at} options_from`, problem);
+        }
+        if (item.pattern !== undefined) {
+          if (item.type !== "string" && item.type !== "select") fail(`${at} pattern`, "is only for type string or select.");
+          if (typeof item.pattern !== "string") fail(`${at} pattern`, "must be a regular expression string.");
+          const problem = Patterns.problem(item.pattern as string);
+          if (problem) fail(`${at} pattern`, problem);
         }
         if (item.type === "select" && item.options === undefined && item.options_from === undefined) {
           fail(at, "is a select, so it needs \"options\" (or \"options_from\").");
@@ -298,8 +359,11 @@ export namespace DefinitionEngine {
             : item.type === "boolean" ? typeof value === "boolean"
             : typeof value === "string";
           if (!ok) fail(`${at} default`, `must be a ${item.type === "select" || item.type === "secret" ? "string" : item.type}.`);
-          if (item.type === "select" && Array.isArray(item.options) && !item.options.includes(value)) {
+          if (item.type === "select" && Array.isArray(item.options) && item.options_from === undefined && !item.options.includes(value)) {
             fail(`${at} default`, `"${value}" is not one of the options (${item.options.join(", ")}).`);
+          }
+          if (typeof item.pattern === "string" && typeof value === "string" && item.options_from === undefined && !Patterns.matchesWhole(item.pattern, value)) {
+            fail(`${at} default`, `"${value}" doesn't match the pattern ${item.pattern}.`);
           }
           if (typeof value === "number" && ((typeof item.min === "number" && value < item.min) || (typeof item.max === "number" && value > item.max))) {
             fail(`${at} default`, `${value} is outside min/max.`);
@@ -350,7 +414,11 @@ export namespace DefinitionEngine {
           str(step.content, `${where}.write.content`, false);
         }
         else if (kind === "steamcmd") {
-          if (!Number.isInteger(step.app)) fail(`${where}.steamcmd.app`, "must be the Steam app id (a whole number).");
+          checkKeys(step, ["app", "beta", "validate", "dir"], `${where}.steamcmd`);
+          if (!Number.isInteger(step.app) || (step.app as number) < 1) fail(`${where}.steamcmd.app`, "must be the Steam app id (a whole number, e.g. 4020).");
+          if (step.beta !== undefined && (typeof step.beta !== "string" || !STEAM_BETA_PATTERN.test(step.beta))) fail(`${where}.steamcmd.beta`, "must be a beta branch name (letters, digits, . _ -).");
+          if (step.validate !== undefined && typeof step.validate !== "boolean") fail(`${where}.steamcmd.validate`, "must be true or false.");
+          if (step.dir !== undefined) safePath(step.dir, `${where}.steamcmd.dir`);
         }
       });
     }
@@ -368,6 +436,10 @@ export namespace DefinitionEngine {
           if (!isRecord(item.set)) return fail(`${where}.set`, "must be a mapping of key to string value (quote numbers and booleans).");
           for (const [key, value] of Object.entries(item.set)) {
             if (typeof value !== "string") fail(`${where}.set.${key}`, "must be a string (quote numbers and booleans, e.g. \"true\").");
+            const keyPattern = item.format === "cfg" ? CFG_KEY_PATTERN : item.format === "ini" ? INI_KEY_PATTERN : item.format === "json" || item.format === "yaml" ? PATH_KEY_PATTERN : null;
+            if (keyPattern && !keyPattern.test(key)) {
+              fail(`${where}.set.${key}`, `isn't a valid key for the ${item.format} format${item.format === "json" || item.format === "yaml" ? " (a dotted path like server.motd)" : item.format === "ini" ? " (section.key, or just key)" : ""}.`);
+            }
           }
         }
       });
@@ -420,15 +492,54 @@ export namespace DefinitionEngine {
     }
     if (raw.services !== undefined) {
       if (!isRecord(raw.services)) fail("services", "must be a mapping of host name to service.");
-      for (const [name, service] of Object.entries(raw.services as Record<string, unknown>)) {
-        if (!isRecord(service)) return fail(`services.${name}`, "must be a mapping with an image.");
-        checkKeys(service, ["image", "env", "volume", "command"], `services.${name}`);
-        str(service.image, `services.${name}.image`, false);
-        str(service.volume, `services.${name}.volume`);
-        str(service.command, `services.${name}.command`);
+      const services = raw.services as Record<string, unknown>;
+      if (Object.keys(services).length > MAX_SERVICES) fail("services", `lists ${Object.keys(services).length} services; at most ${MAX_SERVICES} are allowed.`);
+      for (const [name, service] of Object.entries(services)) {
+        const at = `services.${name}`;
+        if (!SERVICE_NAME_PATTERN.test(name)) fail(at, "isn't a usable host name: use lowercase letters, digits and dashes, starting with a letter (e.g. db), at most 31 characters.");
+        if (!isRecord(service)) return fail(at, "must be a mapping with an image.");
+        checkKeys(service, ["image", "env", "volume", "command", "healthcheck", "limits"], at);
+        str(service.image, `${at}.image`, false);
+        const image = service.image as string;
+        if (image.trim() === "" || image.length > 255 || /\s/.test(image) || image.startsWith("-")) fail(`${at}.image`, "must be an image reference like mariadb:11.4 (no spaces, not starting with a dash).");
+        str(service.command, `${at}.command`);
+        if (service.volume !== undefined) {
+          // The agent wants a clean path (`path.Clean(v) === v`): no trailing slash, no empty, `.` or `..` segments.
+          if (typeof service.volume !== "string" || !VOLUME_PATTERN.test(service.volume) || service.volume.slice(1).split("/").some((part) => part === "" || part === "." || part === "..")) {
+            fail(`${at}.volume`, "must be a clean absolute path inside the container (no trailing /, // or . and .. parts), e.g. /var/lib/mysql.");
+          }
+        }
         if (service.env !== undefined) {
-          if (!isRecord(service.env)) return fail(`services.${name}.env`, "must be a mapping of name to string.");
-          for (const [key, value] of Object.entries(service.env)) str(value, `services.${name}.env.${key}`, false);
+          if (!isRecord(service.env)) return fail(`${at}.env`, "must be a mapping of name to string.");
+          const env = Object.entries(service.env);
+          if (env.length > MAX_ENV_VARS) fail(`${at}.env`, `has ${env.length} variables; at most ${MAX_ENV_VARS} are allowed.`);
+          for (const [key, value] of env) {
+            if (!ENV_NAME_PATTERN.test(key)) fail(`${at}.env.${key}`, "isn't a valid environment variable name.");
+            str(value, `${at}.env.${key}`, false);
+            if ((value as string).length > MAX_ENV_VALUE) fail(`${at}.env.${key}`, `is longer than ${MAX_ENV_VALUE} characters.`);
+          }
+        }
+        if (service.healthcheck !== undefined) {
+          if (!isRecord(service.healthcheck)) return fail(`${at}.healthcheck`, "must be a mapping with a command.");
+          const check = service.healthcheck as Record<string, unknown>;
+          checkKeys(check, ["command", "interval", "retries", "startTimeout"], `${at}.healthcheck`);
+          str(check.command, `${at}.healthcheck.command`, false);
+          if ((check.command as string).trim() === "") fail(`${at}.healthcheck.command`, "can't be empty.");
+          for (const [key, min, max] of [["interval", 1, 300], ["retries", 1, 100], ["startTimeout", 1, MAX_SERVICE_START_TIMEOUT]] as const) {
+            if (check[key] !== undefined && (!Number.isInteger(check[key]) || (check[key] as number) < min || (check[key] as number) > max)) {
+              fail(`${at}.healthcheck.${key}`, `must be a whole number from ${min} to ${max}.`);
+            }
+          }
+        }
+        if (service.limits !== undefined) {
+          if (!isRecord(service.limits)) return fail(`${at}.limits`, "must be a mapping with memoryMb, cpuMillis and pids.");
+          const limits = service.limits as Record<string, unknown>;
+          checkKeys(limits, ["memoryMb", "cpuMillis", "pids"], `${at}.limits`);
+          for (const [key, min, max] of [["memoryMb", 16, 65536], ["cpuMillis", 50, 64000], ["pids", 16, 32768]] as const) {
+            if (limits[key] !== undefined && (!Number.isInteger(limits[key]) || (limits[key] as number) < min || (limits[key] as number) > max)) {
+              fail(`${at}.limits.${key}`, `must be a whole number from ${min} to ${max}.`);
+            }
+          }
         }
       }
     }
@@ -491,7 +602,21 @@ export namespace DefinitionEngine {
     for (const key of ["hooks", "stop", "players", "backup"] as const) {
       if (parent[key] || child[key]) (merged as unknown as Record<string, unknown>)[key] = { ...parent[key], ...child[key] };
     }
-    if (parent.services || child.services) merged.services = { ...parent.services, ...child.services };
+    if (parent.services || child.services) {
+      const services: NonNullable<GameDefinition["services"]> = { ...parent.services };
+      for (const [name, service] of Object.entries(child.services ?? {})) {
+        const base = services[name];
+        // A child that names a service of the parent changes only what it sets (env merges by name).
+        services[name] = base === undefined ? service : {
+          ...base,
+          ...service,
+          ...(base.env || service.env ? { env: { ...base.env, ...service.env } } : {}),
+          ...(base.healthcheck || service.healthcheck ? { healthcheck: { ...base.healthcheck, ...service.healthcheck } as NonNullable<typeof service.healthcheck> } : {}),
+          ...(base.limits || service.limits ? { limits: { ...base.limits, ...service.limits } } : {}),
+        };
+      }
+      merged.services = services;
+    }
     return merged;
   }
 
@@ -574,13 +699,23 @@ export namespace DefinitionEngine {
       }
       case "select": {
         if (typeof value !== "string" || value === "") throw HttpError.badRequest(`${label} must be one of its options.`);
-        if (decl.options && !decl.options.includes(value)) throw HttpError.badRequest(`${label} must be one of: ${decl.options.join(", ")}.`);
-        return checkText(value, label);
+        // With `options_from` the list is fetched: `GameServerService` checks it (`OptionsFetcher.isAllowed`).
+        if (decl.options && !decl.options_from && !decl.options.includes(value)) throw HttpError.badRequest(`${label} must be one of: ${decl.options.join(", ")}.`);
+        checkText(value, label);
+        if (decl.pattern !== undefined && !decl.options_from) checkPattern(decl, value, label);
+        return value;
       }
       default: // string, secret
         if (typeof value !== "string") throw HttpError.badRequest(`${label} must be text.`);
-        return checkText(value, label);
+        // Length first: the pattern runs on a backtracking engine.
+        checkText(value, label);
+        if (decl.pattern !== undefined) checkPattern(decl, value, label);
+        return value;
     }
+  }
+
+  function checkPattern(decl: VariableDecl, value: string, label: string): void {
+    if (!Patterns.matchesWhole(decl.pattern!, value)) throw HttpError.badRequest(`${label} isn't in the expected format (${decl.pattern}).`);
   }
 
   function checkText(value: string, label: string): string {
@@ -694,7 +829,10 @@ export namespace DefinitionEngine {
     const image = resolveImage(render(def.image ?? DEFAULT_IMAGE, ctx), input.imageRegistry);
     const files: SpecFile[] = [...new Set(hookPaths(def))].sort().map((path) => ({ path, content: fileContent(path), executable: true }));
     const services = renderDeep(def.services ?? {}, ctx);
-    for (const service of Object.values(services)) service.image = resolveImage(service.image, input.imageRegistry);
+    for (const service of Object.values(services)) {
+      service.image = resolveImage(service.image, input.imageRegistry);
+      service.limits = { ...DEFAULT_SERVICE_LIMITS, ...service.limits };
+    }
 
     const configs = (def.configs ?? []).map((config): ConfigMapping => {
       const rendered = renderDeep({ ...config }, ctx);

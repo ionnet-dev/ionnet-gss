@@ -16,6 +16,10 @@ export interface DefinitionDto {
    */
   isStack: boolean;
   /**
+   * Extra containers that come with the game (stacks). Empty when there are none. `memoryMb` counts against capacity.
+   */
+  services: DefinitionServiceDto[];
+  /**
    * The create/settings form. `admin_only` variables are left out for non-admins; `secret` variables are listed but
    * never have a default shown.
    */
@@ -34,4 +38,13 @@ export interface VariableOptionsResponse {
   fetchedAt: IsoDate | null;
   error: string | null;
   pattern: string | null;
+}
+
+/**
+ * One extra container a stack definition brings along, as shown before a server is created.
+ */
+export interface DefinitionServiceDto {
+  name: string;
+  image: string;
+  memoryMb: number | null;
 }

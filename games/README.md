@@ -6,8 +6,64 @@ Format: `protocol/schema/definition.json` and the blueprint's "A game definition
 
 - Hooks run inside the container as uid 1000 in `/data`, with `GSS_VAR_<KEY>`, `GSS_PORT_<NAME>` and `GSS_SERVER_ID`
   in the environment. Non-zero exit = the step failed.
-- M2 supports install steps `download`, `extract`, `write`, `hook` and config formats `properties`, `template`.
-  `steamcmd`, the other formats and `options_from` lists are M3.
+- Install steps: `download`, `extract`, `write`, `hook` and `steamcmd`. Config formats: `properties`, `template`,
+  `ini`, `json`, `yaml` and `cfg` (below).
+- Git sources (Manage → Sources) use the same layout below their `path`; the panel syncs them on add, on demand and
+  every `syncIntervalMin`. A game that fails validation keeps its previous version, and its error shows on the source.
+
+## steamcmd games
+
+`install: [{ steamcmd: { app: 4020, beta: …, validate: true } }]` installs a Steam app anonymously into `/data` (or
+`dir:` below it). gss-init fetches its own steamcmd into `/data/.gss/steamcmd` (per server, nothing shared between
+servers), prints steamcmd's progress lines to the console and tries a failing run up to three times. "Update game" in the panel
+(`POST /api/servers/:id/update`, while stopped, or after a failed update) re-runs only the `steamcmd` steps and the
+`update` hook. A Source game's files are large (Garry's Mod: about 7 GB) and every server has its own copy: size
+`limits.disk` for it.
+
+## Config formats
+
+Each `configs` entry names a `file` below `/data`, a `format` and the keys to `set`. Only those keys change: comments,
+blank lines, order, line endings and every other key stay as the owner left them, and a missing file is created.
+
+| Format | Key addressing | Notes |
+| --- | --- | --- |
+| `properties` | literal key | `key=value` (Java properties) |
+| `ini` | `section.key` (`key` alone = before the first section) | missing sections are appended |
+| `json` | dotted path (`server.name`, `admins.0`) | an existing value keeps its type while the new one fits it; a new key is typed by the value (`true`/`false`, a number, else a string). JSONC is refused |
+| `yaml` | dotted path | same typing; edited as YAML nodes, so comments survive |
+| `cfg` | literal cvar, case-insensitive | Source engine `key "value"` lines; `"` in a value becomes `'` (the engine has no escape), `;` and `//` inside the quotes are plain text |
+| `template` | none | the whole file is rendered from `template:` every time |
+
+## Packages and services
+
+- `packages: [name, …]` (Debian names, not ending in `-`, `:i386` allowed, at most 50): the agent builds a derived image from `image` once
+  per host (`ionnet-gss-derived:<hash>`, build lines in the console) and reuses it for every server with the same
+  list. Only list what the game really loads: check with `ldd` on its binaries first. Garry's Mod needs none. The
+  build runs on the agent's filtered `gss-build` network (public mirrors only), so it fails while the host's egress
+  filtering doesn't work.
+- `services: { <name>: { image, env, volume, healthcheck, limits } }` (at most 4) run next to the game on the server's
+  own network as host `<name>`, never published. They start first and the game waits until each is healthy. Their
+  data lives in `services/<name>` beside the server's `data/` (deleting with "keep data" keeps it too) and counts
+  toward the server's disk limit (`limits.disk`) like `data/` does, and their
+  `limits` (the panel fills defaults) count toward the owner's quota. `volume` is a clean absolute path
+  (`/var/lib/mysql`, not `/var/lib/mysql/` or `/a//b`); `healthcheck.startTimeout` is 1-600 seconds (default 120) and
+  the start request waits for the longest one. See `garrys-mod-mysql`.
+
+## Lists from the web (`options_from`)
+
+A `select` variable can take its choices from a JSON document: `options_from: { url, items, value, where, include,
+reverse, limit }` (see `minecraft-java`'s `version`). The panel fetches it (https, hosts on `OPTIONS_FETCH_HOSTS`, at
+most 2 MiB, cached), puts the static `options` first, and checks submitted values against the list. When the list
+can't be fetched the form becomes free text, so give the variable a `pattern` the value must then match.
+
+## Patterns
+
+`pattern` (a whole-value match) and `options_from.include` (a match anywhere) are regular expressions of at most 200
+characters, matched against values of at most 1024. The panel runs them on a backtracking engine and a server's
+owner picks the value, so it refuses what can take exponential or high-polynomial time: look-around and back
+references, a repeated group that contains a quantifier or `|` (`([a-z0-9_]+)*`, `(a|ab)+`, `(\.[0-9]+)*`; a `?`
+on such a group is fine, as in `[0-9]+\.[0-9]+(\.[0-9]+)?`), and more than three unbounded quantifiers (`*`, `+`,
+`{n,}`). Write a character class or one quantifier instead (`[a-z0-9_]*`).
 
 ## Templates and quoting
 
@@ -21,9 +77,11 @@ them before anything reaches the host. A filter after `|` quotes the value for w
 | `{{vars.motd\|sh}}` | `'It'\''s <ok>'` (POSIX single quotes) | `start`, `stop.command`, anything run by `/bin/sh` |
 | `{{vars.motd\|json}}` | `"It's <ok>"` | JSON or YAML config templates |
 
-`start` runs through `/bin/sh -c`, so a definition fails validation when a `string` or `secret` variable or
-`server.name` appears unfiltered in `start`, `stop.command` or a hook path: write `{{vars.motd|sh}}`. Numbers,
-booleans and `select` values (the author's own options) need no filter. Values never contain line breaks or control
+`start` runs through `/bin/sh -c`, so a definition fails validation when a `string` or `secret` variable, a `select`
+with `options_from` (its list comes from another site) or `server.name` appears unfiltered in `start`,
+`stop.command` or a hook path: write `{{vars.motd|sh}}`. Numbers, booleans and static `select` values (the author's
+own options) need no filter. `image` and `services.<name>.image` may only use a `select` with static `options`
+(no `options_from`, string, secret or server name), so an owner can't choose what runs. Values never contain line breaks or control
 characters (the panel refuses them, the server name included).
 
 ## Limits and timeouts

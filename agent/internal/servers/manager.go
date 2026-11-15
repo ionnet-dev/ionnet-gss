@@ -10,12 +10,15 @@ import (
 )
 
 // Sink receives what servers report, for forwarding to the panel (server.console / server.state / server.stats /
-// server.player events). Calls must not block for long; the panel connection buffers while offline.
+// server.player / server.services events). Calls must not block for long; the panel connection buffers while
+// offline.
 type Sink interface {
 	Console(batch protocol.ConsoleBatch)
 	State(change protocol.StateChange)
 	Stats(batch protocol.StatsBatch)
 	Player(event protocol.PlayerEvent)
+	// Services reports a changed list of stack service statuses (M3).
+	Services(change protocol.ServicesChange)
 }
 
 // Manager is the agent's server lifecycle. Every method is idempotent and safe to retry after a reconnect. Expected
@@ -35,6 +38,9 @@ type Manager interface {
 	Restart(ctx context.Context, serverID string) (protocol.ServerStatus, error)
 	Stop(ctx context.Context, serverID string, kill bool) (protocol.ServerStatus, error)
 	Delete(ctx context.Context, serverID string, keepData bool) error
+	// Update re-runs the game's update steps (steamcmd + the update hook) while it is stopped (M3); progress and
+	// state arrive as state events, like an install.
+	Update(ctx context.Context, serverID string) (protocol.ServerStatus, error)
 	Input(ctx context.Context, serverID, line string) error
 	// Backlog is the newest `limit` lines (before beforeSeq when it is > 0), within the CONSOLE_BATCH_* limits.
 	Backlog(ctx context.Context, serverID string, limit, beforeSeq int64) (protocol.BacklogResponse, error)

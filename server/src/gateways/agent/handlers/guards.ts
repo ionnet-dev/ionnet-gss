@@ -1,10 +1,10 @@
-import type { CpuFacts, DiskFacts, DockerFacts, EgressFacts, HostFacts, MemoryFacts, OsFacts } from "@shared/protocol/protocol.gen.ts";
+import type { BoundPorts, CpuFacts, DiskFacts, DockerFacts, EgressFacts, HostFacts, MemoryFacts, OsFacts } from "@shared/protocol/protocol.gen.ts";
 import { AgentRequestError } from "../AgentConnection.ts";
 
 /**
  * Largest serialized `facts` object accepted. Real facts are well under 1 KiB.
  */
-const MAX_FACTS_CHARS = 16 * 1024;
+const MAX_FACTS_CHARS = 96 * 1024; // Room for two full `boundPorts` lists.
 /**
  * Longest string accepted in facts (hostname, OS name, CPU model, versions…).
  */
@@ -18,6 +18,10 @@ const MAX_FACT_PATH = 1024;
  * Most characters of `facts.egress.error` that are stored (nft's output can be long; the agent caps it at 2 KiB).
  */
 const MAX_EGRESS_ERROR = 4096;
+/**
+ * Most ports per protocol in `facts.boundPorts` (the schema's cap).
+ */
+const MAX_BOUND_PORTS = 4096;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -94,6 +98,20 @@ export function requireFacts(value: unknown): HostFacts {
     };
   }
 
+  // Agents older than port reporting send no `boundPorts`: stored as null (the allocator then knows only its own rows).
+  let boundPorts: BoundPorts | null = null;
+  if (facts.boundPorts !== undefined && facts.boundPorts !== null) {
+    const raw = factObject(facts.boundPorts, "boundPorts");
+    const ports = (list: unknown, field: string): number[] => {
+      if (!Array.isArray(list) || list.length > MAX_BOUND_PORTS) throw new AgentRequestError("bad_request", `facts.boundPorts.${field} must be a list of at most ${MAX_BOUND_PORTS} ports.`);
+      for (const port of list) {
+        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new AgentRequestError("bad_request", `facts.boundPorts.${field} must hold port numbers from 1 to 65535.`);
+      }
+      return [...new Set(list as number[])];
+    };
+    boundPorts = { tcp: ports(raw.tcp, "tcp"), udp: ports(raw.udp, "udp") };
+  }
+
   const osFacts: OsFacts = {
     name: factString(os.name, "os.name"),
     id: factString(os.id, "os.id"),
@@ -128,5 +146,6 @@ export function requireFacts(value: unknown): HostFacts {
     disk: diskFacts,
     docker,
     egress,
+    boundPorts,
   };
 }

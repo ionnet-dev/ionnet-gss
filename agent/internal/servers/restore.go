@@ -45,7 +45,9 @@ func (m *manager) saveState() error {
 	state := stateFile{Servers: map[string]savedServer{}}
 	for _, s := range list {
 		s.mu.Lock()
-		state.Servers[s.id] = savedServer{Status: s.status, LastSeq: s.lastSeq, InitStartedAt: s.initStarted, WantRunning: s.wantRunning, Installed: s.installed}
+		status := s.status
+		status.Services = s.servicesSnapshotLocked()
+		state.Servers[s.id] = savedServer{Status: status, LastSeq: s.lastSeq, InitStartedAt: s.initStarted, WantRunning: s.wantRunning, Installed: s.installed}
 		s.mu.Unlock()
 	}
 	raw, err := json.MarshalIndent(state, "", "  ")
@@ -94,7 +96,10 @@ const restoreTimeout = time.Duration(protocol.ProvisionTimeoutSec) * time.Second
 
 // Restore loads every server folder with a manifest, rebuilds the egress table from them (before any container is
 // started), makes sure each container runs, reattaches to gss-init (which catches the console up from lastSeq) and
-// starts autostart servers whose game was meant to be running. Containers labelled for servers this agent has no
+// starts autostart servers whose game was meant to be running. Game containers have no restart policy (an older
+// agent's `unless-stopped` is removed here), so after a reboot nothing ran before the table. When the table can't be
+// applied, restricted servers are held back: a running container is stopped, a stopped one isn't started, and the
+// state says why; the watcher starts them once the rules work. Containers labelled for servers this agent has no
 // folder for are reported and left alone (and stay out of the egress table).
 func (m *manager) Restore(ctx context.Context) error {
 	layout := m.opts.Layout
@@ -131,6 +136,10 @@ func (m *manager) Restore(ctx context.Context) error {
 			s.initStarted = saved.InitStartedAt
 			s.wantRunning = saved.WantRunning
 			s.installed = saved.Installed
+			if saved.Status.Services != nil {
+				s.svc = saved.Status.Services
+			}
+			s.status.Services = []protocol.ServiceStatus{}
 		}
 		m.servers[id] = s
 		restored = append(restored, s)
@@ -147,12 +156,22 @@ func (m *manager) Restore(ctx context.Context) error {
 		}
 	}
 
+	// `du` containers of a measurement an earlier agent didn't finish.
+	if leftovers, err := m.opts.Docker.ContainerList(ctx, LabelMeasure); err == nil {
+		for _, info := range leftovers {
+			if err := m.opts.Docker.ContainerRemove(ctx, info.Name); err != nil {
+				slog.Warn("could not remove a leftover measuring container", "container", info.Name, "error", err)
+			}
+		}
+	}
+
 	egressReady := make(chan struct{})
+	var blocked map[string]string
 	go func() {
 		defer close(egressReady)
 		syncCtx, cancel := context.WithTimeout(ctx, restoreTimeout)
 		defer cancel()
-		m.syncEgress(syncCtx, restored)
+		blocked = m.syncEgress(syncCtx, restored)
 	}()
 
 	var wg sync.WaitGroup
@@ -165,7 +184,7 @@ func (m *manager) Restore(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			}
-			m.restoreOne(ctx, s)
+			m.restoreOne(ctx, s, blocked[s.id])
 		}()
 	}
 	done := make(chan struct{})
@@ -185,7 +204,8 @@ func (m *manager) Restore(ctx context.Context) error {
 }
 
 // restoreOne brings one server back; failures are logged so one broken server doesn't keep the others down.
-func (m *manager) restoreOne(ctx context.Context, s *server) {
+// blocked is why a restricted server must stay down (syncEgress), or empty.
+func (m *manager) restoreOne(ctx context.Context, s *server, blocked string) {
 	s.op.Lock()
 	defer s.op.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, restoreTimeout)
@@ -193,9 +213,18 @@ func (m *manager) restoreOne(ctx context.Context, s *server) {
 	if err := secureServerFolder(m.opts.Layout, s.id); err != nil {
 		slog.Warn("could not make the server folder private", "server", s.id, "error", err)
 	}
+	m.migrateRestart(ctx, s)
+	if blocked != "" {
+		m.holdBack(ctx, s, blocked)
+		m.refreshServices(ctx, s, false)
+		s.startWatching()
+		return
+	}
 	if err := m.ensureContainer(ctx, s, false); err != nil {
 		slog.Warn("could not bring the game container back", "server", s.id, "error", err)
 	}
+	// Hello carries the services as Docker has them now; changes after it go out as events.
+	m.refreshServices(ctx, s, false)
 	s.startWatching()
 	if _, err := s.waitConnected(ctx, restoreWait); err != nil {
 		slog.Warn("gss-init did not answer yet; the agent keeps trying in the background", "server", s.id, "error", err)
@@ -204,8 +233,13 @@ func (m *manager) restoreOne(ctx context.Context, s *server) {
 
 	s.mu.Lock()
 	autostart := s.req.Spec.Autostart && s.wantRunning && s.installed && s.status.State == protocol.ServerStateStopped
+	wanted := s.wantRunning
 	s.mu.Unlock()
 	if !autostart {
+		if !wanted {
+			// Services left running by an agent that went away before the game had stopped.
+			m.stopServicesLater(s)
+		}
 		return
 	}
 	slog.Info("starting the game again (autostart)", "server", s.id)

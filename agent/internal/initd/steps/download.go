@@ -68,23 +68,9 @@ func (downloadStep) Run(ctx context.Context, step protocol.InstallStep, env Env)
 
 	tmp := path.Join(path.Dir(dest), "."+path.Base(dest)+".gss-download")
 	defer env.Data.Remove(tmp)
-	var got string
-	for attempt := 1; ; attempt++ {
-		var retry bool
-		got, retry, err = fetch(ctx, d.URL, env, tmp)
-		if err == nil {
-			break
-		}
-		if !retry || attempt >= DOWNLOAD_ATTEMPTS || ctx.Err() != nil {
-			return err
-		}
-		wait := time.Duration(attempt*2) * time.Second
-		fmt.Fprintf(env.Output, "%v; retrying in %s (attempt %d of %d).\n", err, wait, attempt+1, DOWNLOAD_ATTEMPTS)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
-		}
+	got, err := fetchWithRetry(ctx, d.URL, env, tmp)
+	if err != nil {
+		return err
 	}
 	if want != "" && got != want {
 		return fmt.Errorf("sha256 mismatch for %s: expected %s, got %s", dest, want, got)
@@ -101,6 +87,27 @@ func (downloadStep) Run(ctx context.Context, step protocol.InstallStep, env Env)
 		fmt.Fprintf(env.Output, "Saved %s (sha256 %s).\n", dest, got)
 	}
 	return nil
+}
+
+// fetchWithRetry downloads rawURL into tmp (below the data folder), retrying network errors and 5xx/429 answers up
+// to DOWNLOAD_ATTEMPTS times, and returns the hex sha256.
+func fetchWithRetry(ctx context.Context, rawURL string, env Env, tmp string) (string, error) {
+	for attempt := 1; ; attempt++ {
+		sum, retry, err := fetch(ctx, rawURL, env, tmp)
+		if err == nil {
+			return sum, nil
+		}
+		if !retry || attempt >= DOWNLOAD_ATTEMPTS || ctx.Err() != nil {
+			return "", err
+		}
+		wait := time.Duration(attempt*2) * time.Second
+		fmt.Fprintf(env.Output, "%v; retrying in %s (attempt %d of %d).\n", err, wait, attempt+1, DOWNLOAD_ATTEMPTS)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(wait):
+		}
+	}
 }
 
 // fetch downloads rawURL into tmp and returns the hex sha256. retry reports whether the failure is worth another

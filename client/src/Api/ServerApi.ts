@@ -11,6 +11,7 @@ import type {
 import type { UpgradeServerBody, UpgradeServerResponse } from "@shared/api/servers.ts";
 import { useEffect, useState } from "react";
 import type { LiveEvents } from "@shared/live.ts";
+import type { ServiceStatus } from "@shared/protocol/protocol.gen.ts";
 import { useResource } from "@/hooks/useResource.ts";
 import { liveSocket } from "@/live/LiveSocket.ts";
 import { BaseApi } from "./BaseApi.ts";
@@ -124,9 +125,30 @@ export namespace ServerApi {
     return useResource(list, [], { liveEvents: ["server.updated"] });
   }
 
+  /**
+   * The server's stack services, with `server.services` events applied in place. A refetch brings fresher figures
+   * than an earlier event, so the event only holds until the server is fetched again.
+   */
+  export function useServices(server: GameServerDetailResponse | null): ServiceStatus[] {
+    const [live, setLive] = useState<{ base: ServiceStatus[]; services: ServiceStatus[] } | null>(null);
+    const serverId = server?.id;
+    const base = server?.services;
+    useEffect(() => {
+      if (!serverId || !base) return;
+      return liveSocket.on("server.services", (event) => {
+        if (event.serverId === serverId) setLive({ base, services: event.services });
+      });
+    }, [serverId, base]);
+    if (!base) return [];
+    return live && live.base === base ? live.services : base;
+  }
+
+  /**
+   * One server; refetched on `server.updated` and when a sync brings a newer definition ("update available").
+   */
   export function useServer(id: string) {
     return useResource(() => get(id), [id], {
-      liveEvents: ["server.updated"],
+      liveEvents: ["server.updated", "definitions.updated"],
       liveFilter: (_event, data) => !("serverId" in data) || data.serverId === null || data.serverId === id,
     });
   }

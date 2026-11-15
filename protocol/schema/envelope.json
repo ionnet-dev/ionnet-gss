@@ -50,13 +50,23 @@
       "description": "Why a request failed.",
       "properties": {
         "code": { "$ref": "#/$defs/ErrorCode" },
-        "message": { "type": "string", "description": "Readable sentence that tells the operator what to do." }
+        "message": { "type": "string", "description": "Readable sentence that tells the operator what to do." },
+        "port": { "$ref": "#/$defs/PortInUse", "description": "Set with `port_in_use`: the host port Docker could not bind." }
       },
       "required": ["code", "message"]
     },
     "ErrorCode": {
       "type": "string",
-      "enum": ["bad_request", "unauthorized", "forbidden", "not_found", "conflict", "unsupported", "timeout", "internal"]
+      "enum": ["bad_request", "unauthorized", "forbidden", "not_found", "conflict", "unsupported", "timeout", "internal", "port_in_use"]
+    },
+    "PortInUse": {
+      "type": "object",
+      "description": "A host port something else already holds (M3: Docker's bind failed). The panel retries the allocation once without it.",
+      "properties": {
+        "proto": { "$ref": "definition.json#/$defs/PortProto" },
+        "port": { "type": "integer" }
+      },
+      "required": ["proto", "port"]
     },
     "Empty": {
       "type": "object",

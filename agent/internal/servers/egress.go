@@ -17,8 +17,34 @@ import (
 // container or its game starts, and doesn't start when that fails (a conflict with the reason, also sent as the
 // state reason). Restore rebuilds the whole table from the servers on disk before it starts anything.
 
-// healInterval is how often a broken egress table is retried.
+// healInterval is how often the egress table is checked (and rebuilt when it is missing, differs or broke).
 const healInterval = time.Minute
+
+// Derived-image builds (`packages:`) run on one agent-owned bridge network that is always restricted, so apt-get
+// reaches the public mirrors but not the host's private networks. It is kept between builds (an idle bridge costs
+// nothing) and its bridge is in the egress table like a server's.
+const (
+	BuildNetwork   = "gss-build"
+	buildEgressKey = "build" // its key among the restricted bridges (server ids are UUIDs, so it can't collide)
+	// LabelBuild marks the build network.
+	LabelBuild = "ionnet-gss.build"
+)
+
+// buildNetwork makes the build network exist with its bridge filtered and returns its name (images.NetworkFunc).
+func (m *manager) buildNetwork(ctx context.Context) (string, error) {
+	network, err := m.opts.Docker.NetworkEnsure(ctx, BuildNetwork, map[string]string{LabelBuild: "1"}, map[string]string{docker.BridgeNameOption: BuildNetwork})
+	if err != nil {
+		return "", err
+	}
+	err = errors.New("egress filtering is not set up in this agent")
+	if m.opts.Egress != nil {
+		err = m.opts.Egress.Restrict(ctx, buildEgressKey, network.Bridge)
+	}
+	if err != nil {
+		return "", remoteError(protocol.ErrorCodeConflict, "Derived images (packages) are built on a filtered network, and egress filtering doesn't work on this host (%v). Fix it (see the host page) and provision again.", err)
+	}
+	return BuildNetwork, nil
+}
 
 // BridgeName is the host interface of the server's network: gss- and the first 11 hex digits of its id (15
 // characters, the kernel's limit). Networks an older agent created keep Docker's `br-<id>` name.
@@ -49,9 +75,14 @@ func (m *manager) applyEgress(ctx context.Context, s *server, bridge string) err
 	if err == nil {
 		return nil
 	}
-	reason := fmt.Sprintf("Not started: this server may not reach private networks, and egress filtering doesn't work on this host (%v). Fix it (see the host page), or let an admin allow private network access for this server.", err)
+	reason := egressReason(err)
 	m.reportReason(s, reason)
 	return remoteError(protocol.ErrorCodeConflict, "%s", reason)
+}
+
+// egressReason is the state reason of a restricted server that doesn't run because of err.
+func egressReason(err error) string {
+	return fmt.Sprintf("Not started: this server may not reach private networks, and egress filtering doesn't work on this host (%v). Fix it (see the host page), or let an admin allow private network access for this server.", err)
 }
 
 // guardEgress checks a restricted server's rules before its game starts, when the container already exists (when
@@ -84,21 +115,33 @@ func (m *manager) reportReason(s *server, reason string) {
 	s.applyChange(protocol.StateChange{ServerID: s.id, State: status.State, Previous: status.State, At: time.Now().UTC(), ExitCode: status.ExitCode, Reason: &reason})
 }
 
-// syncEgress rebuilds the table from the restored servers whose networks exist. Servers without a network yet are
-// added when ensureContainer creates it.
-func (m *manager) syncEgress(ctx context.Context, restored []*server) {
+// syncEgress rebuilds the table from the restored servers whose networks exist (and the build network). Servers
+// without a network yet are added when ensureContainer creates it. It returns, per restricted server that must not
+// run now, why: every one when the table couldn't be applied, or one whose network couldn't be inspected.
+func (m *manager) syncEgress(ctx context.Context, restored []*server) map[string]string {
+	blocked := map[string]string{}
+	restrictedServers := make([]*server, 0, len(restored))
+	for _, s := range restored {
+		if !s.request().Spec.AllowPrivateNetwork {
+			restrictedServers = append(restrictedServers, s)
+		}
+	}
 	if m.opts.Egress == nil {
-		return
+		for _, s := range restrictedServers {
+			blocked[s.id] = egressReason(errors.New("egress filtering is not set up in this agent"))
+		}
+		return blocked
 	}
 	egress.RemoveLeftovers(ctx, m.opts.Docker)
 	restricted := map[string]string{}
-	for _, s := range restored {
-		if s.request().Spec.AllowPrivateNetwork {
-			continue
-		}
+	if network, ok, err := m.opts.Docker.NetworkInspect(ctx, BuildNetwork); err == nil && ok {
+		restricted[buildEgressKey] = network.Bridge
+	}
+	for _, s := range restrictedServers {
 		network, ok, err := m.opts.Docker.NetworkInspect(ctx, NetworkName(s.id))
 		if err != nil {
-			slog.Warn("could not inspect the server's network for egress filtering", "server", s.id, "error", err)
+			slog.Warn("could not inspect the server's network for egress filtering; the server stays down", "server", s.id, "error", err)
+			blocked[s.id] = egressReason(fmt.Errorf("its network could not be inspected: %w", err))
 			continue
 		}
 		if ok {
@@ -106,7 +149,38 @@ func (m *manager) syncEgress(ctx context.Context, restored []*server) {
 		}
 	}
 	if err := m.opts.Egress.Sync(ctx, restricted); err != nil {
-		slog.Warn("could not apply the egress table (nftables inet "+egress.TableName+"); servers that may not reach private networks won't start until it works", "error", err)
+		slog.Warn("could not apply the egress table (nftables inet "+m.opts.Egress.Table()+"); servers that may not reach private networks won't start until it works", "error", err)
+		for _, s := range restrictedServers {
+			blocked[s.id] = egressReason(err)
+		}
+	}
+	return blocked
+}
+
+// recheckEgress makes sure a restricted server whose container (re)started has its bridge filtered; when that fails
+// the container is held back (stopped) until it can be.
+func (m *manager) recheckEgress(s *server) {
+	if s.request().Spec.AllowPrivateNetwork {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), restoreTimeout)
+	defer cancel()
+	s.op.Lock()
+	defer s.op.Unlock()
+	if m.get(s.id) != s {
+		return
+	}
+	network, ok, err := m.opts.Docker.NetworkInspect(ctx, NetworkName(s.id))
+	if err == nil && !ok {
+		return // No network, no container on it.
+	}
+	if err == nil && m.opts.Egress != nil {
+		err = m.opts.Egress.Restrict(ctx, s.id, network.Bridge)
+	} else if err == nil {
+		err = errors.New("egress filtering is not set up in this agent")
+	}
+	if err != nil {
+		m.holdBack(ctx, s, egressReason(err))
 	}
 }
 

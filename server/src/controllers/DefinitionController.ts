@@ -1,11 +1,12 @@
 import { Hono } from "hono";
-import type { DefinitionDto } from "@shared/api/definitions.ts";
+import type { DefinitionDto, VariableOptionsResponse } from "@shared/api/definitions.ts";
+import { OptionsFetcher } from "../definitions/OptionsFetcher.ts";
 import { type AppEnv, paramInt } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { Definition, User } from "../models/index.ts";
 
 /**
- * `/api/definitions`: active definition versions for the create form. Signed in. `admin_only` variables are dropped
+ * `/api/definitions`: active definition versions of enabled sources for the create form. Signed in. `admin_only` variables are dropped
  * for non-admins (see `DefinitionDto`).
  */
 export namespace DefinitionController {
@@ -17,7 +18,7 @@ export namespace DefinitionController {
    * GET /api/definitions → DefinitionDto[] (active only, by name).
    */
   router.get("/", async (c) => {
-    const definitions = await Definition.findAll({ where: { active: true }, include: [{ association: "source" }], order: [["name", "ASC"]] });
+    const definitions = await Definition.findAll({ where: { active: true }, include: [{ association: "source", where: { enabled: true }, required: true }], order: [["name", "ASC"]] });
     const isAdmin = c.var.user.isAdmin();
     return c.json<DefinitionDto[]>(definitions.map((definition) => definition.toClientJSON(isAdmin)));
   });
@@ -34,11 +35,18 @@ export namespace DefinitionController {
 
   /**
    * GET /api/definitions/:id/options/:key → VariableOptionsResponse (M3). 404 unknown variable, 400 when it has no
-   * `options_from`; `admin_only` variables 404 for non-admins.
+   * `options_from`; `admin_only` variables 404 for non-admins. A failed fetch's cause is shown to admins only.
    */
   router.get("/:id/options/:key", async (c) => {
     const id = paramInt(c, "id");
-    throw HttpError.notImplemented("GET /api/definitions/:id/options/:key"); // TODO(builder): C — OptionsFetcher.getOptions
+    const definition = await Definition.findByPk(id);
+    if (!definition) throw HttpError.notFound("There is no game definition with that id.");
+    const decl = (definition.document.variables ?? []).find((variable) => variable.key === c.req.param("key"));
+    if (!decl || (decl.admin_only && !c.var.user.isAdmin())) throw HttpError.notFound("This game has no such variable.");
+    const result = await OptionsFetcher.getOptions(decl);
+    // The fetch error can name internal details (redirect targets, TLS and DNS errors): only admins see it.
+    if (result.error !== null && !c.var.user.isAdmin()) result.error = OptionsFetcher.GENERIC_ERROR;
+    return c.json<VariableOptionsResponse>(result);
   });
 }
 

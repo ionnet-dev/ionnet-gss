@@ -37,7 +37,7 @@ func New(cfg config.Config) (*Agent, error) {
 	}
 	outbox := panel.NewOutbox(panel.DefaultOutboxLimit, panel.DefaultOutboxBytes)
 	layout := paths.Layout{Root: cfg.DataRoot}
-	firewall := egress.New(egress.Options{Docker: dockerClient, Image: cfg.HelperImage, Dir: layout.NetfilterDir()})
+	firewall := egress.New(egress.Options{Docker: dockerClient, Image: cfg.HelperImage, Dir: layout.NetfilterDir(), Table: cfg.EgressTable})
 	return &Agent{
 		Config: cfg,
 		Docker: dockerClient,
@@ -57,6 +57,9 @@ func New(cfg config.Config) (*Agent, error) {
 func (a *Agent) Run(ctx context.Context) error {
 	go a.Outbox.Run(ctx)
 	defer a.Servers.Close()
+	if hostfacts.IsMemoryBacked(a.Config.DataRoot) {
+		slog.Warn("the data root is on tmpfs or ramfs: game files count against each server's memory limit, so large installs get OOM-killed; use a disk-backed folder", "dataRoot", a.Config.DataRoot)
+	}
 	if err := a.Servers.Restore(ctx); err != nil {
 		return fmt.Errorf("restore servers: %w", err)
 	}
@@ -162,6 +165,9 @@ func (a *Agent) handlers() panel.Handlers {
 			protocol.MsgServerBacklog: serve(operationTimeout, func(ctx context.Context, req protocol.BacklogRequest) (any, error) {
 				return a.Servers.Backlog(ctx, req.ServerID, req.Limit, req.BeforeSeq)
 			}),
+			protocol.MsgServerUpdate: serve(provisionTimeout, func(ctx context.Context, req protocol.ServerRef) (any, error) {
+				return a.Servers.Update(ctx, req.ServerID)
+			}),
 		},
 	}
 }
@@ -186,8 +192,8 @@ func serve[T any](timeout time.Duration, fn func(ctx context.Context, req T) (an
 	}
 }
 
-// panelSink forwards server reports through the outbox. While the panel is away state changes and player events
-// are kept, console lines are buffered (dropped first; a restarted agent's catch-up arrives this way), and stats are
+// panelSink forwards server reports through the outbox. While the panel is away state changes, service statuses
+// and player events are kept, console lines are buffered (dropped first; a restarted agent's catch-up arrives this way), and stats are
 // dropped (the next sample replaces them).
 type panelSink struct {
 	outbox *panel.Outbox
@@ -207,4 +213,8 @@ func (p panelSink) Stats(batch protocol.StatsBatch) {
 
 func (p panelSink) Player(event protocol.PlayerEvent) {
 	p.outbox.Emit(protocol.MsgServerPlayer, event, panel.DeliverKept)
+}
+
+func (p panelSink) Services(change protocol.ServicesChange) {
+	p.outbox.Emit(protocol.MsgServerServices, change, panel.DeliverAlways)
 }

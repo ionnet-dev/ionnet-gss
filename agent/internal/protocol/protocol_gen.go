@@ -88,6 +88,8 @@ type ErrorBody struct {
 	Code ErrorCode `json:"code"`
 	// Message readable sentence that tells the operator what to do.
 	Message string `json:"message"`
+	// Port set with port_in_use: the host port Docker could not bind.
+	Port *PortInUse `json:"port,omitempty"`
 }
 
 // ErrorCode is defined in protocol/schema/envelope.json.
@@ -103,7 +105,14 @@ const (
 	ErrorCodeUnsupported  ErrorCode = "unsupported"
 	ErrorCodeTimeout      ErrorCode = "timeout"
 	ErrorCodeInternal     ErrorCode = "internal"
+	ErrorCodePortInUse    ErrorCode = "port_in_use"
 )
+
+// PortInUse A host port something else already holds (M3: Docker's bind failed). The panel retries the allocation once without it.
+type PortInUse struct {
+	Proto PortProto `json:"proto"`
+	Port  int64     `json:"port"`
+}
 
 // Empty no payload.
 type Empty struct {
@@ -401,6 +410,8 @@ type HostFacts struct {
 	Docker *DockerFacts `json:"docker"`
 	// Egress egress filtering for game servers. null = not checked yet (the agent is still starting) or an agent older than this field; the panel stores a missing value as null.
 	Egress *EgressFacts `json:"egress"`
+	// BoundPorts host ports other software already holds, so the panel's allocator skips them (M3). null = not read (not Linux) or an agent older than this field; the panel stores a missing value as null.
+	BoundPorts *BoundPorts `json:"boundPorts"`
 }
 
 // OsFacts is defined in protocol/schema/host.json.
@@ -451,6 +462,12 @@ type EgressFacts struct {
 	Error *string `json:"error"`
 	// CheckedAt when the table was last applied or the last attempt failed.
 	CheckedAt time.Time `json:"checkedAt"`
+}
+
+// BoundPorts ports bound in the host's network namespace (/proc/net/{tcp,tcp6,udp,udp6}): listening TCP sockets and unconnected UDP sockets, sorted and unique, at most 4096 each. Ports Docker publishes for the agent's own servers are included (they are allocated anyway).
+type BoundPorts struct {
+	TCP []int64 `json:"tcp"`
+	UDP []int64 `json:"udp"`
 }
 
 // DockerFacts is defined in protocol/schema/host.json.

@@ -31,7 +31,19 @@ type server struct {
 	changed     chan struct{} // closed and replaced on every status or connection change
 	downNoticed bool          // the "container is gone" state change was sent for this outage
 	dialWarned  bool
-	dialErr     error // why the last connection attempt failed
+	// heldBack: the agent stopped (or didn't start) the container because its egress filtering couldn't be applied
+	// (hold.go); the watcher brings it back, with autostart, once it can be.
+	heldBack    bool
+	reviveAt    time.Time     // the watcher's next attempt to start a container that exited, at the earliest
+	reviveDelay time.Duration // backoff between those attempts; 0 after a successful attach
+	// Service volumes measured by a `du` container (disk.go), for an agent that can't read them itself.
+	svcSize       int64
+	svcMeasuredAt time.Time
+	svcMeasuring  bool
+	dialErr       error // why the last connection attempt failed
+	// svc is the last known state of the stack's services (services.go); never nil.
+	svc              []protocol.ServiceStatus
+	servicesStopping bool // a stopServicesLater goroutine is waiting
 
 	watching  bool
 	kick      chan struct{}
@@ -44,18 +56,21 @@ func newServer(m *manager, req protocol.ProvisionRequest) *server {
 		id:      req.Spec.ServerID,
 		m:       m,
 		req:     req,
-		status:  protocol.ServerStatus{ServerID: req.Spec.ServerID, State: protocol.ServerStateCreating, Since: time.Now().UTC(), SpecHash: req.SpecHash},
+		status:  protocol.ServerStatus{ServerID: req.Spec.ServerID, State: protocol.ServerStateCreating, Since: time.Now().UTC(), SpecHash: req.SpecHash, Services: []protocol.ServiceStatus{}},
+		svc:     []protocol.ServiceStatus{},
 		changed: make(chan struct{}),
 		kick:    make(chan struct{}, 1),
 		quit:    make(chan struct{}),
 	}
 }
 
-// Status is the server's last known status with the spec hash it runs.
+// Status is the server's last known status with the spec hash it runs and its services.
 func (s *server) Status() protocol.ServerStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.status
+	status := s.status
+	status.Services = s.servicesSnapshotLocked()
+	return status
 }
 
 func (s *server) request() protocol.ProvisionRequest {
@@ -94,9 +109,10 @@ func (s *server) stopTimeout() time.Duration {
 	return defaultStopTimeout
 }
 
-// statusFrom converts gss-init's status to the panel's.
+// statusFrom converts gss-init's status to the panel's. Services is empty: answers go through withServices.
 func statusFrom(serverID, specHash string, st protocol.InitStatus) protocol.ServerStatus {
 	return protocol.ServerStatus{
+		Services:        []protocol.ServiceStatus{},
 		ServerID:        serverID,
 		State:           st.State,
 		Since:           st.Since,
@@ -139,10 +155,14 @@ func (s *server) applyChange(change protocol.StateChange) {
 	case protocol.ServerStateCrashed, protocol.ServerStateInstallFailed:
 		s.wantRunning = false
 	}
+	stopServices := change.State == protocol.ServerStateStopped && !s.wantRunning
 	s.notifyLocked()
 	s.mu.Unlock()
 	s.m.markDirty()
 	s.m.opts.Sink.State(change)
+	if stopServices {
+		s.m.stopServicesLater(s)
+	}
 }
 
 // connected returns the open supervisor client, or nil.
@@ -294,6 +314,11 @@ func (s *server) dialFailed(err error, failures int) {
 	if inspectErr != nil {
 		return
 	}
+	if exists && !info.Running {
+		// gss-init exited (a crash, an OOM kill, `docker kill`, a Docker restart): game containers have no restart
+		// policy, so the agent starts it again, egress first.
+		s.m.reviveLater(s)
+	}
 	s.mu.Lock()
 	if exists && info.Running {
 		warn := !s.dialWarned && failures >= downAfter*4
@@ -345,7 +370,13 @@ func (s *server) attach(client supervisor.Client) error {
 	if info.StartedAt != s.initStarted || st.LastSeq < s.lastSeq {
 		afterSeq = 0 // A new gss-init process: its seq started again.
 	}
+	restarted := s.initStarted != "" && info.StartedAt != s.initStarted
 	s.mu.Unlock()
+	if restarted {
+		// Started by something other than the agent (an operator's `docker start`), or the agent started it and
+		// applied the rules already: either way the bridge must be filtered while gss-init runs.
+		go s.m.recheckEgress(s)
+	}
 
 	lastSeq, caughtUp, err := s.catchUp(ctx, client, afterSeq)
 	if err != nil {
@@ -361,6 +392,7 @@ func (s *server) attach(client supervisor.Client) error {
 	s.client = client
 	s.downNoticed = false
 	s.dialWarned = false
+	s.reviveDelay = 0
 	if st.State == protocol.ServerStateRunning {
 		s.wantRunning = true
 	}

@@ -86,8 +86,10 @@ type Supervisor struct {
 	shutdown   bool
 }
 
-// installRun is the install in progress.
+// installRun is the install (or update) in progress.
 type installRun struct {
+	update   bool                   // an `update` request: only the steamcmd steps and the update hook
+	steps    []protocol.InstallStep // what this run executes
 	cancel   context.CancelFunc
 	done     chan struct{}
 	byStop   bool // cancelled by a stop request (not by shutdown)
@@ -137,8 +139,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	}
 	defer data.Close()
 	s.data = data
-	s.reaper = newReaper()
-	go s.reaper.run()
+	s.reaper = processReaper()
 	s.hub = newHub(s.logf)
 	s.console = newConsole(s.Options.Backlog, s.onConsoleLine)
 	s.launcher = &ptyLauncher{reaper: s.reaper, dataPath: s.Options.DataPath, uid: s.Options.GameUID}
@@ -201,7 +202,7 @@ func (s *Supervisor) decideLocked() {
 	switch {
 	case m == nil:
 		s.sysf("Not installed yet; installing.")
-		s.beginInstallLocked()
+		s.beginInstallLocked(false)
 	case m.Result == installOK:
 		s.installed = true
 		s.setStateLocked(protocol.ServerStateStopped, nil, nil)
@@ -210,7 +211,7 @@ func (s *Supervisor) decideLocked() {
 		s.setStateLocked(protocol.ServerStateInstallFailed, ptr(m.Reason), nil)
 	case m.InstalledAt == nil: // the first install was interrupted (container stopped): try again
 		s.sysf("The first install was interrupted; installing again.")
-		s.beginInstallLocked()
+		s.beginInstallLocked(false)
 	default:
 		s.installed = true
 		s.setStateLocked(protocol.ServerStateInstallFailed, ptr("The last install was interrupted; run install again."), nil)
@@ -336,6 +337,8 @@ func (s *Supervisor) dispatch(req protocol.Envelope) (any, *opError) {
 		return s.requestInstall()
 	case protocol.InitMsgStart:
 		return s.requestStart()
+	case protocol.InitMsgUpdate:
+		return s.requestUpdate()
 	case protocol.InitMsgStop:
 		var body protocol.InitStopRequest
 		if len(req.Data) > 0 {
@@ -390,7 +393,37 @@ func (s *Supervisor) requestInstall() (any, *opError) {
 		return nil, conflict("The post-stop hook is still running; try again in a moment.")
 	}
 	s.cancelRestartLocked()
-	s.beginInstallLocked()
+	s.beginInstallLocked(false)
+	return s.statusLocked(), nil
+}
+
+// requestUpdate runs the steamcmd steps and the update hook, like an install, while the server is stopped, or after
+// a failed install or update when the game was installed before (so a failed update can be retried).
+func (s *Supervisor) requestUpdate() (any, *opError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if opErr := s.refuseLocked(); opErr != nil {
+		return nil, opErr
+	}
+	switch {
+	case s.state == protocol.ServerStateInstalling && s.install != nil && s.install.update:
+		return s.statusLocked(), nil // already updating
+	case s.state == protocol.ServerStateInstalling:
+		return nil, conflict("The server is installing; update it once the install finished.")
+	case s.state == protocol.ServerStateInstallFailed && !s.installed:
+		return nil, conflict("The game was never installed (%s); run install again instead of update.", deref(s.reason))
+	case s.state != protocol.ServerStateStopped && s.state != protocol.ServerStateCrashed && s.state != protocol.ServerStateInstallFailed:
+		return nil, conflict("The server is %s; stop it before updating.", s.state)
+	case s.run != nil:
+		return nil, conflict("The post-stop hook is still running; try again in a moment.")
+	case !s.installed:
+		return nil, conflict("The server is not installed yet; run install first.")
+	}
+	if len(updateSteps(s.spec)) == 0 {
+		return nil, &opError{code: protocol.ErrorCodeBadRequest, message: "This game has nothing to update: its definition has no steamcmd install steps and no update hook."}
+	}
+	s.cancelRestartLocked()
+	s.beginInstallLocked(true)
 	return s.statusLocked(), nil
 }
 
@@ -492,21 +525,40 @@ func (s *Supervisor) requestReload() *opError {
 
 //#region Install
 
-func (s *Supervisor) beginInstallLocked() {
+// updateSteps is what `update` runs: the steamcmd install steps in their order, then the update hook.
+func updateSteps(spec *compiledSpec) []protocol.InstallStep {
+	var list []protocol.InstallStep
+	for _, step := range spec.Install {
+		if step.Steamcmd != nil {
+			list = append(list, step)
+		}
+	}
+	if spec.Hooks.Update != "" {
+		list = append(list, protocol.InstallStep{Hook: spec.Hooks.Update})
+	}
+	return list
+}
+
+// beginInstallLocked starts the install, or with update only the update steps. Both share the state machine:
+// `installing` with progress per step, then `stopped`, or `install_failed` with the reason.
+func (s *Supervisor) beginInstallLocked(update bool) {
 	spec := s.spec
 	timeout := time.Duration(protocol.InitInstallTimeoutSec) * time.Second
 	if spec.InstallTimeoutSec > 0 {
 		timeout = time.Duration(spec.InstallTimeoutSec) * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	ir := &installRun{cancel: cancel, done: make(chan struct{}), timeout: timeout}
+	ir := &installRun{update: update, steps: spec.Install, cancel: cancel, done: make(chan struct{}), timeout: timeout}
+	if update {
+		ir.steps = updateSteps(spec)
+	}
 	if s.marker != nil {
 		ir.previous = s.marker.InstalledAt
 	}
 	s.install = ir
 	s.progress = nil
-	if total := len(spec.Install); total > 0 {
-		s.progress = &protocol.InstallProgress{Step: 1, Total: int64(total), Name: stepName(spec.Install[0])}
+	if total := len(ir.steps); total > 0 {
+		s.progress = &protocol.InstallProgress{Step: 1, Total: int64(total), Name: stepName(ir.steps[0])}
 	}
 	s.setStateLocked(protocol.ServerStateInstalling, nil, nil)
 	go s.runInstall(ctx, ir, spec)
@@ -522,15 +574,20 @@ func stepName(step protocol.InstallStep) string {
 func (s *Supervisor) runInstall(ctx context.Context, ir *installRun, spec *compiledSpec) {
 	defer close(ir.done)
 	defer ir.cancel()
-	total := len(spec.Install)
+	total := len(ir.steps)
+	label := ir.label()
 	if err := writeMarker(s.data, installMarker{ServerID: spec.ServerID, Result: installRunning, InstalledAt: ir.previous}); err != nil {
 		s.finishInstall(ir, spec, fmt.Sprintf("Could not write the install marker in the data folder: %v", err))
 		return
 	}
-	s.sysf("Installing: %d step(s).", total)
+	if ir.update {
+		s.sysf("Updating: %d step(s).", total)
+	} else {
+		s.sysf("Installing: %d step(s).", total)
+	}
 	output := newLineWriter(func(text string) { s.console.Append(protocol.ConsoleStreamOutput, text) })
 	env := s.stepsEnv(spec, output)
-	for i, step := range spec.Install {
+	for i, step := range ir.steps {
 		exec, err := steps.Validate(step)
 		name := "unknown"
 		if exec != nil {
@@ -548,17 +605,25 @@ func (s *Supervisor) runInstall(ctx context.Context, ir *installRun, spec *compi
 		}
 		output.Flush()
 		if err != nil {
-			reason := fmt.Sprintf("Install step %d (%s) failed: %v", i+1, name, err)
+			reason := fmt.Sprintf("%s step %d (%s) failed: %v", label, i+1, name, err)
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				reason = fmt.Sprintf("Install step %d (%s) was cancelled: the install took longer than %s. Raise `install_timeout` in the definition if it needs longer.", i+1, name, ir.timeout)
+				reason = fmt.Sprintf("%s step %d (%s) was cancelled: the %s took longer than %s. Raise `install_timeout` in the definition if it needs longer.", label, i+1, name, strings.ToLower(label), ir.timeout)
 			} else if ctx.Err() != nil {
-				reason = "Install was cancelled."
+				reason = label + " was cancelled."
 			}
 			s.finishInstall(ir, spec, reason)
 			return
 		}
 	}
 	s.finishInstall(ir, spec, "")
+}
+
+// label names the run in console lines and reasons.
+func (ir *installRun) label() string {
+	if ir.update {
+		return "Update"
+	}
+	return "Install"
 }
 
 // finishInstall records the result; reason "" = success.
@@ -585,7 +650,7 @@ func (s *Supervisor) finishInstall(ir *installRun, spec *compiledSpec, reason st
 		return
 	}
 	s.installed = true
-	s.sysf("Install finished.")
+	s.sysf("%s finished.", ir.label())
 	s.setStateLocked(protocol.ServerStateStopped, nil, nil)
 }
 

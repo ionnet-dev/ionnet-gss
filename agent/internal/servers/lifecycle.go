@@ -15,8 +15,12 @@ import (
 
 // up makes sure the container runs (recreating it from the manifest if it vanished) and returns a connection to
 // its gss-init.
+// The egress rules are checked either way, so nothing reaches gss-init on an unfiltered bridge.
 func (m *manager) up(ctx context.Context, s *server) (supervisor.Client, error) {
 	if client := s.connected(); client != nil {
+		if err := m.guardEgress(ctx, s); err != nil {
+			return nil, err
+		}
 		return client, nil
 	}
 	if err := m.ensureContainer(ctx, s, false); err != nil {
@@ -56,16 +60,28 @@ func (m *manager) Start(ctx context.Context, serverID string) (protocol.ServerSt
 func (m *manager) start(ctx context.Context, s *server) (protocol.ServerStatus, error) {
 	req := s.request()
 	if limit := req.Spec.Limits.DiskMB; limit > 0 {
-		if used := dirSize(m.opts.Layout.ServerData(s.id)); used > limit<<20 {
+		if used := m.usedBytes(s, true); used > limit<<20 {
 			return protocol.ServerStatus{}, remoteError(protocol.ErrorCodeConflict, "Server %s uses %d MB of its %d MB disk limit. Delete files or raise the limit before starting it.", s.id, used>>20, limit)
 		}
-	}
-	if err := m.guardEgress(ctx, s); err != nil {
-		return protocol.ServerStatus{}, err
 	}
 	client, err := m.up(ctx, s)
 	if err != nil {
 		return protocol.ServerStatus{}, err
+	}
+	if s.hasServices() {
+		// Bring the stack up only for a game that can start now.
+		statusCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+		st, err := client.Status(statusCtx)
+		cancel()
+		if err != nil {
+			return protocol.ServerStatus{}, err
+		}
+		if st.State == protocol.ServerStateInstalling || st.State == protocol.ServerStateStopping {
+			return protocol.ServerStatus{}, remoteError(protocol.ErrorCodeConflict, "Server %s is %s; wait for it to finish.", s.id, st.State)
+		}
+		if err := m.startServices(ctx, s); err != nil {
+			return protocol.ServerStatus{}, err
+		}
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
@@ -75,7 +91,7 @@ func (m *manager) start(ctx context.Context, s *server) (protocol.ServerStatus, 
 	}
 	s.setWantRunning(true)
 	m.saveStateLogged()
-	return statusFrom(s.id, req.SpecHash, st), nil
+	return s.withServices(statusFrom(s.id, req.SpecHash, st)), nil
 }
 
 func (m *manager) Stop(ctx context.Context, serverID string, kill bool) (protocol.ServerStatus, error) {
@@ -87,6 +103,8 @@ func (m *manager) Stop(ctx context.Context, serverID string, kill bool) (protoco
 	defer s.op.Unlock()
 	s.setWantRunning(false)
 	m.saveStateLogged()
+	// The stack follows once the game is down (also when it already is).
+	defer m.stopServicesLater(s)
 	client, err := m.reachable(ctx, s)
 	if isRemoteCode(err, protocol.ErrorCodeConflict) {
 		return s.Status(), nil // The container is down, so the game is not running either.
@@ -100,7 +118,40 @@ func (m *manager) Stop(ctx context.Context, serverID string, kill bool) (protoco
 	if err != nil {
 		return protocol.ServerStatus{}, err
 	}
-	return statusFrom(s.id, s.request().SpecHash, st), nil
+	return s.withServices(statusFrom(s.id, s.request().SpecHash, st)), nil
+}
+
+// updater is the supervisor request behind server.update (supervisor.json `update`, M3).
+type updater interface {
+	Update(ctx context.Context) (protocol.InitStatus, error)
+}
+
+func (m *manager) Update(ctx context.Context, serverID string) (protocol.ServerStatus, error) {
+	s, err := m.lookup(serverID)
+	if err != nil {
+		return protocol.ServerStatus{}, err
+	}
+	s.op.Lock()
+	defer s.op.Unlock()
+	if state := s.Status().State; isActive(state) {
+		return protocol.ServerStatus{}, remoteError(protocol.ErrorCodeConflict, "Server %s is %s. Stop it before updating the game.", serverID, state)
+	}
+	client, err := m.up(ctx, s)
+	if err != nil {
+		return protocol.ServerStatus{}, err
+	}
+	update, ok := client.(updater)
+	if !ok {
+		return protocol.ServerStatus{}, remoteError(protocol.ErrorCodeUnsupported, "This gss-agent can't ask gss-init for a game update yet.")
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	st, err := update.Update(reqCtx)
+	if err != nil {
+		return protocol.ServerStatus{}, err
+	}
+	slog.Info("updating the game", "server", serverID, "state", st.State)
+	return s.withServices(statusFrom(s.id, s.request().SpecHash, st)), nil
 }
 
 func (m *manager) Restart(ctx context.Context, serverID string) (protocol.ServerStatus, error) {
@@ -173,6 +224,10 @@ func (m *manager) Delete(ctx context.Context, serverID string, keepData bool) er
 	if err := m.opts.Docker.ContainerRemove(ctx, name); err != nil {
 		return err
 	}
+	// Services after the game (it may still write to them while it stops), before the network they are on.
+	if err := m.removeServices(ctx, serverID, keepData); err != nil {
+		return err
+	}
 	if err := m.opts.Docker.NetworkRemove(ctx, NetworkName(serverID)); err != nil {
 		return err
 	}
@@ -200,6 +255,7 @@ func (m *manager) Delete(ctx context.Context, serverID string, keepData bool) er
 		}
 	}
 	slog.Info("deleted server", "server", serverID, "keepData", keepData)
+	m.pruneImagesLater()
 	return nil
 }
 
@@ -242,9 +298,9 @@ func (m *manager) Backlog(ctx context.Context, serverID string, limit, beforeSeq
 // no network) running the server's own image, for a non-root agent that can't remove files owned by root or
 // GAME_UID.
 func (m *manager) cleanupWithContainer(ctx context.Context, serverID, image string, keepData bool) error {
-	targets := []string{"/target/spec", "/target/run", "/target/services", "/target/server.json"}
+	targets := []string{"/target/spec", "/target/run", "/target/server.json"}
 	if !keepData {
-		targets = append(targets, "/target/data", "/target/backups")
+		targets = append(targets, "/target/data", "/target/backups", "/target/services")
 	}
 	name := "gss-cleanup-" + serverID
 	if err := m.opts.Docker.ContainerRemove(ctx, name); err != nil {

@@ -8,10 +8,15 @@ import {
   type NonAttribute,
   type Sequelize,
 } from "sequelize";
-import type { DefinitionDto } from "@shared/api/definitions.ts";
+import type { DefinitionDto, DefinitionServiceDto } from "@shared/api/definitions.ts";
 import type { GameDefinition } from "@shared/protocol/protocol.gen.ts";
 import { ID, intFk, jsonColumn } from "./columns.ts";
 import type { Source } from "./Source.ts";
+
+/**
+ * Memory a service gets when game.yml sets none (the same default `DefinitionEngine` fills into the spec).
+ */
+const DEFAULT_SERVICE_MEMORY_MB = 512;
 
 /**
  * One valid version of a game definition: a (source, game id, commit) triple. Servers pin the row they were created
@@ -71,6 +76,11 @@ export class Definition extends Model<InferAttributes<Definition>, InferCreation
       sourceKind: this.source?.kind ?? "local",
       commit: this.commit,
       isStack: Object.keys(this.document.services ?? {}).length > 0,
+      services: Object.entries(this.document.services ?? {}).map(([name, service]): DefinitionServiceDto => ({
+        name,
+        image: service.image,
+        memoryMb: service.limits?.memoryMb ?? DEFAULT_SERVICE_MEMORY_MB,
+      })),
       variables,
       ports: this.document.ports ?? [],
       syncedAt: this.updatedAt.toISOString(),

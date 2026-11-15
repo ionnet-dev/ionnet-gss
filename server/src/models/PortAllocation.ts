@@ -50,9 +50,11 @@ export class PortAllocation extends Model<InferAttributes<PortAllocation>, Infer
 
   /**
    * Allocate every published port of a definition for a new server: the declared `default` when free and in the
-   * pool, else the lowest free port in the pool. Internal ports are skipped. The host row is locked for the
-   * transaction, so two creates on one host take turns (and the unique index backs that up).
+   * pool, else the lowest free port in the pool. Internal ports are skipped. A port is free when no allocation holds
+   * it and the host's last facts don't report it bound by other software (`facts.boundPorts`). The host row is locked
+   * for the transaction, so two creates on one host take turns (and the unique index backs that up).
    * @param pinned PORTS_OVERRIDE: port name → number, taken as is (any number 1-65535) when free on the host.
+   * @param exclude `proto/port` keys to skip as well, e.g. `udp/27015` after the agent answered `port_in_use`.
    * @throws HttpError 409 naming the pool when it is exhausted or a pinned port is taken; 400 for a bad pinned port.
    */
   public static async allocate(
@@ -61,6 +63,7 @@ export class PortAllocation extends Model<InferAttributes<PortAllocation>, Infer
     ports: PortDecl[],
     transaction: Transaction,
     pinned?: Record<string, number>,
+    exclude?: Iterable<string>,
   ): Promise<PortAllocation[]> {
     const published = ports.filter((port) => !port.internal);
     for (const name of Object.keys(pinned ?? {})) {
@@ -70,10 +73,12 @@ export class PortAllocation extends Model<InferAttributes<PortAllocation>, Infer
     }
     if (published.length === 0) return [];
 
-    await Host.findByPk(host.id, { transaction, lock: transaction.LOCK.UPDATE });
+    const locked = await Host.findByPk(host.id, { transaction, lock: transaction.LOCK.UPDATE });
     const ranges = parsePortPool(host.portPool);
     const taken = await PortAllocation.findAll({ where: { hostId: host.id }, attributes: ["proto", "port"], transaction });
     const used = new Set(taken.map((row) => `${row.proto}/${row.port}`));
+    // Ports other software on the host holds (as of the last heartbeat) and ports the caller found taken.
+    const bound = new Set([...PortAllocation.boundOn(locked ?? host), ...(exclude ?? [])]);
 
     const created: PortAllocation[] = [];
     for (const decl of published) {
@@ -83,15 +88,16 @@ export class PortAllocation extends Model<InferAttributes<PortAllocation>, Infer
       if (wanted !== undefined) {
         if (!Number.isInteger(wanted) || wanted < 1 || wanted > 65535) throw HttpError.badRequest(`The port for "${decl.name}" must be a number from 1 to 65535.`);
         if (used.has(key(wanted))) throw HttpError.conflict(`${decl.proto.toUpperCase()} port ${wanted} is already in use on ${host.name}.`);
+        if (bound.has(key(wanted))) throw HttpError.conflict(`${decl.proto.toUpperCase()} port ${wanted} is already bound by other software on ${host.name}.`);
         port = wanted;
       }
-      else if (decl.default !== undefined && isInPool(ranges, decl.default) && !used.has(key(decl.default))) {
+      else if (decl.default !== undefined && isInPool(ranges, decl.default) && !used.has(key(decl.default)) && !bound.has(key(decl.default))) {
         port = decl.default;
       }
       else {
         search: for (const range of ranges) {
           for (let candidate = range.start; candidate <= range.end; candidate++) {
-            if (!used.has(key(candidate))) {
+            if (!used.has(key(candidate)) && !bound.has(key(candidate))) {
               port = candidate;
               break search;
             }
@@ -112,6 +118,15 @@ export class PortAllocation extends Model<InferAttributes<PortAllocation>, Infer
       }, { transaction }));
     }
     return created;
+  }
+
+  /**
+   * `proto/port` keys the host's last facts report as bound (none from an agent that doesn't send `boundPorts`).
+   */
+  public static boundOn(host: Host): Set<string> {
+    const ports = host.facts?.boundPorts ?? null;
+    if (!ports) return new Set();
+    return new Set([...ports.tcp.map((port) => `tcp/${port}`), ...ports.udp.map((port) => `udp/${port}`)]);
   }
 }
 

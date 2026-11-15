@@ -17,6 +17,11 @@ export interface RawDefinitionFolder {
 export interface LoadResult {
   commit: string; // git commit, or "local" for folder sources.
   folders: RawDefinitionFolder[];
+  /**
+   * gameId → problem with a folder the loader could read but not accept (too many files, too deep). Stored as that
+   * game's validation error, like a failed `game.yml`.
+   */
+  errors?: Record<string, string>;
 }
 
 export interface DefinitionLoader {
