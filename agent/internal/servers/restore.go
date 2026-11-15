@@ -92,9 +92,10 @@ const restoreWait = 20 * time.Second
 // restoreTimeout bounds bringing one container back, an image pull included.
 const restoreTimeout = time.Duration(protocol.ProvisionTimeoutSec) * time.Second
 
-// Restore loads every server folder with a manifest, makes sure its container runs, reattaches to gss-init (which
-// catches the console up from lastSeq) and starts autostart servers whose game was meant to be running. Containers
-// labelled for servers this agent has no folder for are reported and left alone.
+// Restore loads every server folder with a manifest, rebuilds the egress table from them (before any container is
+// started), makes sure each container runs, reattaches to gss-init (which catches the console up from lastSeq) and
+// starts autostart servers whose game was meant to be running. Containers labelled for servers this agent has no
+// folder for are reported and left alone (and stay out of the egress table).
 func (m *manager) Restore(ctx context.Context) error {
 	layout := m.opts.Layout
 	if err := os.MkdirAll(layout.ServersDir(), 0o755); err != nil {
@@ -146,17 +147,31 @@ func (m *manager) Restore(ctx context.Context) error {
 		}
 	}
 
+	egressReady := make(chan struct{})
+	go func() {
+		defer close(egressReady)
+		syncCtx, cancel := context.WithTimeout(ctx, restoreTimeout)
+		defer cancel()
+		m.syncEgress(syncCtx, restored)
+	}()
+
 	var wg sync.WaitGroup
 	for _, s := range restored {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			select {
+			case <-egressReady:
+			case <-ctx.Done():
+				return
+			}
 			m.restoreOne(ctx, s)
 		}()
 	}
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
+		<-egressReady // So hello carries the egress facts, also on a host without servers.
 		close(done)
 	}()
 	select {

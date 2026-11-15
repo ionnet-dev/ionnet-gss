@@ -10,6 +10,7 @@ import (
 
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/config"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/docker"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/egress"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/hostfacts"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/panel"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/paths"
@@ -35,14 +36,17 @@ func New(cfg config.Config) (*Agent, error) {
 		return nil, err
 	}
 	outbox := panel.NewOutbox(panel.DefaultOutboxLimit, panel.DefaultOutboxBytes)
+	layout := paths.Layout{Root: cfg.DataRoot}
+	firewall := egress.New(egress.Options{Docker: dockerClient, Image: cfg.HelperImage, Dir: layout.NetfilterDir()})
 	return &Agent{
 		Config: cfg,
 		Docker: dockerClient,
-		Facts:  hostfacts.New(cfg.DataRoot, dockerClient),
+		Facts:  hostfacts.New(cfg.DataRoot, dockerClient, firewall.Facts),
 		Servers: servers.New(servers.Options{
-			Layout: paths.Layout{Root: cfg.DataRoot},
+			Layout: layout,
 			Docker: dockerClient,
 			Sink:   panelSink{outbox: outbox},
+			Egress: firewall,
 		}),
 		Outbox: outbox,
 	}, nil

@@ -30,8 +30,11 @@ type Client interface {
 	ImagePull(ctx context.Context, ref string, progress io.Writer) error
 	// ImageBuild builds tag from a Dockerfile given as text (derived images for `packages:`).
 	ImageBuild(ctx context.Context, tag, dockerfile string, progress io.Writer) error
-	// NetworkEnsure creates the per-server bridge network if missing and returns its id.
-	NetworkEnsure(ctx context.Context, name string, labels map[string]string) (string, error)
+	// NetworkEnsure creates the per-server bridge network if missing (with labels and driver options, e.g.
+	// BridgeNameOption) and returns it. An existing network is returned as it is.
+	NetworkEnsure(ctx context.Context, name string, labels, options map[string]string) (NetworkInfo, error)
+	// NetworkInspect returns a network, or ok=false when it does not exist.
+	NetworkInspect(ctx context.Context, name string) (info NetworkInfo, ok bool, err error)
 	// NetworkRemove removes a network; a missing one is not an error.
 	NetworkRemove(ctx context.Context, name string) error
 	// ContainerCreate creates (not starts) a container and returns its id.
@@ -44,6 +47,9 @@ type Client interface {
 	ContainerRemove(ctx context.Context, name string) error
 	// ContainerWait blocks until the container exits and returns its exit code.
 	ContainerWait(ctx context.Context, name string) (int, error)
+	// ContainerLogs returns the last tail lines of a container's stdout and stderr (non-TTY containers), at most
+	// maxBytes of it.
+	ContainerLogs(ctx context.Context, name string, tail, maxBytes int) (string, error)
 	// ContainerInspect returns the container's state, or ok=false when it does not exist.
 	ContainerInspect(ctx context.Context, name string) (info ContainerInfo, ok bool, err error)
 	// ContainerList lists containers (running or not) with the given label (e.g. "ionnet-gss.server").
@@ -68,7 +74,7 @@ type ContainerSpec struct {
 	Cmd        []string // Empty = the image's default (gss-init for game containers).
 	Env        map[string]string
 	Labels     map[string]string
-	// Network is the network to join ("none" for no networking).
+	// Network is the network to join ("none" for no networking, "host" for the host's network namespace).
 	Network string
 	// Aliases are the container's names on Network (a stack service's key, e.g. "db").
 	Aliases []string

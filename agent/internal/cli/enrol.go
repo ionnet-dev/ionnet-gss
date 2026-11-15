@@ -71,7 +71,7 @@ func Enrol(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	facts, err := hostfacts.New(defaults.DataRoot, dockerClient).Collect(ctx)
+	facts, err := hostfacts.New(defaults.DataRoot, dockerClient, nil).Collect(ctx)
 	if err != nil {
 		return fmt.Errorf("collect host facts: %w", err)
 	}

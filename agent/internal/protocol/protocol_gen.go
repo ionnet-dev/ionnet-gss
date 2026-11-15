@@ -355,6 +355,8 @@ type HostFacts struct {
 	Disk      DiskFacts   `json:"disk"`
 	// Docker null = Docker is not reachable on this host.
 	Docker *DockerFacts `json:"docker"`
+	// Egress egress filtering for game servers. null = not checked yet (the agent is still starting) or an agent older than this field; the panel stores a missing value as null.
+	Egress *EgressFacts `json:"egress"`
 }
 
 // OsFacts is defined in protocol/schema/host.json.
@@ -393,6 +395,18 @@ type DiskFacts struct {
 	TotalBytes int64  `json:"totalBytes"`
 	// FreeBytes bytes available to unprivileged users.
 	FreeBytes int64 `json:"freeBytes"`
+}
+
+// EgressFacts whether the agent's nftables table (inet ionnet_gss) is in place. Servers without allowPrivateNetwork start only while it is.
+type EgressFacts struct {
+	// Filtering the last apply of the table succeeded.
+	Filtering bool `json:"filtering"`
+	// Restricted server bridges currently filtered.
+	Restricted int64 `json:"restricted"`
+	// Error why the last apply failed (e.g. the helper image is missing or nft refused the ruleset); null while filtering works.
+	Error *string `json:"error"`
+	// CheckedAt when the table was last applied or the last attempt failed.
+	CheckedAt time.Time `json:"checkedAt"`
 }
 
 // DockerFacts is defined in protocol/schema/host.json.
@@ -499,6 +513,8 @@ type ServerSpec struct {
 	Limits     Limits        `json:"limits"`
 	// Autostart start again after a host reboot if it was running.
 	Autostart bool `json:"autostart"`
+	// AllowPrivateNetwork let the server's containers open connections to private, link-local and host addresses. false (the default, and what an agent assumes when it is absent): the agent filters the server's bridge in its nftables table and refuses to start the server when it can't.
+	AllowPrivateNetwork bool `json:"allowPrivateNetwork"`
 	// Files every definition file the spec references (hooks; templates are already rendered into ConfigMapping.content). The agent writes them below the server's spec folder (INIT_FILES_DIR in the container), hooks mode 0755, replacing the folder on every provision.
 	Files    []SpecFile             `json:"files"`
 	Services map[string]ServiceSpec `json:"services"`

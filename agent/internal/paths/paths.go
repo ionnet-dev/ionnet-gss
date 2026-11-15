@@ -12,6 +12,9 @@ const (
 	DefaultDataRoot = "/var/lib/ionnet-gss"
 	// DefaultDockerHost is the Docker Engine API endpoint unless the config sets another.
 	DefaultDockerHost = "unix:///var/run/docker.sock"
+	// DefaultHelperImage runs the agent's short-lived helper containers (nft for egress filtering) unless the
+	// config sets another. It must contain `nft`.
+	DefaultHelperImage = "ghcr.io/ionnet-dev/ionnet-gss-base:latest"
 )
 
 // Layout resolves paths below one data root.
@@ -74,3 +77,6 @@ func (l Layout) ServerBackups(serverID string) string {
 
 // SteamcmdCache is the per-host steamcmd install shared by every steamcmd game (M3).
 func (l Layout) SteamcmdCache() string { return filepath.Join(l.Root, "cache", "steamcmd") }
+
+// NetfilterDir holds the last nftables script the agent applied (bind-mounted read-only into the nft helper).
+func (l Layout) NetfilterDir() string { return filepath.Join(l.Root, "netfilter") }

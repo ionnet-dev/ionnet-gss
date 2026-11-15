@@ -1,4 +1,4 @@
-import type { CpuFacts, DiskFacts, DockerFacts, HostFacts, MemoryFacts, OsFacts } from "@shared/protocol/protocol.gen.ts";
+import type { CpuFacts, DiskFacts, DockerFacts, EgressFacts, HostFacts, MemoryFacts, OsFacts } from "@shared/protocol/protocol.gen.ts";
 import { AgentRequestError } from "../AgentConnection.ts";
 
 /**
@@ -13,6 +13,11 @@ const MAX_FACT_STRING = 255;
  * Longest disk path accepted.
  */
 const MAX_FACT_PATH = 1024;
+
+/**
+ * Most characters of `facts.egress.error` that are stored (nft's output can be long; the agent caps it at 2 KiB).
+ */
+const MAX_EGRESS_ERROR = 4096;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -73,6 +78,22 @@ export function requireFacts(value: unknown): HostFacts {
     docker = { version: factString(raw.version, "docker.version"), apiVersion: factString(raw.apiVersion, "docker.apiVersion") };
   }
 
+  // Agents older than egress filtering send no `egress`: stored as null (unknown).
+  let egress: EgressFacts | null = null;
+  if (facts.egress !== undefined && facts.egress !== null) {
+    const raw = factObject(facts.egress, "egress");
+    if (typeof raw.filtering !== "boolean") throw new AgentRequestError("bad_request", "facts.egress.filtering must be true or false.");
+    if (raw.error !== null && typeof raw.error !== "string") throw new AgentRequestError("bad_request", "facts.egress.error must be a string or null.");
+    const checkedAt = factString(raw.checkedAt, "egress.checkedAt");
+    if (Number.isNaN(Date.parse(checkedAt))) throw new AgentRequestError("bad_request", "facts.egress.checkedAt must be a date.");
+    egress = {
+      filtering: raw.filtering,
+      restricted: factInt(raw.restricted, "egress.restricted"),
+      error: raw.error === null ? null : (raw.error as string).slice(0, MAX_EGRESS_ERROR),
+      checkedAt,
+    };
+  }
+
   const osFacts: OsFacts = {
     name: factString(os.name, "os.name"),
     id: factString(os.id, "os.id"),
@@ -106,5 +127,6 @@ export function requireFacts(value: unknown): HostFacts {
     memory: memoryFacts,
     disk: diskFacts,
     docker,
+    egress,
   };
 }

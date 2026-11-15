@@ -132,8 +132,8 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
   }
 
   /**
-   * The facts that only change on an upgrade or hardware change (hostname, versions, OS, CPU, totals), as a string to
-   * compare. Load, available memory, free disk and uptime are left out.
+   * The facts that only change on an upgrade or hardware change (hostname, versions, OS, CPU, totals) or when egress
+   * filtering starts or stops working, as a string to compare. Load, available memory, free disk and uptime are left out.
    */
   public static materialFacts(facts: HostFacts): string {
     return JSON.stringify([
@@ -146,6 +146,8 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
       facts.disk.path,
       facts.disk.totalBytes,
       facts.docker,
+      facts.egress?.filtering ?? null,
+      facts.egress?.error ?? null,
     ]);
   }
 

@@ -31,6 +31,7 @@ server/src/
   migrations/          index.ts (explicit list) + 20261115000000-initial.ts (whole v1 schema, seeds admin/user roles)
                        + 20261116000000-m2-servers.ts (sources.kind)
                        + 20261117000000-server-deleting.ts (state `deleting`, delete_keep_data)
+                       + 20261118000000-server-private-network.ts (allow_private_network)
   models/              one class per file (declare attributes, initModel(), finders, serializers) + columns.ts
                        + index.ts (instance, init, every association)
   controllers/         one namespace per resource exporting `router`; ApiController mounts them
@@ -66,13 +67,17 @@ agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
   internal/hostfacts   Collector (+ _linux.go / _other.go)
   internal/docker      Engine API client over the unix socket (net/http only)
   internal/supervisor  agent's client for gss-init's socket (M2)
-  internal/servers     Manager (manager.go), New(Options) + container/network naming and labels (new.go) (M2)
+  internal/servers     Manager (manager.go), New(Options) + container/network naming and labels (new.go) (M2),
+                       egress.go (bridge names, egress checks before a container or game starts)
+  internal/egress      Firewall: the agent's nftables table `inet ionnet_gss` (ruleset.go: pure script builder;
+                       firewall.go: desired state, incremental adds, rebuilds, nft helper container)
   internal/initd       gss-init: Supervisor (initd.go), Console/Game/Launcher/RconClient interfaces (parts.go),
                        steps/ (install step registry), configs/ (format registry)
   internal/paths       host paths (Layout)
   packaging/           gss-agent.service
 images/                build.sh (deno task images:build; local tags only), base/ (Dockerfile builds gss-init from
-                       agent/; Dockerfile.dockerignore), minecraft-server/ (ARG JAVA → :java8/17/21/25)
+                       agent/; Dockerfile.dockerignore; has nftables for the agent's nft helper), minecraft-server/
+                       (ARG JAVA → :java8/17/21/25)
 games/                 built-in definition source: README.md, minecraft-java/{game.yml, hooks/install.sh}
 docs/                  blueprint.html
 ```
@@ -307,6 +312,54 @@ gss-init ─state/console (NDJSON, /gss/run/init.sock)─► agent ─server.sta
 - **Not in M2:** stats (M4), derived images for `packages` (the agent answers `unsupported`), `steamcmd`,
   `options_from`, config formats other than `properties` and `template` (M3).
 
+### Egress filtering
+
+By default a server's containers reach only the public internet. `game_servers.allow_private_network` (default
+false; `GameServerDto.allowPrivateNetwork`) opts a server out. Only SERVERS_PRIVATE_NETWORK (held by `admin`) may
+send it on create/update (403 otherwise, even for the current value); it is audited (`server.created` /
+`server.updated` details), changes only while stopped, and travels as `ServerSpec.allowPrivateNetwork`, so it is part
+of the spec hash and a change re-provisions. An agent that gets no field treats the server as restricted.
+
+- **Table:** `inet ionnet_gss`, owned completely by the agent (`internal/egress`). Docker's tables and the operator's
+  rules are never read, flushed or reordered. Base chains `forward` and `input` at priority `filter - 10` (before
+  iptables-nft's filter chains at 0); an accept there only skips our checks, Docker's chains still run.
+  - `set restricted` (ifname): bridges of restricted servers. `set intra` (ifname . ifname): the same bridge in and
+    out. `set private4` / `set private6` (interval): 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12,
+    192.168/16, 224/4, 240/4; ::, ::1, ::ffff:0:0/96, fc00::/7, fe80::/10, fec0::/10, ff00::/8.
+  - `forward`: `ct state established,related accept` (replies to players on private LANs who came in through a
+    published port) → not from a restricted bridge: accept → `iifname . oifname @intra` accept (game ↔ its stack's
+    containers) → out through `docker0` or `gss-*`: reject → private destination: reject.
+  - `input` (connections to the host itself: bridge gateway, LAN/public address, local services): not restricted:
+    accept → established/related accept → ICMPv6 neighbour discovery accept → reject.
+  - Rejects use `icmpx admin-prohibited`, so a blocked connect fails at once ("No route to host") instead of timing
+    out. Docker's embedded DNS (127.0.0.11) is inside the container's namespace; Docker 26+ forwards its upstream
+    queries from the host namespace (`ExtServers: [host(…)]`), so a private resolver keeps working.
+- **Bridges:** new networks get `com.docker.network.bridge.name` = `gss-` + the first 11 hex digits of the server id
+  (`servers.BridgeName`, 15 characters). Networks an older agent made keep `br-<network id>`; the agent reads the
+  real name from the network inspect, so they are filtered too. Interface names are validated (`egress.ValidBridge`)
+  and are the only variable part of the script.
+- **Applying:** `nft -f` runs in a short-lived helper container (`egress.HelperRunner`): `helperImage` from the
+  agent config (default `ghcr.io/ionnet-dev/ionnet-gss-base:latest`, pulled only when missing), `--network host`,
+  root with every capability dropped but NET_ADMIN, no-new-privileges, the script bind-mounted read-only from
+  `<dataRoot>/netfilter/ruleset.nft`; label `ionnet-gss.helper` (leftovers removed at Restore). No host `nft` fast
+  path: one code path for root and docker-group agents.
+- **When:** `Restore` rebuilds the whole table atomically (`add table; delete table; table { … }` in one transaction)
+  from the servers on disk before it starts any container, and waits for it before hello. Creating a network or
+  starting a restricted server's container or game adds its bridge incrementally (`add element`, idempotent; skipped
+  when applied in the last 30 s); a failed add (table gone) falls back to a rebuild. Allowing private access and
+  deleting a server remove the entry with a rebuild. Containers of servers the agent has no folder for stay out.
+- **Fail closed:** when the table can't be applied, a restricted server's container and game don't start: the
+  request gets a 409 with the cause and the agent re-sends the current state with it as `stateReason`. Allowed
+  servers start anyway. A broken table is retried every minute (`Firewall.Heal`). Host facts carry
+  `egress { filtering, restricted, error, checkedAt }` (null before the first apply, or from an older agent); the
+  panel validates it and shows it on the Host page with a warning when it doesn't work.
+- **Limits:** one agent per host manages the table (a second agent's rebuild drops the first one's bridges). The
+  table is kernel state: after a reboot Docker restarts game containers (`unless-stopped`) before the agent rebuilds
+  it, so gss-init (and an install it resumes) runs unfiltered for those seconds; games don't start until the agent
+  says so. An operator who flushes the whole ruleset (e.g. `systemctl restart nftables` with `flush ruleset`) also
+  removes this table; the next restricted start notices and rebuilds it. Hosts need nf_tables with `nft_ct`,
+  `nft_reject_inet` and set support (stock Debian/Ubuntu/Arch kernels).
+
 ### API routes (M2)
 
 Access: `O` = owner or SERVERS_MANAGE_ALL (else 404).
@@ -316,9 +369,9 @@ Access: `O` = owner or SERVERS_MANAGE_ALL (else 404).
 | GET | /api/definitions | S | | `DefinitionDto[]` (active) |
 | GET | /api/definitions/:id | S | | `DefinitionDto` |
 | GET | /api/servers | S | | `GameServerDto[]` (own; all with SERVERS_MANAGE_ALL) |
-| POST | /api/servers | P:SERVERS_CREATE | `CreateServerBody` | 201 `GameServerDetailResponse`; 400, 403 grant, 409 quota/capacity/ports/offline |
+| POST | /api/servers | P:SERVERS_CREATE | `CreateServerBody` | 201 `GameServerDetailResponse`; 400, 403 grant or `allowPrivateNetwork` without SERVERS_PRIVATE_NETWORK, 409 quota/capacity/ports/offline/egress |
 | GET | /api/servers/:id | O | | `GameServerDetailResponse` |
-| PATCH | /api/servers/:id | O | `UpdateServerBody` | `UpdateServerResponse`; 409 not stopped |
+| PATCH | /api/servers/:id | O | `UpdateServerBody` | `UpdateServerResponse`; 403 `allowPrivateNetwork` without SERVERS_PRIVATE_NETWORK; 409 not stopped |
 | POST | /api/servers/:id/start | O | | `GameServerDto`; 409 offline/running/disk |
 | POST | /api/servers/:id/stop | O | `StopServerBody` | `GameServerDto` (also cancels an install) |
 | POST | /api/servers/:id/restart | O | | `GameServerDto` |
@@ -338,15 +391,14 @@ Live: `server.updated` (refetch), `server.state` (apply in place), `server.conso
 | `controllers/ServerController`, `DefinitionController` | `GameServerService`, models (definitions list), lib | `AgentGateway` directly |
 | agent handlers `serverState.ts`, `serverConsole.ts`, `hello.ts` (reconcile) | `GameServerService` | models for servers directly |
 | `definitions/loaders/*` | `node:fs`, models (types), lib | `DefinitionEngine` (DefinitionSync validates) |
-| `agent/internal/servers` | `docker`, `supervisor`, `paths`, `protocol` | `panel` (it reports through `Sink`) |
+| `agent/internal/servers` | `docker`, `supervisor`, `paths`, `protocol`, `egress` | `panel` (it reports through `Sink`) |
+| `agent/internal/egress` | `docker`, `protocol` | `servers`, `panel` (no server knowledge: server id → bridge only) |
 | `agent/internal/initd/**` | `protocol`, stdlib (+ `golang.org/x/sys` / a pty package if needed: ask main) | `docker`, `panel`, `servers` |
 
 ### Open hardening (not in M2)
 
 - Per-server uids / user namespaces: every game runs as uid 1000 on the host kernel; with the agent also uid 1000 (dev
   setups) the game could open `/gss/run`, and only gss-init's pid check refuses it.
-- Container egress: games can reach link-local (169.254.0.0/16, cloud metadata) and host-local addresses; block them
-  per server network.
 - Disk: hard quotas (XFS project quotas / a size-limited volume) and a read-only root filesystem instead of the
   once-a-minute soft check.
 

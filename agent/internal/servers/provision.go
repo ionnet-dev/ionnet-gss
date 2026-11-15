@@ -187,6 +187,13 @@ func (m *manager) ensureContainer(ctx context.Context, s *server, recreate bool)
 		if info.Running {
 			return nil
 		}
+		network, err := m.ensureNetwork(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := m.applyEgress(ctx, s, network.Bridge); err != nil {
+			return err
+		}
 		if err := m.opts.Docker.ContainerStart(ctx, name); err != nil {
 			return err
 		}
@@ -197,7 +204,11 @@ func (m *manager) ensureContainer(ctx context.Context, s *server, recreate bool)
 	if err := m.ensureImage(ctx, req.Spec.Image); err != nil {
 		return err
 	}
-	if _, err := m.opts.Docker.NetworkEnsure(ctx, NetworkName(id), map[string]string{LabelServer: id}); err != nil {
+	network, err := m.ensureNetwork(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := m.applyEgress(ctx, s, network.Bridge); err != nil {
 		return err
 	}
 	if exists {

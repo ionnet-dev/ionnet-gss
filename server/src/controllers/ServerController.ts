@@ -9,7 +9,8 @@ import { GameServerService } from "../servers/GameServerService.ts";
 /**
  * `/api/servers`. Thin: validate the shape, call `GameServerService`, answer. Access checks live in the service.
  * Audit: `server.created`, `server.updated`, `server.started`, `server.stopped`, `server.restarted`,
- * `server.reinstalled`, `server.deleted`.
+ * `server.reinstalled`, `server.deleted`. `allowPrivateNetwork` is in the details of a create and of an update that
+ * sent it.
  */
 /**
  * One audit entry for something a user did to a server.
@@ -44,7 +45,7 @@ export namespace ServerController {
   router.post("/", User.$middleware({ permissions: ["SERVERS_CREATE"] }), async (c) => {
     const body = await readBody<CreateServerBody>(c);
     const server = await GameServerService.create(c.var.user, body as CreateServerBody);
-    await audit(c, "server.created", server.id, server.host.id, { name: server.name, game: server.definition.gameId });
+    await audit(c, "server.created", server.id, server.host.id, { name: server.name, game: server.definition.gameId, allowPrivateNetwork: server.allowPrivateNetwork });
     return c.json(server, 201);
   });
 
@@ -61,7 +62,9 @@ export namespace ServerController {
   router.patch("/:id", async (c) => {
     const body = await readBody<UpdateServerBody>(c);
     const result = await GameServerService.update(c.var.user, paramUuid(c, "id"), body);
-    await audit(c, "server.updated", result.server.id, result.server.host.id, { changes: Object.keys(body).filter((key) => key !== "variables"), variables: Object.keys(body.variables ?? {}) });
+    const details: Record<string, unknown> = { changes: Object.keys(body).filter((key) => key !== "variables"), variables: Object.keys(body.variables ?? {}) };
+    if (body.allowPrivateNetwork !== undefined) details.allowPrivateNetwork = result.server.allowPrivateNetwork;
+    await audit(c, "server.updated", result.server.id, result.server.host.id, details);
     return c.json(result);
   });
 

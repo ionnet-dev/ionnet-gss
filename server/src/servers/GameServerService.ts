@@ -168,6 +168,7 @@ export namespace GameServerService {
     const variables = parseVariables(body.variables);
     const autostart = parseFlag(body.autostart, "autostart") ?? true;
     const autoRestart = parseFlag(body.autoRestart, "autoRestart") ?? false;
+    const allowPrivateNetwork = parsePrivateNetwork(user, body.allowPrivateNetwork) ?? false;
     let pinned: Record<string, number> | undefined;
     if (body.ports !== undefined) {
       if (!user.hasPermission("PORTS_OVERRIDE")) throw HttpError.forbidden("You may not choose ports yourself.");
@@ -209,11 +210,12 @@ export namespace GameServerService {
         diskMb: limits.diskMb,
         autostart,
         autoRestart,
+        allowPrivateNetwork,
         specHash: null,
         installedAt: null,
       }, { transaction });
       const allocations = await PortAllocation.allocate(locked, id, definition.document.ports ?? [], transaction, pinned);
-      const built = await specFor(definition, { id, name, variables: values, limits, autostart, autoRestart }, allocations);
+      const built = await specFor(definition, { id, name, variables: values, limits, autostart, autoRestart, allowPrivateNetwork }, allocations);
       row.specHash = built.specHash;
       await row.save({ transaction });
       return built;
@@ -234,8 +236,8 @@ export namespace GameServerService {
   }
 
   /**
-   * Name, variables, autostart, autoRestart. 409 unless stopped / install_failed / crashed. Re-provisions with the
-   * new spec (reinstall when a `reinstall` variable changed).
+   * Name, variables, autostart, autoRestart, allowPrivateNetwork (SERVERS_PRIVATE_NETWORK). 409 unless stopped /
+   * install_failed / crashed. Re-provisions with the new spec (reinstall when a `reinstall` variable changed).
    */
   export async function update(user: User, serverId: string, body: UpdateServerBody): Promise<UpdateServerResponse> {
     const server = await getAccessible(user, serverId);
@@ -246,6 +248,7 @@ export namespace GameServerService {
     const name = body.name === undefined ? server.name : parseName(body.name);
     const autostart = parseFlag(body.autostart, "autostart") ?? server.autostart;
     const autoRestart = parseFlag(body.autoRestart, "autoRestart") ?? server.autoRestart;
+    const allowPrivateNetwork = parsePrivateNetwork(user, body.allowPrivateNetwork) ?? server.allowPrivateNetwork;
     const submitted = parseVariables(body.variables);
     const definition = server.definition!;
     const decls = definition.document.variables ?? [];
@@ -263,7 +266,7 @@ export namespace GameServerService {
       await assertHostCapacity(server.host!, limits, server.id);
     }
 
-    const built = await specFor(definition, { id: server.id, name, variables: values, limits, autostart, autoRestart }, server.ports!);
+    const built = await specFor(definition, { id: server.id, name, variables: values, limits, autostart, autoRestart, allowPrivateNetwork }, server.ports!);
     if (built.specHash !== server.specHash || reinstall) {
       const status = await provision(server.hostId, built.spec, built.specHash, reinstall);
       await storeStatus(server.id, status);
@@ -276,6 +279,7 @@ export namespace GameServerService {
       diskMb: limits.diskMb,
       autostart,
       autoRestart,
+      allowPrivateNetwork,
       specHash: built.specHash,
     }, { where: { id: server.id } });
     pushUpdated(server.ownerId, server.id);
@@ -586,6 +590,7 @@ export namespace GameServerService {
     limits: Limits;
     autostart: boolean;
     autoRestart: boolean;
+    allowPrivateNetwork: boolean;
   }
 
   /**
@@ -611,6 +616,7 @@ export namespace GameServerService {
         limits: values.limits,
         autostart: values.autostart,
         autoRestart: values.autoRestart,
+        allowPrivateNetwork: values.allowPrivateNetwork,
         imageRegistry: Config.IMAGE_REGISTRY,
       });
     } catch (error) {
@@ -626,6 +632,7 @@ export namespace GameServerService {
       limits: { memoryMb: server.memoryMb, cpuMillis: server.cpuMillis, pids: DEFAULT_LIMITS.pids, diskMb: server.diskMb },
       autostart: server.autostart,
       autoRestart: server.autoRestart,
+      allowPrivateNetwork: server.allowPrivateNetwork,
     }, server.ports!);
   }
 
@@ -740,6 +747,7 @@ export namespace GameServerService {
       limits: { memoryMb: server.memoryMb, cpuMillis: server.cpuMillis, diskMb: server.diskMb },
       autostart: server.autostart,
       autoRestart: server.autoRestart,
+      allowPrivateNetwork: server.allowPrivateNetwork,
       createdAt: server.createdAt.toISOString(),
     };
   }
@@ -844,6 +852,16 @@ export namespace GameServerService {
     if (value === undefined) return undefined;
     if (typeof value !== "boolean") throw HttpError.badRequest(`"${field}" must be true or false.`);
     return value;
+  }
+
+  /**
+   * `allowPrivateNetwork` from a body: only users with SERVERS_PRIVATE_NETWORK may send it at all.
+   * @throws HttpError 403 for anyone else, 400 when it isn't a boolean.
+   */
+  function parsePrivateNetwork(user: User, value: unknown): boolean | undefined {
+    if (value === undefined) return undefined;
+    if (!user.hasPermission("SERVERS_PRIVATE_NETWORK")) throw HttpError.forbidden("You may not change whether a server can reach private networks. Ask an administrator.");
+    return parseFlag(value, "allowPrivateNetwork");
   }
 
   function parseVariables(value: unknown): Record<string, Value> {

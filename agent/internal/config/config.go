@@ -29,6 +29,9 @@ type Config struct {
 	DataRoot string `json:"dataRoot,omitempty"`
 	// DockerHost defaults to paths.DefaultDockerHost.
 	DockerHost string `json:"dockerHost,omitempty"`
+	// HelperImage defaults to paths.DefaultHelperImage: the image of the nft helper container that applies the
+	// egress filtering table. It is pulled only when missing.
+	HelperImage string `json:"helperImage,omitempty"`
 }
 
 // WithDefaults returns a copy with empty optional fields filled in.
@@ -38,6 +41,9 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.DockerHost == "" {
 		c.DockerHost = paths.DefaultDockerHost
+	}
+	if c.HelperImage == "" {
+		c.HelperImage = paths.DefaultHelperImage
 	}
 	return c
 }

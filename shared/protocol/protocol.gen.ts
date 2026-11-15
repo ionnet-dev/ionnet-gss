@@ -467,6 +467,10 @@ export interface HostFacts {
    * null = Docker is not reachable on this host.
    */
   docker: DockerFacts | null;
+  /**
+   * Egress filtering for game servers. null = not checked yet (the agent is still starting) or an agent older than this field; the panel stores a missing value as null.
+   */
+  egress: EgressFacts | null;
 }
 
 export interface OsFacts {
@@ -522,6 +526,28 @@ export interface DiskFacts {
    * Bytes available to unprivileged users.
    */
   freeBytes: number;
+}
+
+/**
+ * Whether the agent's nftables table (`inet ionnet_gss`) is in place. Servers without `allowPrivateNetwork` start only while it is.
+ */
+export interface EgressFacts {
+  /**
+   * The last apply of the table succeeded.
+   */
+  filtering: boolean;
+  /**
+   * Server bridges currently filtered.
+   */
+  restricted: number;
+  /**
+   * Why the last apply failed (e.g. the helper image is missing or `nft` refused the ruleset); null while filtering works.
+   */
+  error: string | null;
+  /**
+   * When the table was last applied or the last attempt failed.
+   */
+  checkedAt: string;
 }
 
 export interface DockerFacts {
@@ -640,6 +666,10 @@ export interface ServerSpec {
    * Start again after a host reboot if it was running.
    */
   autostart: boolean;
+  /**
+   * Let the server's containers open connections to private, link-local and host addresses. false (the default, and what an agent assumes when it is absent): the agent filters the server's bridge in its nftables table and refuses to start the server when it can't.
+   */
+  allowPrivateNetwork: boolean;
   /**
    * Every definition file the spec references (hooks; templates are already rendered into ConfigMapping.content). The agent writes them below the server's spec folder (INIT_FILES_DIR in the container), hooks mode 0755, replacing the folder on every provision.
    */

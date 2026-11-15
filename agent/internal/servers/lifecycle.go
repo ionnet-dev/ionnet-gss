@@ -60,6 +60,9 @@ func (m *manager) start(ctx context.Context, s *server) (protocol.ServerStatus, 
 			return protocol.ServerStatus{}, remoteError(protocol.ErrorCodeConflict, "Server %s uses %d MB of its %d MB disk limit. Delete files or raise the limit before starting it.", s.id, used>>20, limit)
 		}
 	}
+	if err := m.guardEgress(ctx, s); err != nil {
+		return protocol.ServerStatus{}, err
+	}
 	client, err := m.up(ctx, s)
 	if err != nil {
 		return protocol.ServerStatus{}, err
@@ -172,6 +175,11 @@ func (m *manager) Delete(ctx context.Context, serverID string, keepData bool) er
 	}
 	if err := m.opts.Docker.NetworkRemove(ctx, NetworkName(serverID)); err != nil {
 		return err
+	}
+	if m.opts.Egress != nil {
+		if err := m.opts.Egress.Release(ctx, serverID); err != nil {
+			slog.Warn("could not remove the deleted server from the egress table; it goes at the next rebuild", "server", serverID, "error", err)
+		}
 	}
 	m.saveStateLogged()
 

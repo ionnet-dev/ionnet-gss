@@ -15,7 +15,14 @@ import VariableForm, {
   toValues,
   validate,
 } from "@/components/VariableForm/VariableForm.tsx";
+import { useAuth } from "@/hooks/useAuth.ts";
 import { navigate } from "@/router/Router.tsx";
+
+/**
+ * The admin-only switch for `allowPrivateNetwork`, shared with the create flow.
+ */
+export const PRIVATE_NETWORK_LABEL = "Allow access to private networks";
+export const PRIVATE_NETWORK_DESCRIPTION = "Off: the server reaches only the public internet, not your LAN, the host or other servers. Turn it on for a game that must talk to services on your own network.";
 
 export interface ServerSettingsProps {
   server: GameServerDetailResponse;
@@ -60,6 +67,8 @@ function SettingsForm(props: { server: GameServerDetailResponse; editable: boole
   const [values, setValues] = useState<FormValues>(initial);
   const [autostart, setAutostart] = useState(server.autostart);
   const [autoRestart, setAutoRestart] = useState(server.autoRestart);
+  const [allowPrivateNetwork, setAllowPrivateNetwork] = useState(server.allowPrivateNetwork);
+  const canAllowPrivateNetwork = useAuth().has("SERVERS_PRIVATE_NETWORK");
   const [errors, setErrors] = useState<FormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -71,12 +80,13 @@ function SettingsForm(props: { server: GameServerDetailResponse; editable: boole
     setValues(initial);
     setAutostart(server.autostart);
     setAutoRestart(server.autoRestart);
+    setAllowPrivateNetwork(server.allowPrivateNetwork);
     setErrors({});
-  }, [server.name, server.autostart, server.autoRestart, initial]);
+  }, [server.name, server.autostart, server.autoRestart, server.allowPrivateNetwork, initial]);
 
   const changed = toValues(variables, values, initial);
   const reinstalls = variables.filter((variable) => variable.reinstall && variable.key in changed);
-  const dirty = name.trim() !== server.name || Object.keys(changed).length > 0 || autostart !== server.autostart || autoRestart !== server.autoRestart;
+  const dirty = name.trim() !== server.name || Object.keys(changed).length > 0 || autostart !== server.autostart || autoRestart !== server.autoRestart || allowPrivateNetwork !== server.allowPrivateNetwork;
 
   const save = async () => {
     setBusy(true);
@@ -86,6 +96,7 @@ function SettingsForm(props: { server: GameServerDetailResponse; editable: boole
     if (Object.keys(changed).length > 0) body.variables = changed;
     if (autostart !== server.autostart) body.autostart = autostart;
     if (autoRestart !== server.autoRestart) body.autoRestart = autoRestart;
+    if (allowPrivateNetwork !== server.allowPrivateNetwork) body.allowPrivateNetwork = allowPrivateNetwork;
     try {
       const result = await ServerApi.update(server.id, body);
       await onChanged();
@@ -150,6 +161,9 @@ function SettingsForm(props: { server: GameServerDetailResponse; editable: boole
             <Stack gap="12">
               <Switch label="Start with the host" description="Start this server again when its host comes back." checked={autostart} onCheckedChange={setAutostart} disabled={!editable || busy} />
               <Switch label="Restart after a crash" description="Start it again when the game stops unexpectedly." checked={autoRestart} onCheckedChange={setAutoRestart} disabled={!editable || busy} />
+              {canAllowPrivateNetwork && (
+                <Switch label={PRIVATE_NETWORK_LABEL} description={PRIVATE_NETWORK_DESCRIPTION} checked={allowPrivateNetwork} onCheckedChange={setAllowPrivateNetwork} disabled={!editable || busy} />
+              )}
             </Stack>
             <FormError>{formError}</FormError>
           </Stack>

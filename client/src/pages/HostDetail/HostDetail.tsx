@@ -1,8 +1,9 @@
 import { type FormEvent, type ReactNode, useState } from "react";
-import { AlertDialog, Button, Card, CardBody, CardFooter, CardHeader, Grid, Input, Meter, Spinner, Stack } from "@ionnet/iontronic/react";
+import { AlertDialog, Badge, Button, Card, CardBody, CardFooter, CardHeader, Grid, Input, Meter, Spinner, Stack } from "@ionnet/iontronic/react";
 import { ArrowLeft, Power, Trash2 } from "@ionnet/iontronic/icons";
 import { LIMITS } from "@shared/constants.ts";
 import type { HostDetailResponse, UpdateHostBody } from "@shared/api/hosts.ts";
+import type { EgressFacts } from "@shared/protocol/protocol.gen.ts";
 import { HostApi } from "@/Api/HostApi.ts";
 import { formatAgo, formatBytes, formatDateTime, formatUptime } from "@/components/Format/format.ts";
 import HostStatus from "@/components/HostStatus/HostStatus.tsx";
@@ -70,6 +71,28 @@ function Fact(props: { label: string; children: ReactNode }) {
   );
 }
 
+/**
+ * Egress filtering on the host: whether servers without private network access can start there.
+ */
+function EgressBadge(props: { egress: EgressFacts | null }) {
+  const { egress } = props;
+  if (!egress) return <Badge tone="neutral" size="sm">Unknown</Badge>;
+  if (egress.filtering) return <Badge tone="ok" size="sm">Working · {egress.restricted} filtered</Badge>;
+  return <Badge tone="warn" size="sm">Not working</Badge>;
+}
+
+/**
+ * The warning under the facts when egress filtering doesn't work (or the agent is too old to report it).
+ */
+function EgressWarning(props: { egress: EgressFacts | null }) {
+  const { egress } = props;
+  if (egress?.filtering) return null;
+  const text = egress
+    ? `Egress filtering doesn't work on this host, so servers that may not reach private networks won't start here. ${egress.error ?? ""}`
+    : "This agent doesn't report egress filtering (it may be older than this panel). Servers on it may be able to reach private networks.";
+  return <span role="status" style={{ color: "var(--io-color-hue-text-warn)" }}>{text}</span>;
+}
+
 function Overview(props: { host: HostDetailResponse }) {
   const { host } = props;
   return (
@@ -112,7 +135,9 @@ function System(props: { host: HostDetailResponse }) {
             <Fact label="Load (1 min)"><span className="io-mono">{facts.cpu.load1.toFixed(2)}</span></Fact>
             <Fact label="Docker">{facts.docker ? <span className="io-mono">{facts.docker.version}</span> : "Docker not reachable"}</Fact>
             <Fact label="Uptime">{formatUptime(facts.uptimeSec)}</Fact>
+            <Fact label="Egress filtering"><EgressBadge egress={facts.egress ?? null} /></Fact>
           </Grid>
+          <EgressWarning egress={facts.egress ?? null} />
           <Grid minChildWidth="16rem" gap="24">
             <Meter
               label="Memory"

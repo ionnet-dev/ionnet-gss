@@ -15,6 +15,7 @@ export const PERMISSIONS = {
   SERVERS_CREATE: "Create game servers on granted hosts, within quota.",
   SERVERS_MANAGE_ALL: "See and operate every game server.",
   PORTS_OVERRIDE: "Pick a server's ports instead of the automatic allocation.",
+  SERVERS_PRIVATE_NETWORK: "Let a game server open connections to private networks and the host (off by default).",
   AUDIT_VIEW: "Read the audit log.",
 } as const;
 

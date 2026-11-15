@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/docker"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/egress"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/paths"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/protocol"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/supervisor"
@@ -30,7 +31,7 @@ var InitCapabilities = []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "KILL", "SETG
 // ContainerName is the game container: gss-<uuid>.
 func ContainerName(serverID string) string { return "gss-" + serverID }
 
-// NetworkName is the per-server bridge network: gss-<uuid>.
+// NetworkName is the per-server bridge network: gss-<uuid>. Its host interface is BridgeName.
 func NetworkName(serverID string) string { return "gss-" + serverID }
 
 // DialSupervisor opens a supervisor client; swappable for tests and a fake gss-init.
@@ -42,6 +43,9 @@ type Options struct {
 	Docker docker.Client
 	Sink   Sink
 	Dial   DialSupervisor // nil = supervisor.Dial with a 5 s timeout.
+	// Egress filters restricted servers' bridges (egress.go). nil = no filtering, so restricted servers refuse to
+	// start.
+	Egress egress.Firewall
 }
 
 // Timing (M2).
@@ -65,7 +69,8 @@ const (
 //
 // Provision, in order: validate spec (paths, ports, limits), write <server>/spec/spec.json (InitSpec) and
 // spec/files/** (0755 for executable), create data/ and run/ (see ownership in fs.go), ensure the image (inspect,
-// pull only when missing; non-empty `packages` → unsupported until derived builds land), ensure the network,
+// pull only when missing; non-empty `packages` → unsupported until derived builds land), ensure the network
+// (bridge BridgeName) and its egress filtering (egress.go: a restricted server doesn't start without it),
 // (re)create the container when the spec hash label differs: memory/CPU/PID limits, CapDrop ALL + InitCapabilities,
 // no Docker socket, binds data→/data, spec→/gss/spec:ro, run→/gss/run, published ports host=container, Tty off
 // (gss-init owns the pty). Then start it so gss-init runs install (reinstall or first provision) and stays idle.
@@ -87,6 +92,7 @@ func New(opts Options) Manager {
 	}
 	go m.saveLoop()
 	go m.diskLoop()
+	go m.healLoop()
 	return m
 }
 

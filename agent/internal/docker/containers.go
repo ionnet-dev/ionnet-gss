@@ -118,7 +118,7 @@ func (c *unixClient) ContainerCreate(ctx context.Context, spec ContainerSpec) (s
 			body.HostConfig.PortBindings[key] = []portBinding{{HostPort: strconv.Itoa(port.Port)}}
 		}
 	}
-	if spec.Network != "" && spec.Network != "none" {
+	if spec.Network != "" && spec.Network != "none" && spec.Network != "host" {
 		body.NetworkingConfig = &networkingConfig{EndpointsConfig: map[string]endpointConfig{
 			spec.Network: {Aliases: spec.Aliases},
 		}}

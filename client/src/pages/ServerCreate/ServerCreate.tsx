@@ -1,5 +1,5 @@
 import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useMemo, useState } from "react";
-import { Button, Card, CardBody, CardFooter, CardHeader, EmptyState, Grid, Icon, Input, Spinner, Stack } from "@ionnet/iontronic/react";
+import { Button, Card, CardBody, CardFooter, CardHeader, EmptyState, Grid, Icon, Input, Spinner, Stack, Switch } from "@ionnet/iontronic/react";
 import { ArrowLeft, Check, Gamepad2, Server } from "@ionnet/iontronic/icons";
 import { LIMITS } from "@shared/constants.ts";
 import type { DefinitionDto } from "@shared/api/definitions.ts";
@@ -11,6 +11,8 @@ import { formatBytes } from "@/components/Format/format.ts";
 import FormError from "@/components/FormError/FormError.tsx";
 import LoadError from "@/components/LoadError/LoadError.tsx";
 import PageHeader from "@/components/PageHeader/PageHeader.tsx";
+import { PRIVATE_NETWORK_DESCRIPTION, PRIVATE_NETWORK_LABEL } from "@/components/ServerSettings/ServerSettings.tsx";
+import { useAuth } from "@/hooks/useAuth.ts";
 import VariableForm, {
   errorFieldFor,
   type FormErrors,
@@ -153,6 +155,8 @@ function Details(props: { host: HostDto; definition: DefinitionDto }) {
   const [errors, setErrors] = useState<FormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [allowPrivateNetwork, setAllowPrivateNetwork] = useState(false);
+  const canAllowPrivateNetwork = useAuth().has("SERVERS_PRIVATE_NETWORK");
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -169,6 +173,7 @@ function Details(props: { host: HostDto; definition: DefinitionDto }) {
         hostId: host.id,
         definitionId: definition.id,
         variables: toValues(variables, values),
+        ...(canAllowPrivateNetwork ? { allowPrivateNetwork } : {}),
       });
       navigate(`/servers/${created.id}`);
     } catch (error) {
@@ -208,6 +213,9 @@ function Details(props: { host: HostDto; definition: DefinitionDto }) {
                 setErrors((current) => (key in current ? Object.fromEntries(Object.entries(current).filter(([field]) => field !== key)) : current));
               }}
             />
+            {canAllowPrivateNetwork && (
+              <Switch label={PRIVATE_NETWORK_LABEL} description={PRIVATE_NETWORK_DESCRIPTION} checked={allowPrivateNetwork} onCheckedChange={setAllowPrivateNetwork} disabled={busy} />
+            )}
             <FormError>{formError}</FormError>
           </Stack>
         </CardBody>

@@ -44,6 +44,7 @@ export namespace DefinitionEngine {
     limits: ServerSpec["limits"];
     autostart: boolean;
     autoRestart: boolean;
+    allowPrivateNetwork: boolean; // Part of the spec (and its hash), so a change re-provisions.
     imageRegistry: string; // `IMAGE_REGISTRY`, for `resolveImage`.
   }
 
@@ -717,6 +718,7 @@ export namespace DefinitionEngine {
       ports: input.ports,
       limits: input.limits,
       autostart: input.autostart,
+      allowPrivateNetwork: input.allowPrivateNetwork,
       files,
       services,
       init: {

@@ -32,9 +32,10 @@
         "cpu": { "$ref": "#/$defs/CpuFacts" },
         "memory": { "$ref": "#/$defs/MemoryFacts" },
         "disk": { "$ref": "#/$defs/DiskFacts" },
-        "docker": { "oneOf": [{ "$ref": "#/$defs/DockerFacts" }, { "type": "null" }], "description": "null = Docker is not reachable on this host." }
+        "docker": { "oneOf": [{ "$ref": "#/$defs/DockerFacts" }, { "type": "null" }], "description": "null = Docker is not reachable on this host." },
+        "egress": { "oneOf": [{ "$ref": "#/$defs/EgressFacts" }, { "type": "null" }], "description": "Egress filtering for game servers. null = not checked yet (the agent is still starting) or an agent older than this field; the panel stores a missing value as null." }
       },
-      "required": ["hostname", "agentVersion", "uptimeSec", "os", "cpu", "memory", "disk", "docker"]
+      "required": ["hostname", "agentVersion", "uptimeSec", "os", "cpu", "memory", "disk", "docker", "egress"]
     },
     "OsFacts": {
       "type": "object",
@@ -73,6 +74,17 @@
         "freeBytes": { "type": "integer", "description": "Bytes available to unprivileged users." }
       },
       "required": ["path", "totalBytes", "freeBytes"]
+    },
+    "EgressFacts": {
+      "type": "object",
+      "description": "Whether the agent's nftables table (`inet ionnet_gss`) is in place. Servers without `allowPrivateNetwork` start only while it is.",
+      "properties": {
+        "filtering": { "type": "boolean", "description": "The last apply of the table succeeded." },
+        "restricted": { "type": "integer", "description": "Server bridges currently filtered." },
+        "error": { "type": ["string", "null"], "description": "Why the last apply failed (e.g. the helper image is missing or `nft` refused the ruleset); null while filtering works." },
+        "checkedAt": { "type": "string", "format": "date-time", "description": "When the table was last applied or the last attempt failed." }
+      },
+      "required": ["filtering", "restricted", "error", "checkedAt"]
     },
     "DockerFacts": {
       "type": "object",

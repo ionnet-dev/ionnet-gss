@@ -34,6 +34,11 @@ export interface GameServerDto {
   limits: { memoryMb: number; cpuMillis: number; diskMb: number };
   autostart: boolean;
   autoRestart: boolean;
+  /**
+   * The server may open connections to private networks, link-local addresses and the host. false = only the public
+   * internet (the host's agent filters the rest and won't start the server when it can't).
+   */
+  allowPrivateNetwork: boolean;
   createdAt: IsoDate;
 }
 
@@ -76,6 +81,7 @@ export interface CreateServerBody {
   variables?: Record<string, VariableValue>;
   autostart?: boolean; // Default true.
   autoRestart?: boolean; // Default false.
+  allowPrivateNetwork?: boolean; // SERVERS_PRIVATE_NETWORK only (403 otherwise). Default false.
   /**
    * PORTS_OVERRIDE only: port name → number. Must be free on the host (any number, not only the pool).
    */
@@ -87,6 +93,7 @@ export interface UpdateServerBody {
   variables?: Record<string, VariableValue>; // Only the keys to change; a secret set to "" regenerates it.
   autostart?: boolean;
   autoRestart?: boolean;
+  allowPrivateNetwork?: boolean; // SERVERS_PRIVATE_NETWORK only (403 otherwise).
 }
 
 export interface UpdateServerResponse {

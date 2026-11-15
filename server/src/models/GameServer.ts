@@ -37,6 +37,7 @@ export class GameServer extends Model<InferAttributes<GameServer>, InferCreation
   declare diskMb: number; // Soft limit.
   declare autostart: CreationOptional<boolean>; // Start after a host reboot if it was running.
   declare autoRestart: CreationOptional<boolean>; // Restart after a crash (3 in 10 minutes).
+  declare allowPrivateNetwork: CreationOptional<boolean>; // May open connections to private, link-local and host addresses (SERVERS_PRIVATE_NETWORK sets it).
   declare specHash: string | null; // Hash of the spec last provisioned; null = never provisioned.
   declare installedAt: Date | null;
   declare deleteKeepData: CreationOptional<boolean>; // keepData of the pending delete (state "deleting").
@@ -65,6 +66,7 @@ export class GameServer extends Model<InferAttributes<GameServer>, InferCreation
       diskMb: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
       autostart: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       autoRestart: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+      allowPrivateNetwork: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       specHash: { type: DataTypes.CHAR(64), allowNull: true },
       installedAt: { type: DataTypes.DATE, allowNull: true },
       deleteKeepData: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },

@@ -114,12 +114,13 @@
         "ports": { "type": "array", "items": { "$ref": "#/$defs/PortBinding" } },
         "limits": { "$ref": "#/$defs/Limits" },
         "autostart": { "type": "boolean", "description": "Start again after a host reboot if it was running." },
+        "allowPrivateNetwork": { "type": "boolean", "description": "Let the server's containers open connections to private, link-local and host addresses. false (the default, and what an agent assumes when it is absent): the agent filters the server's bridge in its nftables table and refuses to start the server when it can't." },
         "files": { "type": "array", "items": { "$ref": "#/$defs/SpecFile" }, "description": "Every definition file the spec references (hooks; templates are already rendered into ConfigMapping.content). The agent writes them below the server's spec folder (INIT_FILES_DIR in the container), hooks mode 0755, replacing the folder on every provision." },
         "services": { "type": "object", "additionalProperties": { "$ref": "definition.json#/$defs/ServiceSpec" } },
         "backup": { "$ref": "definition.json#/$defs/BackupSpec" },
         "init": { "$ref": "supervisor.json#/$defs/InitSpec" }
       },
-      "required": ["serverId", "name", "definition", "image", "packages", "ports", "limits", "autostart", "files", "services", "init"]
+      "required": ["serverId", "name", "definition", "image", "packages", "ports", "limits", "autostart", "allowPrivateNetwork", "files", "services", "init"]
     },
     "DefinitionRef": {
       "type": "object",
