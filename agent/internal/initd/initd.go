@@ -16,7 +16,7 @@ var ErrNotImplemented = errors.New("gss-init: not implemented")
 // Options configure a Supervisor; the defaults are the protocol constants.
 type Options struct {
 	SpecPath   string // protocol.InitSpecPath
-	HooksDir   string // protocol.InitHooksDir
+	FilesDir   string // protocol.InitFilesDir
 	SocketPath string // protocol.InitSocketPath
 	DataPath   string // protocol.InitDataPath
 	GameUID    int    // protocol.GameUID
@@ -27,7 +27,7 @@ type Options struct {
 func DefaultOptions() Options {
 	return Options{
 		SpecPath:   protocol.InitSpecPath,
-		HooksDir:   protocol.InitHooksDir,
+		FilesDir:   protocol.InitFilesDir,
 		SocketPath: protocol.InitSocketPath,
 		DataPath:   protocol.InitDataPath,
 		GameUID:    protocol.GameUID,

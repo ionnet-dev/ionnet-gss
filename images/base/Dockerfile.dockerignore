@@ -1,0 +1,5 @@
+# BuildKit uses this instead of the root .dockerignore for images/base/Dockerfile (context = repo root).
+*
+!agent/
+agent/bin/
+agent/dist/

@@ -8,6 +8,8 @@ import type { AgentConnection } from "../AgentConnection.ts";
 import { handleEnrol } from "./enrol.ts";
 import { handleHello } from "./hello.ts";
 import { handleHeartbeat } from "./heartbeat.ts";
+import { handleServerConsole } from "./serverConsole.ts";
+import { handleServerState } from "./serverState.ts";
 
 export type AgentRequestHandler<T extends keyof AgentToPanelRequests> = (
   conn: AgentConnection,
@@ -26,5 +28,7 @@ export const REQUEST_HANDLERS: { [T in keyof AgentToPanelRequests]: AgentRequest
 
 export const EVENT_HANDLERS: { [T in keyof AgentToPanelEvents]?: AgentEventHandler<T> } = {
   "heartbeat": handleHeartbeat,
-  // M2: "server.console", "server.state", "server.stats"; M4: "server.player"
+  "server.state": handleServerState,
+  "server.console": handleServerConsole,
+  // M4: "server.stats", "server.player"
 };

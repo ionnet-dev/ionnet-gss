@@ -29,24 +29,31 @@ server/src/
   AppSystem.ts         name, version, data folders
   migrate.ts           Umzug runner + CLI (deno task migrate up|down|pending|executed|create <name>)
   migrations/          index.ts (explicit list) + 20261115000000-initial.ts (whole v1 schema, seeds admin/user roles)
+                       + 20261116000000-m2-servers.ts (sources.kind)
   models/              one class per file (declare attributes, initModel(), finders, serializers) + columns.ts
                        + index.ts (instance, init, every association)
   controllers/         one namespace per resource exporting `router`; ApiController mounts them
   gateways/agent/      AgentGateway (static: by host id), AgentConnection (envelope, phases), handlers/ (by type)
   gateways/live/       LiveGateway (static: push(event, data, audience))
-  definitions/         DefinitionEngine (M2): parse → resolve extends → render → ServerSpec
+  definitions/         DefinitionEngine (pure: parse, resolve extends, variables, limits, image, render, buildSpec),
+                       DefinitionSync (load → validate → definitions rows), loaders/ (DefinitionLoader per Source.kind:
+                       LocalLoader = games/; M3 GitLoader)
+  servers/             GameServerService: every server operation (access, quota, ports, provision, lifecycle,
+                       console, agent state → rows + live events, reconcile after hello)
   lib/                 HttpError, http (AppEnv, readBody, paramInt/Uuid, clientIp), RateLimiter, tokens, portPool, totp (M5)
 client/                npm + Vite (Iontronic is a github: dep Deno can't install)
   vite.config.ts       :5200, HMR direct, aliases @/ @shared/, inline theme boot
   src/main.tsx         providers + auth bootstrap + <Router>
   src/routes.tsx       route table: regex paths, lazy pages, requirement() guards
   src/router/          Router.tsx (Router, Link, navigate, useLocation)
-  src/Api/             BaseApi.ts (token+user in localStorage, GET/POST/…) + AuthApi, UserApi, InviteApi, HostApi
+  src/Api/             BaseApi.ts (token+user in localStorage, GET/POST/…) + AuthApi, UserApi, InviteApi, HostApi,
+                       ServerApi, DefinitionApi (M2)
   src/controllers/     Controller (notify), AuthController (session, permissions)
   src/hooks/           useController, useAuth, useResource (load + reload + live-event refetch)
   src/live/            LiveSocket (the /ws/live client, on(event))
   src/components/      AppLayout (AppShell/Sidebar/TabBar), AuthLayout
-  src/pages/<Name>/    Login, Setup, Register, Hosts, HostDetail, Users, Invites, Account, NotFound
+  src/pages/<Name>/    Login, Setup, Register, Hosts, HostDetail, Users, Invites, Account, NotFound;
+                       M2: Servers (also `/`), ServerCreate, ServerDetail; component Console
 agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
   cmd/gss-agent        enrol | run | version | help
   cmd/gss-init         PID 1 in game containers (M2)
@@ -58,11 +65,14 @@ agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
   internal/hostfacts   Collector (+ _linux.go / _other.go)
   internal/docker      Engine API client over the unix socket (net/http only)
   internal/supervisor  agent's client for gss-init's socket (M2)
-  internal/servers     Manager: server lifecycle on the host (M2)
-  internal/initd       gss-init: Supervisor, steps/ (install step registry), configs/ (format registry)
+  internal/servers     Manager (manager.go), New(Options) + container/network naming and labels (new.go) (M2)
+  internal/initd       gss-init: Supervisor (initd.go), Console/Game/Launcher/RconClient interfaces (parts.go),
+                       steps/ (install step registry), configs/ (format registry)
   internal/paths       host paths (Layout)
   packaging/           gss-agent.service
-images/, games/        (M2/M3) base + minecraft-server images; starter definitions
+images/                build.sh (deno task images:build; local tags only), base/ (Dockerfile builds gss-init from
+                       agent/; Dockerfile.dockerignore), minecraft-server/ (ARG JAVA → :java8/17/21/25)
+games/                 built-in definition source: README.md, minecraft-java/{game.yml, hooks/install.sh}
 docs/                  blueprint.html
 ```
 
@@ -227,3 +237,92 @@ Report it back instead of editing.
 Order: A and B and C run in parallel against these contracts. C can stub responses until A lands; B can insert an
 enrol token row by hand until A's route works. Integration (main): one real enrol on this machine, host online in
 the UI.
+
+## M2: first server
+
+### Run flow and contracts
+
+```
+browser ─POST /api/servers─► ServerController ─► GameServerService.create
+   access + SERVERS_CREATE + grant ─► DefinitionEngine.resolveVariables/resolveLimits ─► Quota.assertFits (no-op
+   until M5) + host capacity ─► PortAllocation.allocate ─► row (creating) ─► DefinitionEngine.buildSpec
+   ─► AgentGateway.request("server.provision", { spec, specHash, reinstall: true })
+agent: servers.Manager.Provision ─► <root>/servers/<id>/{data, spec/spec.json + spec/files/**, run/}
+   ─► image (inspect; pull only if missing) ─► network gss-<id> ─► container gss-<id> (limits, CapDrop ALL, binds,
+   ports host=container) ─► start ─► gss-init: install steps ─► state events
+gss-init ─state/console (NDJSON, /gss/run/init.sock)─► agent ─server.state / server.console─► panel
+   ─► GameServerService.applyStateChange (row + `server.state` live) / forwardConsole (`server.console` to topic
+   `server:<id>`)
+```
+
+- **Container layout:** host `<root>/servers/<id>/data` → `/data` (rw), `spec/` → `/gss/spec` (ro: `spec.json` =
+  `InitSpec`, `files/<definition-relative path>`), `run/` → `/gss/run` (rw, `init.sock`). Names and labels:
+  `agent/internal/servers/new.go`.
+- **Templates are rendered by the panel.** The agent and gss-init never see `{{…}}`. Hook files travel in
+  `ServerSpec.files`; template configs travel rendered in `ConfigMapping.content`.
+- **Images:** bare `ionnet-gss-*` in game.yml → `${IMAGE_REGISTRY}/ionnet-gss-*` (`:latest` when untagged).
+  `images/build.sh` tags locally; agents pull only when an image is missing.
+- **States:** gss-init owns `installing → stopped ⇄ starting → running → stopping`, `install_failed`, `crashed`; the
+  panel row starts as `creating`. `installProgress` (step/total/name) is in `ServerStatus`, `StateChange`,
+  `InitStatus` and the `server.state` live event.
+- **Reconnect:** `hello.servers` is the agent's inventory; `GameServerService.reconcile` re-provisions stopped servers
+  whose `specHash` differs and never deletes unknown ones. An agent restart reattaches to sockets and catches up
+  with `backlog(afterSeq)`.
+- **Settings** change only while stopped (409 otherwise) and re-provision; a `reinstall` variable sets
+  `reinstall: true`.
+- **Console:** the client subscribes to `server:<id>` (LiveGateway checks `GameServerService.canAccess`, answers
+  `subscribed`), then `GET /api/servers/:id/console`, and dedupes by `seq`. Input is `POST /api/servers/:id/console`.
+- **Not in M2:** stats (M4), derived images for `packages` (the agent answers `unsupported`), `steamcmd`,
+  `options_from`, config formats other than `properties` and `template` (M3).
+
+### API routes (M2)
+
+Access: `O` = owner or SERVERS_MANAGE_ALL (else 404).
+
+| Method | Path | Auth | Body | Response |
+| --- | --- | --- | --- | --- |
+| GET | /api/definitions | S | | `DefinitionDto[]` (active) |
+| GET | /api/definitions/:id | S | | `DefinitionDto` |
+| GET | /api/servers | S | | `GameServerDto[]` (own; all with SERVERS_MANAGE_ALL) |
+| POST | /api/servers | P:SERVERS_CREATE | `CreateServerBody` | 201 `GameServerDetailResponse`; 400, 403 grant, 409 quota/capacity/ports/offline |
+| GET | /api/servers/:id | O | | `GameServerDetailResponse` |
+| PATCH | /api/servers/:id | O | `UpdateServerBody` | `UpdateServerResponse`; 409 not stopped |
+| POST | /api/servers/:id/start | O | | `GameServerDto`; 409 offline/running/disk |
+| POST | /api/servers/:id/stop | O | `StopServerBody` | `GameServerDto` |
+| POST | /api/servers/:id/restart | O | | `GameServerDto` |
+| POST | /api/servers/:id/reinstall | O | | `GameServerDto`; 409 running |
+| DELETE | /api/servers/:id?keepData=true | O | | `OkResponse`; 409 offline |
+| GET | /api/servers/:id/console?limit= | O | | `ConsoleBacklogResponse` |
+| POST | /api/servers/:id/console | O | `ConsoleInputBody` | `OkResponse`; 409 not running |
+
+Live: `server.updated` (refetch), `server.state` (apply in place), `server.console` (topic `server:<id>`), frames
+`subscribed` / `error { topic }`. Client routes: `/` and `/servers`, `/servers/new`, `/servers/<uuid>`.
+
+### Boundaries added in M2
+
+| From | May import | Never |
+| --- | --- | --- |
+| `server/src/servers/*` | `models/index.ts`, `definitions/*`, `AgentGateway`, `LiveGateway`, lib, `@shared` | Hono `Context` |
+| `controllers/ServerController`, `DefinitionController` | `GameServerService`, models (definitions list), lib | `AgentGateway` directly |
+| agent handlers `serverState.ts`, `serverConsole.ts`, `hello.ts` (reconcile) | `GameServerService` | models for servers directly |
+| `definitions/loaders/*` | `node:fs`, models (types), lib | `DefinitionEngine` (DefinitionSync validates) |
+| `agent/internal/servers` | `docker`, `supervisor`, `paths`, `protocol` | `panel` (it reports through `Sink`) |
+| `agent/internal/initd/**` | `protocol`, stdlib (+ `golang.org/x/sys` / a pty package if needed: ask main) | `docker`, `panel`, `servers` |
+
+## M2 work split
+
+Main-session-only files (same as M1, plus): `protocol/schema/*` (ask; the M2 contracts are fixed),
+`server/src/controllers/ApiController.ts`, `server/src/migrations/*`, `server/src/index.ts`, `server/src/Config.ts`,
+`client/src/routes.tsx`, `client/src/components/AppLayout/AppLayout.tsx`, `shared/api/{servers,definitions}.ts`,
+`shared/live.ts`, `agent/go.mod` + `go.sum` (a pty dependency for A is added by main on request), `deno.json`.
+
+| Parcel | Difficulty | Owns | Verify on its own |
+| --- | --- | --- | --- |
+| **A: gss-init + images** | **Hard** (PID 1, pty, signals, process groups, races): `builder-opus` | `agent/cmd/gss-init/**`, `agent/internal/initd/**` (incl. `steps/`, `configs/`), `images/**` | `make lint`; `deno task images:build`; `docker run --rm -v $PWD/scratch/data:/data -v $PWD/scratch/spec:/gss/spec:ro -v $PWD/scratch/run:/gss/run ghcr.io/ionnet-dev/ionnet-gss-minecraft-server:java21` with a hand-written `spec.json` (download + write steps, a `properties` mapping, `start: java -jar server.jar nogui`). Then a 30-line Go or Deno NDJSON client on `scratch/run/init.sock`: `status` → `install` → events until `stopped` → `start` → `running` on the ready pattern → `input "say hi"` → `backlog` → `stop` → `stopped`; `kill -9` the game → `crashed`; `docker stop` → graceful stop first; no zombies (`ps`) |
+| **B: agent servers, Docker, supervisor client, handlers** | **Hard** (Docker API, reconcile, socket reattach): `builder-opus` | `agent/internal/{docker,servers,supervisor,agent}/**`, `agent/internal/paths/**`, `agent/internal/panel/**` (event buffering while offline) | `make lint`; a fake gss-init (`agent/internal/supervisor/fakeinit_test.go` style scratch program, or A's image once it exists) answering the socket. Drive the Manager from a scratch `cmd` (not committed) with a hand-written `ProvisionRequest`: folders and files written, container created with the right limits/caps/binds/ports (`docker inspect`), start/stop/restart/delete, agent restart → `Restore` reattaches, `Statuses()` correct. Then with a real panel: `server.provision` sent by hand from `deno eval` through `AgentGateway.request` |
+| **C: panel definitions, servers, console fan-out, Minecraft definition** | Medium–hard (engine + orchestration): `builder` (escalate if stuck) | `server/src/definitions/**`, `server/src/servers/**`, `server/src/controllers/{Server,Definition}Controller.ts`, `server/src/gateways/agent/handlers/{serverState,serverConsole,hello}.ts`, `server/src/gateways/live/LiveGateway.ts` (subscribe case only), `server/src/models/{GameServer,Definition,Source,PortAllocation,Quota}.ts`, `games/**` | `deno task check`; a `src/test.ts`-style scratch script: parse + resolve + render `games/minecraft-java` to a `ServerSpec` and print it (no TODOs left in output). With the dev panel and **no agent**: `GET /api/definitions` lists minecraft-java; `POST /api/servers` → 409 offline and no row left; with a scratch WebSocket client acting as the agent (hello with a real host credential, answers `server.provision` with a `ServerStatus`, then sends `server.state` / `server.console`): row states change, `server.state` and topic `server.console` reach a `/ws/live` client, a non-owner's subscribe is refused. Run `hooks/install.sh` locally in `docker run debian` with `GSS_VAR_*` to fetch vanilla and paper jars |
+| **D: web app servers** | Medium: `builder` | `client/src/pages/{Servers,ServerCreate,ServerDetail}/**`, `client/src/components/Console/**` (+ new components such as `VariableForm/`, `ServerState/`), `client/src/Api/{Server,Definition}Api.ts`, `client/src/live/LiveSocket.ts` (topics) | `npm run typecheck && npm run build`; headless Playwright against `deno task dev` with route mocks (`page.route("/api/servers*")`) and a mocked `/ws/live` (or C's panel once it lands): list → create flow (form generated from the minecraft-java DefinitionDto) → detail with state badge and install progress → console renders backlog + live lines and sends input → settings disabled while running. Screenshots light + dark |
+
+Order: all four in parallel. A and B meet at the socket protocol (`supervisor.json`), B and C at `server.json`, C
+and D at `shared/api/servers.ts` and `shared/live.ts`. Integration (main): `deno task images:build`, one real
+Minecraft server created from the UI on this machine, joinable at the shown address.

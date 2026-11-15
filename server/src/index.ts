@@ -8,6 +8,7 @@ import { runPendingMigrations } from "./migrate.ts";
 import { createApp } from "./App.ts";
 import { AgentGateway } from "./gateways/agent/AgentGateway.ts";
 import { LiveGateway } from "./gateways/live/LiveGateway.ts";
+import { DefinitionSync } from "./definitions/DefinitionSync.ts";
 
 // Last-resort net: log instead of exiting, which would drop every agent and browser socket at once.
 globalThis.addEventListener("unhandledrejection", (event) => {
@@ -21,6 +22,7 @@ if (Config.AUTO_MIGRATE) {
   const applied = await runPendingMigrations();
   if (applied.length) console.log(`migrations applied: ${applied.join(", ")}`);
 }
+await DefinitionSync.syncBuiltin(); // games/ → definitions rows; logs failures, never throws.
 
 const app = createApp();
 AgentGateway.start();

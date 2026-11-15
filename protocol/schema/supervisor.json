@@ -5,7 +5,7 @@
   "description": "M2: the agent and gss-init (PID 1 in every game container). gss-init reads `InitSpec` from a mounted file and serves this protocol on a unix socket; the agent is the only client and may reconnect at any time.",
   "x-constants": {
     "INIT_SPEC_PATH": { "value": "/gss/spec/spec.json", "description": "Where gss-init reads its spec (read-only mount)." },
-    "INIT_HOOKS_DIR": { "value": "/gss/spec/hooks", "description": "Hook scripts, by their definition-relative path minus `hooks/`." },
+    "INIT_FILES_DIR": { "value": "/gss/spec/files", "description": "Definition files (hooks, templates) under their definition-relative path, e.g. /gss/spec/files/hooks/install.sh. Hook paths in the spec are relative to this folder." },
     "INIT_SOCKET_PATH": { "value": "/gss/run/init.sock", "description": "The supervisor socket inside the container (the run folder is a read-write mount)." },
     "INIT_DATA_PATH": { "value": "/data", "description": "The server's data folder inside the container." },
     "INIT_BACKLOG_LINES": { "value": 2000, "description": "Console lines kept in gss-init's ring buffer." },
@@ -101,9 +101,11 @@
         "exitCode": { "type": ["integer", "null"] },
         "installed": { "type": "boolean", "description": "Install completed at least once." },
         "restarts": { "type": "integer", "description": "Auto-restarts in the current window." },
-        "lastSeq": { "type": "integer", "description": "`seq` of the newest console line." }
+        "lastSeq": { "type": "integer", "description": "`seq` of the newest console line." },
+        "installProgress": { "oneOf": [{ "$ref": "server.json#/$defs/InstallProgress" }, { "type": "null" }] },
+        "reason": { "type": ["string", "null"], "description": "Cause of install_failed / crashed." }
       },
-      "required": ["state", "since", "pid", "exitCode", "installed", "restarts", "lastSeq"]
+      "required": ["state", "since", "pid", "exitCode", "installed", "restarts", "lastSeq", "installProgress", "reason"]
     },
     "InitStopRequest": {
       "type": "object",

@@ -5,7 +5,7 @@
  * Client → panel: `auth` first (within 10 s), then `subscribe` / `unsubscribe` for per-server streams (M2).
  * Panel → client: `ready` after auth, then `event` frames.
  */
-import type { ConsoleLine, ServerState, ServerStats } from "./protocol/protocol.gen.ts";
+import type { ConsoleLine, InstallProgress, ServerState, ServerStats } from "./protocol/protocol.gen.ts";
 
 /**
  * Every live event and its data. A `null` id means "the list changed, refetch it".
@@ -31,9 +31,17 @@ export interface LiveEvents {
   //#region M2
   // Created, edited or deleted. Audience: owner + SERVERS_MANAGE_ALL.
   "server.updated": { serverId: string | null };
-  // Audience: owner + SERVERS_MANAGE_ALL.
-  "server.state": { serverId: string; state: ServerState; exitCode: number | null; reason: string | null; at: string };
-  // Audience: subscribers of `server:<id>` only.
+  // Audience: owner + SERVERS_MANAGE_ALL. Clients update in place (no refetch needed).
+  "server.state": {
+    serverId: string;
+    state: ServerState;
+    exitCode: number | null;
+    reason: string | null;
+    installProgress: InstallProgress | null;
+    at: string;
+  };
+  // Audience: subscribers of `server:<id>` only. Subscribing checks access (owner or SERVERS_MANAGE_ALL); a refused
+  // subscribe answers `{ t: "error" }`. Backlog comes from `GET /api/servers/:id/console`.
   "server.console": { serverId: string; lines: ConsoleLine[] };
   // Audience: subscribers of `server:<id>` only.
   "server.stats": { serverId: string; stats: ServerStats };
@@ -54,7 +62,8 @@ export type LiveClientFrame =
 
 export type LiveServerFrame =
   | { t: "ready"; userId: number }
-  | { t: "error"; message: string }
+  | { t: "subscribed"; topic: LiveTopic } // M2: the subscribe was accepted; fetch the backlog now.
+  | { t: "error"; message: string; topic?: LiveTopic } // `topic` set when a subscribe was refused.
   | { [E in LiveEventName]: { t: "event"; event: E; data: LiveEvents[E] } }[LiveEventName];
 
 /**

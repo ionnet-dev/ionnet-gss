@@ -30,6 +30,8 @@ type Manager interface {
 	Statuses() []protocol.ServerStatus
 	Provision(ctx context.Context, req protocol.ProvisionRequest) (protocol.ServerStatus, error)
 	Start(ctx context.Context, serverID string) (protocol.ServerStatus, error)
+	// Restart stops gracefully, waits for `stopped`, then starts.
+	Restart(ctx context.Context, serverID string) (protocol.ServerStatus, error)
 	Stop(ctx context.Context, serverID string, kill bool) (protocol.ServerStatus, error)
 	Delete(ctx context.Context, serverID string, keepData bool) error
 	Input(ctx context.Context, serverID, line string) error

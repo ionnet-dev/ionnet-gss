@@ -108,6 +108,12 @@ function load() {
     // Hosts
     DEFAULT_PORT_POOL: readString("DEFAULT_PORT_POOL", "25565-25664,27015-27064"),
 
+    // Games
+    /** The built-in definition source: the repo's own games/ folder, relative to the repo root. */
+    GAMES_DIR: readString("GAMES_DIR", "games"),
+    /** Registry prefix for bare `ionnet-gss-*` image names in game.yml; untagged ones get `:latest`. */
+    IMAGE_REGISTRY: readString("IMAGE_REGISTRY", "ghcr.io/ionnet-dev").replace(/\/+$/, ""),
+
     // Quotas (used where a user's own quota field is null)
     DEFAULT_QUOTA_SERVERS: readInt("DEFAULT_QUOTA_SERVERS", 2, 0),
     DEFAULT_QUOTA_MEMORY_MB: readInt("DEFAULT_QUOTA_MEMORY_MB", 4096, 0),

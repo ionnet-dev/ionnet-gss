@@ -1,0 +1,69 @@
+# Minecraft: Java Edition (vanilla or Paper). M2 skeleton: the keys are final, the hook is the builder's (C).
+id: minecraft-java
+name: "Minecraft: Java Edition"
+image: ionnet-gss-minecraft-server:java{{vars.java}}
+
+variables:
+  - key: flavour
+    label: Server software
+    type: select
+    options: [vanilla, paper]
+    default: paper
+    reinstall: true
+  - key: version
+    label: Minecraft version
+    description: A release like 1.21.4, or "latest".
+    type: string
+    default: latest
+    reinstall: true
+  - key: java
+    label: Java
+    type: select
+    options: ["8", "17", "21", "25"]
+    default: "21"
+  - key: memory
+    label: Memory
+    type: number
+    unit: MB
+    default: 2048
+    bind: limits.memory
+  - key: motd
+    label: Message of the day
+    type: string
+    default: A Minecraft Server
+  - key: rcon_password
+    type: secret
+    generate: 24
+
+ports:
+  - { name: game, proto: tcp, default: 25565 }
+  - { name: rcon, proto: tcp, default: 25575, internal: true }
+
+install:
+  - hook: hooks/install.sh
+  - write: { file: eula.txt, content: "eula=true\n" }
+
+configs:
+  - file: server.properties
+    format: properties
+    set:
+      server-port: "{{ports.game}}"
+      motd: "{{vars.motd}}"
+      enable-rcon: "true"
+      rcon.port: "{{ports.rcon}}"
+      rcon.password: "{{vars.rcon_password}}"
+
+# -Xmx leaves room for the JVM's own overhead inside the container's memory limit.
+start: java -Xms512M -Xmx{{vars.memory}}M -jar server.jar nogui
+ready: { log: 'Done \(\d' }
+stop: { command: stop, timeout: 60 }
+
+console: { input: stdin }
+players:
+  join: '(\w+) joined the game'
+  leave: '(\w+) left the game'
+
+backup:
+  before: [save-off, save-all flush]
+  after: [save-on]
+  exclude: [logs/, cache/]

@@ -15,6 +15,11 @@
       "description": "Start the game (gss-init configures first). Refused when the server is over its disk limit."
     },
     {
+      "channel": "agent", "type": "server.restart", "kind": "request", "from": "panel", "milestone": 2,
+      "request": "ServerRef", "response": "ServerStatus",
+      "description": "Graceful stop (spec timeout, then kill), wait for `stopped`, then start. Answers when the start has begun."
+    },
+    {
       "channel": "agent", "type": "server.stop", "kind": "request", "from": "panel", "milestone": 2,
       "request": "StopRequest", "response": "ServerStatus",
       "description": "Stop the game. Answers when the stop has begun; the final state arrives as `server.state`."
@@ -68,9 +73,11 @@
         "state": { "$ref": "#/$defs/ServerState" },
         "since": { "type": "string", "format": "date-time" },
         "exitCode": { "type": ["integer", "null"], "description": "Last exit code of the game process; null when it has not exited." },
-        "specHash": { "type": "string", "description": "SHA-256 of the spec the server currently runs, as sent in `ProvisionRequest`." }
+        "specHash": { "type": "string", "description": "SHA-256 of the spec the server currently runs, as sent in `ProvisionRequest`. In `hello`, a hash that differs from the panel's makes the panel re-provision (while stopped)." },
+        "installProgress": { "oneOf": [{ "$ref": "#/$defs/InstallProgress" }, { "type": "null" }] },
+        "reason": { "type": ["string", "null"], "description": "Cause of install_failed / crashed, as in the last StateChange." }
       },
-      "required": ["serverId", "state", "since", "exitCode", "specHash"]
+      "required": ["serverId", "state", "since", "exitCode", "specHash", "installProgress", "reason"]
     },
     "ServerRef": {
       "type": "object",
@@ -100,12 +107,12 @@
         "ports": { "type": "array", "items": { "$ref": "#/$defs/PortBinding" } },
         "limits": { "$ref": "#/$defs/Limits" },
         "autostart": { "type": "boolean", "description": "Start again after a host reboot if it was running." },
-        "hooks": { "type": "array", "items": { "$ref": "#/$defs/HookFile" }, "description": "Every hook script the spec references, written to /gss/spec/hooks/." },
+        "files": { "type": "array", "items": { "$ref": "#/$defs/SpecFile" }, "description": "Every definition file the spec references (hooks; templates are already rendered into ConfigMapping.content). The agent writes them below the server's spec folder (INIT_FILES_DIR in the container), hooks mode 0755, replacing the folder on every provision." },
         "services": { "type": "object", "additionalProperties": { "$ref": "definition.json#/$defs/ServiceSpec" } },
         "backup": { "$ref": "definition.json#/$defs/BackupSpec" },
         "init": { "$ref": "supervisor.json#/$defs/InitSpec" }
       },
-      "required": ["serverId", "name", "definition", "image", "packages", "ports", "limits", "autostart", "hooks", "services", "init"]
+      "required": ["serverId", "name", "definition", "image", "packages", "ports", "limits", "autostart", "files", "services", "init"]
     },
     "DefinitionRef": {
       "type": "object",
@@ -138,13 +145,24 @@
       },
       "required": ["memoryMb", "cpuMillis", "pids", "diskMb"]
     },
-    "HookFile": {
+    "SpecFile": {
       "type": "object",
       "properties": {
-        "path": { "type": "string", "description": "Path relative to the definition folder, e.g. `hooks/install.sh`." },
-        "content": { "type": "string" }
+        "path": { "type": "string", "description": "Path relative to the definition folder, e.g. `hooks/install.sh`. No `..`, no leading `/`." },
+        "content": { "type": "string" },
+        "executable": { "type": "boolean", "description": "Write with mode 0755 (hooks)." }
       },
-      "required": ["path", "content"]
+      "required": ["path", "content", "executable"]
+    },
+    "InstallProgress": {
+      "type": "object",
+      "description": "Where a running install is. Present only in state `installing`.",
+      "properties": {
+        "step": { "type": "integer", "description": "1-based index of the running step." },
+        "total": { "type": "integer" },
+        "name": { "type": "string", "description": "Step type, e.g. `download`." }
+      },
+      "required": ["step", "total", "name"]
     },
     "StopRequest": {
       "type": "object",
@@ -216,9 +234,10 @@
         "previous": { "$ref": "#/$defs/ServerState" },
         "at": { "type": "string", "format": "date-time" },
         "exitCode": { "type": ["integer", "null"] },
-        "reason": { "type": ["string", "null"], "description": "Readable cause for failures, e.g. `Install step 2 (download) failed: sha256 mismatch.`" }
+        "reason": { "type": ["string", "null"], "description": "Readable cause for failures, e.g. `Install step 2 (download) failed: sha256 mismatch.`" },
+        "installProgress": { "oneOf": [{ "$ref": "#/$defs/InstallProgress" }, { "type": "null" }], "description": "Set while installing; gss-init sends a `state` event (installing → installing) at the start of every step." }
       },
-      "required": ["serverId", "state", "previous", "at", "exitCode", "reason"]
+      "required": ["serverId", "state", "previous", "at", "exitCode", "reason", "installProgress"]
     },
     "StatsBatch": {
       "type": "object",

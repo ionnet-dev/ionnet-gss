@@ -48,6 +48,16 @@ export class Quota extends Model<InferAttributes<Quota>, InferCreationAttributes
     throw HttpError.notImplemented("Quota.getEffective"); // TODO(builder): M5
   }
 
+  /**
+   * Refuse a new server or a limit change that would exceed the owner's quota (admins pass). M2: always passes; M5
+   * fills it in with `getEffective()`.
+   * @param delta What the change adds: one more server and/or more memory/CPU/disk.
+   * @throws HttpError 409 naming the limit, e.g. "This would use 6144 MB of RAM; your quota is 4096 MB."
+   */
+  public static async assertFits(userId: number, delta: { servers: number; memoryMb: number; cpuMillis: number; diskMb: number }): Promise<void> {
+    // TODO(builder): M5
+  }
+
   public toClientJSON(): QuotaDto {
     return {
       maxServers: this.maxServers,

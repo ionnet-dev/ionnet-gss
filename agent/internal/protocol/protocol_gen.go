@@ -29,8 +29,8 @@ const (
 	CloseEnrolled = 4000
 	// InitSpecPath where gss-init reads its spec (read-only mount).
 	InitSpecPath = "/gss/spec/spec.json"
-	// InitHooksDir hook scripts, by their definition-relative path minus hooks/.
-	InitHooksDir = "/gss/spec/hooks"
+	// InitFilesDir definition files (hooks, templates) under their definition-relative path, e.g. /gss/spec/files/hooks/install.sh. Hook paths in the spec are relative to this folder.
+	InitFilesDir = "/gss/spec/files"
 	// InitSocketPath the supervisor socket inside the container (the run folder is a read-write mount).
 	InitSocketPath = "/gss/run/init.sock"
 	// InitDataPath the server's data folder inside the container.
@@ -444,8 +444,11 @@ type ServerStatus struct {
 	Since    time.Time   `json:"since"`
 	// ExitCode last exit code of the game process; null when it has not exited.
 	ExitCode *int64 `json:"exitCode"`
-	// SpecHash SHA-256 of the spec the server currently runs, as sent in ProvisionRequest.
-	SpecHash string `json:"specHash"`
+	// SpecHash SHA-256 of the spec the server currently runs, as sent in ProvisionRequest. In hello, a hash that differs from the panel's makes the panel re-provision (while stopped).
+	SpecHash        string           `json:"specHash"`
+	InstallProgress *InstallProgress `json:"installProgress"`
+	// Reason cause of install_failed / crashed, as in the last StateChange.
+	Reason *string `json:"reason"`
 }
 
 // ServerRef is defined in protocol/schema/server.json.
@@ -474,8 +477,8 @@ type ServerSpec struct {
 	Limits     Limits        `json:"limits"`
 	// Autostart start again after a host reboot if it was running.
 	Autostart bool `json:"autostart"`
-	// Hooks every hook script the spec references, written to /gss/spec/hooks/.
-	Hooks    []HookFile             `json:"hooks"`
+	// Files every definition file the spec references (hooks; templates are already rendered into ConfigMapping.content). The agent writes them below the server's spec folder (INIT_FILES_DIR in the container), hooks mode 0755, replacing the folder on every provision.
+	Files    []SpecFile             `json:"files"`
 	Services map[string]ServiceSpec `json:"services"`
 	Backup   *BackupSpec            `json:"backup,omitempty"`
 	Init     InitSpec               `json:"init"`
@@ -510,11 +513,22 @@ type Limits struct {
 	DiskMB int64 `json:"diskMb"`
 }
 
-// HookFile is defined in protocol/schema/server.json.
-type HookFile struct {
-	// Path path relative to the definition folder, e.g. hooks/install.sh.
+// SpecFile is defined in protocol/schema/server.json.
+type SpecFile struct {
+	// Path path relative to the definition folder, e.g. hooks/install.sh. No .., no leading /.
 	Path    string `json:"path"`
 	Content string `json:"content"`
+	// Executable write with mode 0755 (hooks).
+	Executable bool `json:"executable"`
+}
+
+// InstallProgress where a running install is. Present only in state installing.
+type InstallProgress struct {
+	// Step 1-based index of the running step.
+	Step  int64 `json:"step"`
+	Total int64 `json:"total"`
+	// Name step type, e.g. download.
+	Name string `json:"name"`
 }
 
 // StopRequest is defined in protocol/schema/server.json.
@@ -584,6 +598,8 @@ type StateChange struct {
 	ExitCode *int64      `json:"exitCode"`
 	// Reason readable cause for failures, e.g. Install step 2 (download) failed: sha256 mismatch.
 	Reason *string `json:"reason"`
+	// InstallProgress set while installing; gss-init sends a state event (installing → installing) at the start of every step.
+	InstallProgress *InstallProgress `json:"installProgress"`
 }
 
 // StatsBatch is defined in protocol/schema/server.json.
@@ -662,7 +678,10 @@ type InitStatus struct {
 	// Restarts auto-restarts in the current window.
 	Restarts int64 `json:"restarts"`
 	// LastSeq seq of the newest console line.
-	LastSeq int64 `json:"lastSeq"`
+	LastSeq         int64            `json:"lastSeq"`
+	InstallProgress *InstallProgress `json:"installProgress"`
+	// Reason cause of install_failed / crashed.
+	Reason *string `json:"reason"`
 }
 
 // InitStopRequest is defined in protocol/schema/supervisor.json.
@@ -694,6 +713,8 @@ const (
 	MsgServerProvision = "server.provision"
 	// MsgServerStart: panel → agent, request ServerRef, response ServerStatus (M2).
 	MsgServerStart = "server.start"
+	// MsgServerRestart: panel → agent, request ServerRef, response ServerStatus (M2).
+	MsgServerRestart = "server.restart"
 	// MsgServerStop: panel → agent, request StopRequest, response ServerStatus (M2).
 	MsgServerStop = "server.stop"
 	// MsgServerDelete: panel → agent, request DeleteRequest, response Empty (M2).
@@ -748,6 +769,7 @@ var Messages = []MessageSpec{
 	{Channel: "agent", Type: "heartbeat", Kind: MessageKindEvent, From: "agent", Milestone: 1},
 	{Channel: "agent", Type: "server.provision", Kind: MessageKindRequest, From: "panel", Milestone: 2},
 	{Channel: "agent", Type: "server.start", Kind: MessageKindRequest, From: "panel", Milestone: 2},
+	{Channel: "agent", Type: "server.restart", Kind: MessageKindRequest, From: "panel", Milestone: 2},
 	{Channel: "agent", Type: "server.stop", Kind: MessageKindRequest, From: "panel", Milestone: 2},
 	{Channel: "agent", Type: "server.delete", Kind: MessageKindRequest, From: "panel", Milestone: 2},
 	{Channel: "agent", Type: "server.input", Kind: MessageKindRequest, From: "panel", Milestone: 2},

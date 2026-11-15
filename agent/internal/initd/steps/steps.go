@@ -15,7 +15,7 @@ var ErrNotImplemented = errors.New("install step: not implemented")
 // Env is what every step gets.
 type Env struct {
 	DataPath string            // /data
-	HooksDir string            // /gss/spec/hooks
+	FilesDir string            // /gss/spec/files; a `hook` step runs FilesDir/<hook path>.
 	UID      int               // GAME_UID; steps that run programs drop to it.
 	Vars     map[string]string // InitSpec.Env
 	// Output receives the step's console output (stream "output"); gss-init adds "system" lines around each step.

@@ -116,6 +116,7 @@ func (a *Agent) handlers() panel.Handlers {
 			// MsgServerBacklog → a.Servers.
 			protocol.MsgServerProvision: unsupported,
 			protocol.MsgServerStart:     unsupported,
+			protocol.MsgServerRestart:   unsupported,
 			protocol.MsgServerStop:      unsupported,
 			protocol.MsgServerDelete:    unsupported,
 			protocol.MsgServerInput:     unsupported,

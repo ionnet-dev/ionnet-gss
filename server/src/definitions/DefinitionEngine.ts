@@ -3,7 +3,7 @@
  * Pure: no database, no agent. `ServerController` (M2) and the source sync (M3) call it.
  */
 import { parse as parseYaml } from "@std/yaml";
-import type { GameDefinition, PortBinding, ServerSpec } from "@shared/protocol/protocol.gen.ts";
+import type { GameDefinition, PortBinding, ServerSpec, VariableDecl } from "@shared/protocol/protocol.gen.ts";
 import { HttpError } from "../lib/HttpError.ts";
 
 export namespace DefinitionEngine {
@@ -46,6 +46,41 @@ export namespace DefinitionEngine {
    */
   export function resolve(definitions: Map<string, GameDefinition>, id: string): GameDefinition {
     throw HttpError.notImplemented("DefinitionEngine.resolve"); // TODO(builder): M2
+  }
+
+  /**
+   * Validate submitted values against the declarations and fill the rest: type checks (`number` finite, `select` in
+   * `options`, `boolean`), unknown keys refused, `admin_only` refused for non-admins, defaults applied, `secret` with
+   * `generate` created once (kept from `previous` when present; "" regenerates).
+   * @param previous The server's stored values (settings change), or null at create.
+   * @throws HttpError 400 naming the variable.
+   */
+  export function resolveVariables(
+    decls: VariableDecl[],
+    submitted: Record<string, string | number | boolean>,
+    previous: Record<string, string | number | boolean> | null,
+    isAdmin: boolean,
+  ): { values: Record<string, string | number | boolean>; reinstall: boolean } {
+    throw HttpError.notImplemented("DefinitionEngine.resolveVariables"); // TODO(builder): C
+  }
+
+  /**
+   * The limits implied by `bind` variables (limits.memory → memoryMb, …), falling back to `defaults`.
+   */
+  export function resolveLimits(
+    decls: VariableDecl[],
+    values: Record<string, string | number | boolean>,
+    defaults: ServerSpec["limits"],
+  ): ServerSpec["limits"] {
+    throw HttpError.notImplemented("DefinitionEngine.resolveLimits"); // TODO(builder): C
+  }
+
+  /**
+   * Bare `ionnet-gss-*` names get IMAGE_REGISTRY (`ionnet-gss-base` → `ghcr.io/ionnet-dev/ionnet-gss-base:latest`);
+   * anything with a registry or a slash is left alone. Applied after rendering.
+   */
+  export function resolveImage(image: string, registry: string): string {
+    throw HttpError.notImplemented("DefinitionEngine.resolveImage"); // TODO(builder): C
   }
 
   /**

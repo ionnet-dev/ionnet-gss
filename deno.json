@@ -23,6 +23,7 @@
     "migrate": "deno run -A --env-file=.env server/src/migrate.ts",
     "protocol": "deno run --allow-read --allow-write=shared/protocol,agent/internal/protocol --allow-run=gofmt protocol/generate.ts",
     "build": "cd client && npm run build",
+    "images:build": "bash images/build.sh",
     "db:up": "docker compose -f docker-compose.dev.yml up -d --wait",
     "db:down": "docker compose -f docker-compose.dev.yml down",
     "check": "deno check server/src/index.ts server/src/migrate.ts server/src/definitions/DefinitionEngine.ts shared/index.ts protocol/generate.ts &&deno task protocol --check && deno lint && cd client && npm run typecheck",

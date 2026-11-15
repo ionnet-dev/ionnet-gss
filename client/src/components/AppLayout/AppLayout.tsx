@@ -17,7 +17,8 @@ export default function AppLayout(props: AppLayoutProps) {
   const { children } = props;
   const auth = useAuth();
   const path = useLocation().split("?")[0];
-  const onHosts = path === "/" || path.startsWith("/hosts");
+  const onHosts = path.startsWith("/hosts");
+  const onServers = path === "/" || path.startsWith("/servers");
 
   return (
     <AppShell
@@ -27,6 +28,7 @@ export default function AppLayout(props: AppLayoutProps) {
           logo={<Icon icon={Gamepad2} size="md" />}
           footer={<NavItem icon={UserRound} label={auth.user?.username ?? "Account"} active={path === "/account"} href="/account" render={<Link to="/account" />} />}
         >
+          <NavItem icon={Gamepad2} label="Servers" active={onServers} href="/servers" render={<Link to="/servers" />} />
           {auth.has("HOSTS_VIEW") && <NavItem icon={Server} label="Hosts" active={onHosts} href="/hosts" render={<Link to="/hosts" />} />}
           {(auth.has("USERS_MANAGE") || auth.has("INVITES_MANAGE")) && (
             <NavSection label="Manage">
@@ -38,6 +40,7 @@ export default function AppLayout(props: AppLayoutProps) {
       }
       tabBar={
         <TabBar aria-label="Main">
+          <TabBarItem icon={Gamepad2} label="Servers" active={onServers} render={<Link to="/servers" />} />
           {auth.has("HOSTS_VIEW") && <TabBarItem icon={Server} label="Hosts" active={onHosts} render={<Link to="/hosts" />} />}
           {auth.has("USERS_MANAGE") && <TabBarItem icon={Users} label="Users" active={path === "/users"} render={<Link to="/users" />} />}
           {auth.has("INVITES_MANAGE") && <TabBarItem icon={Ticket} label="Invites" active={path === "/invites"} render={<Link to="/invites" />} />}

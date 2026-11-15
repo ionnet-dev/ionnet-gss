@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import type { AppEnv } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { AuthController } from "./AuthController.ts";
+import { DefinitionController } from "./DefinitionController.ts";
+import { ServerController } from "./ServerController.ts";
 import { EnrolTokenController } from "./EnrolTokenController.ts";
 import { HostController } from "./HostController.ts";
 import { InviteController } from "./InviteController.ts";
@@ -22,8 +24,8 @@ export namespace ApiController {
   router.route("/invites", InviteController.router);
   router.route("/hosts", HostController.router);
   router.route("/enrol-tokens", EnrolTokenController.router);
-  // M2: router.route("/servers", ServerController.router);
-  // M2: router.route("/definitions", DefinitionController.router);
+  router.route("/servers", ServerController.router);
+  router.route("/definitions", DefinitionController.router);
   // M3: router.route("/sources", SourceController.router);
   // M4: router.route("/servers/:id/files", FileController.router); /backups → BackupController
 

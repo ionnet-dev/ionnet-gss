@@ -52,9 +52,9 @@ export const CLOSE_ENROLLED = 4000;
 export const INIT_SPEC_PATH = "/gss/spec/spec.json";
 
 /**
- * Hook scripts, by their definition-relative path minus `hooks/`.
+ * Definition files (hooks, templates) under their definition-relative path, e.g. /gss/spec/files/hooks/install.sh. Hook paths in the spec are relative to this folder.
  */
-export const INIT_HOOKS_DIR = "/gss/spec/hooks";
+export const INIT_FILES_DIR = "/gss/spec/files";
 
 /**
  * The supervisor socket inside the container (the run folder is a read-write mount).
@@ -546,9 +546,14 @@ export interface ServerStatus {
    */
   exitCode: number | null;
   /**
-   * SHA-256 of the spec the server currently runs, as sent in `ProvisionRequest`.
+   * SHA-256 of the spec the server currently runs, as sent in `ProvisionRequest`. In `hello`, a hash that differs from the panel's makes the panel re-provision (while stopped).
    */
   specHash: string;
+  installProgress: InstallProgress | null;
+  /**
+   * Cause of install_failed / crashed, as in the last StateChange.
+   */
+  reason: string | null;
 }
 
 export interface ServerRef {
@@ -586,9 +591,9 @@ export interface ServerSpec {
    */
   autostart: boolean;
   /**
-   * Every hook script the spec references, written to /gss/spec/hooks/.
+   * Every definition file the spec references (hooks; templates are already rendered into ConfigMapping.content). The agent writes them below the server's spec folder (INIT_FILES_DIR in the container), hooks mode 0755, replacing the folder on every provision.
    */
-  hooks: HookFile[];
+  files: SpecFile[];
   services: Record<string, ServiceSpec>;
   backup?: BackupSpec;
   init: InitSpec;
@@ -638,12 +643,31 @@ export interface Limits {
   diskMb: number;
 }
 
-export interface HookFile {
+export interface SpecFile {
   /**
-   * Path relative to the definition folder, e.g. `hooks/install.sh`.
+   * Path relative to the definition folder, e.g. `hooks/install.sh`. No `..`, no leading `/`.
    */
   path: string;
   content: string;
+  /**
+   * Write with mode 0755 (hooks).
+   */
+  executable: boolean;
+}
+
+/**
+ * Where a running install is. Present only in state `installing`.
+ */
+export interface InstallProgress {
+  /**
+   * 1-based index of the running step.
+   */
+  step: number;
+  total: number;
+  /**
+   * Step type, e.g. `download`.
+   */
+  name: string;
 }
 
 export interface StopRequest {
@@ -713,6 +737,10 @@ export interface StateChange {
    * Readable cause for failures, e.g. `Install step 2 (download) failed: sha256 mismatch.`
    */
   reason: string | null;
+  /**
+   * Set while installing; gss-init sends a `state` event (installing → installing) at the start of every step.
+   */
+  installProgress: InstallProgress | null;
 }
 
 export interface StatsBatch {
@@ -811,6 +839,11 @@ export interface InitStatus {
    * `seq` of the newest console line.
    */
   lastSeq: number;
+  installProgress: InstallProgress | null;
+  /**
+   * Cause of install_failed / crashed.
+   */
+  reason: string | null;
 }
 
 export interface InitStopRequest {
@@ -895,6 +928,10 @@ export interface PanelToAgentRequests {
    * Start the game (gss-init configures first). Refused when the server is over its disk limit. (M2)
    */
   "server.start": { request: ServerRef; response: ServerStatus };
+  /**
+   * Graceful stop (spec timeout, then kill), wait for `stopped`, then start. Answers when the start has begun. (M2)
+   */
+  "server.restart": { request: ServerRef; response: ServerStatus };
   /**
    * Stop the game. Answers when the stop has begun; the final state arrives as `server.state`. (M2)
    */
@@ -989,6 +1026,7 @@ export const MESSAGES: readonly MessageSpec[] = [
   { channel: "agent", type: "heartbeat", kind: "event", from: "agent", milestone: 1 },
   { channel: "agent", type: "server.provision", kind: "request", from: "panel", milestone: 2 },
   { channel: "agent", type: "server.start", kind: "request", from: "panel", milestone: 2 },
+  { channel: "agent", type: "server.restart", kind: "request", from: "panel", milestone: 2 },
   { channel: "agent", type: "server.stop", kind: "request", from: "panel", milestone: 2 },
   { channel: "agent", type: "server.delete", kind: "request", from: "panel", milestone: 2 },
   { channel: "agent", type: "server.input", kind: "request", from: "panel", milestone: 2 },
