@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "server.json",
+  "title": "Server",
+  "description": "M2: game server lifecycle between panel and agent. The panel decides policy (quota, ports, secrets, templates); the agent only carries it out.",
+  "x-messages": [
+    {
+      "channel": "agent", "type": "server.provision", "kind": "request", "from": "panel", "milestone": 2,
+      "request": "ProvisionRequest", "response": "ServerStatus",
+      "description": "Create or update a server from a resolved spec: data folder, image (pull or derived build), network, container. Idempotent for an unchanged `specHash`."
+    },
+    {
+      "channel": "agent", "type": "server.start", "kind": "request", "from": "panel", "milestone": 2,
+      "request": "ServerRef", "response": "ServerStatus",
+      "description": "Start the game (gss-init configures first). Refused when the server is over its disk limit."
+    },
+    {
+      "channel": "agent", "type": "server.stop", "kind": "request", "from": "panel", "milestone": 2,
+      "request": "StopRequest", "response": "ServerStatus",
+      "description": "Stop the game. Answers when the stop has begun; the final state arrives as `server.state`."
+    },
+    {
+      "channel": "agent", "type": "server.delete", "kind": "request", "from": "panel", "milestone": 2,
+      "request": "DeleteRequest", "response": "Empty",
+      "description": "Remove container(s), network and, unless `keepData`, the server folder."
+    },
+    {
+      "channel": "agent", "type": "server.input", "kind": "request", "from": "panel", "milestone": 2,
+      "request": "InputRequest", "response": "Empty",
+      "description": "Send one console line (stdin or rcon, per the spec)."
+    },
+    {
+      "channel": "agent", "type": "server.backlog", "kind": "request", "from": "panel", "milestone": 2,
+      "request": "BacklogRequest", "response": "BacklogResponse",
+      "description": "Recent console lines from gss-init's ring buffer, for a browser that opens the console."
+    },
+    {
+      "channel": "agent", "type": "server.console", "kind": "event", "from": "agent", "milestone": 2,
+      "data": "ConsoleBatch",
+      "description": "New console lines, batched (at most every 100 ms per server)."
+    },
+    {
+      "channel": "agent", "type": "server.state", "kind": "event", "from": "agent", "milestone": 2,
+      "data": "StateChange",
+      "description": "A server changed state."
+    },
+    {
+      "channel": "agent", "type": "server.stats", "kind": "event", "from": "agent", "milestone": 2,
+      "data": "StatsBatch",
+      "description": "Docker stats for every running server, every 5 seconds."
+    },
+    {
+      "channel": "agent", "type": "server.player", "kind": "event", "from": "agent", "milestone": 4,
+      "data": "PlayerEvent",
+      "description": "A player joined or left (from the definition's `players` patterns)."
+    }
+  ],
+  "$defs": {
+    "ServerState": {
+      "type": "string",
+      "description": "creating → installing → stopped ⇄ starting → running → stopping → stopped; failures: install_failed, crashed.",
+      "enum": ["creating", "installing", "install_failed", "stopped", "starting", "running", "stopping", "crashed"]
+    },
+    "ServerStatus": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "state": { "$ref": "#/$defs/ServerState" },
+        "since": { "type": "string", "format": "date-time" },
+        "exitCode": { "type": ["integer", "null"], "description": "Last exit code of the game process; null when it has not exited." },
+        "specHash": { "type": "string", "description": "SHA-256 of the spec the server currently runs, as sent in `ProvisionRequest`." }
+      },
+      "required": ["serverId", "state", "since", "exitCode", "specHash"]
+    },
+    "ServerRef": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" }
+      },
+      "required": ["serverId"]
+    },
+    "ProvisionRequest": {
+      "type": "object",
+      "properties": {
+        "spec": { "$ref": "#/$defs/ServerSpec" },
+        "specHash": { "type": "string", "description": "SHA-256 of the canonical JSON of `spec`, computed by the panel." },
+        "reinstall": { "type": "boolean", "description": "Re-run install (a `reinstall` variable changed, or the user asked)." }
+      },
+      "required": ["spec", "specHash", "reinstall"]
+    },
+    "ServerSpec": {
+      "type": "object",
+      "description": "Everything the agent needs for one server, fully resolved: `extends` merged, templates rendered, ports allocated, secrets generated.",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "name": { "type": "string", "description": "Display name, used in container labels." },
+        "definition": { "$ref": "#/$defs/DefinitionRef" },
+        "image": { "type": "string" },
+        "packages": { "type": "array", "items": { "type": "string" } },
+        "ports": { "type": "array", "items": { "$ref": "#/$defs/PortBinding" } },
+        "limits": { "$ref": "#/$defs/Limits" },
+        "autostart": { "type": "boolean", "description": "Start again after a host reboot if it was running." },
+        "hooks": { "type": "array", "items": { "$ref": "#/$defs/HookFile" }, "description": "Every hook script the spec references, written to /gss/spec/hooks/." },
+        "services": { "type": "object", "additionalProperties": { "$ref": "definition.json#/$defs/ServiceSpec" } },
+        "backup": { "$ref": "definition.json#/$defs/BackupSpec" },
+        "init": { "$ref": "supervisor.json#/$defs/InitSpec" }
+      },
+      "required": ["serverId", "name", "definition", "image", "packages", "ports", "limits", "autostart", "hooks", "services", "init"]
+    },
+    "DefinitionRef": {
+      "type": "object",
+      "description": "Which definition version the server is pinned to.",
+      "properties": {
+        "id": { "type": "string", "description": "Definition slug, e.g. `minecraft-java`." },
+        "source": { "type": "string", "description": "Source name." },
+        "commit": { "type": "string", "description": "Git commit the definition was read from." }
+      },
+      "required": ["id", "source", "commit"]
+    },
+    "PortBinding": {
+      "type": "object",
+      "description": "An allocated port. The same number is used on the host and inside the container.",
+      "properties": {
+        "name": { "type": "string" },
+        "proto": { "$ref": "definition.json#/$defs/PortProto" },
+        "port": { "type": "integer" },
+        "internal": { "type": "boolean", "description": "Not published on the host." }
+      },
+      "required": ["name", "proto", "port", "internal"]
+    },
+    "Limits": {
+      "type": "object",
+      "properties": {
+        "memoryMb": { "type": "integer" },
+        "cpuMillis": { "type": "integer", "description": "1000 = one CPU." },
+        "pids": { "type": "integer" },
+        "diskMb": { "type": "integer", "description": "Soft limit: the agent warns and refuses to start above it." }
+      },
+      "required": ["memoryMb", "cpuMillis", "pids", "diskMb"]
+    },
+    "HookFile": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path relative to the definition folder, e.g. `hooks/install.sh`." },
+        "content": { "type": "string" }
+      },
+      "required": ["path", "content"]
+    },
+    "StopRequest": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "kill": { "type": "boolean", "description": "Skip the graceful stop and SIGKILL at once." }
+      },
+      "required": ["serverId", "kill"]
+    },
+    "DeleteRequest": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "keepData": { "type": "boolean" }
+      },
+      "required": ["serverId", "keepData"]
+    },
+    "InputRequest": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "line": { "type": "string", "description": "One line without the trailing newline." }
+      },
+      "required": ["serverId", "line"]
+    },
+    "BacklogRequest": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "limit": { "type": "integer", "description": "Most recent lines to return, at most 1000." }
+      },
+      "required": ["serverId", "limit"]
+    },
+    "BacklogResponse": {
+      "type": "object",
+      "properties": {
+        "lines": { "type": "array", "items": { "$ref": "#/$defs/ConsoleLine" } }
+      },
+      "required": ["lines"]
+    },
+    "ConsoleStream": {
+      "type": "string",
+      "description": "output: the game's pty; input: an echoed console command; system: gss-init's own messages (install steps, state changes).",
+      "enum": ["output", "input", "system"]
+    },
+    "ConsoleLine": {
+      "type": "object",
+      "properties": {
+        "seq": { "type": "integer", "description": "Monotonic per server for the life of the gss-init process." },
+        "at": { "type": "string", "format": "date-time" },
+        "stream": { "$ref": "#/$defs/ConsoleStream" },
+        "text": { "type": "string", "description": "One line, without the trailing newline. ANSI colour codes are kept." }
+      },
+      "required": ["seq", "at", "stream", "text"]
+    },
+    "ConsoleBatch": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "lines": { "type": "array", "items": { "$ref": "#/$defs/ConsoleLine" } }
+      },
+      "required": ["serverId", "lines"]
+    },
+    "StateChange": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "state": { "$ref": "#/$defs/ServerState" },
+        "previous": { "$ref": "#/$defs/ServerState" },
+        "at": { "type": "string", "format": "date-time" },
+        "exitCode": { "type": ["integer", "null"] },
+        "reason": { "type": ["string", "null"], "description": "Readable cause for failures, e.g. `Install step 2 (download) failed: sha256 mismatch.`" }
+      },
+      "required": ["serverId", "state", "previous", "at", "exitCode", "reason"]
+    },
+    "StatsBatch": {
+      "type": "object",
+      "properties": {
+        "at": { "type": "string", "format": "date-time" },
+        "servers": { "type": "array", "items": { "$ref": "#/$defs/ServerStats" } }
+      },
+      "required": ["at", "servers"]
+    },
+    "ServerStats": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "cpuPercent": { "type": "number", "description": "100 = one CPU fully used." },
+        "memoryBytes": { "type": "integer" },
+        "memoryLimitBytes": { "type": "integer" },
+        "netRxBytes": { "type": "integer" },
+        "netTxBytes": { "type": "integer" },
+        "pids": { "type": "integer" },
+        "diskBytes": { "type": ["integer", "null"], "description": "Size of the data folder; null when not measured in this sample (it is measured once a minute)." }
+      },
+      "required": ["serverId", "cpuPercent", "memoryBytes", "memoryLimitBytes", "netRxBytes", "netTxBytes", "pids", "diskBytes"]
+    },
+    "PlayerAction": {
+      "type": "string",
+      "enum": ["join", "leave"]
+    },
+    "PlayerEvent": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "player": { "type": "string" },
+        "action": { "$ref": "#/$defs/PlayerAction" },
+        "at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["serverId", "player", "action", "at"]
+    }
+  }
+}

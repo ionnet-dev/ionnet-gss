@@ -1,0 +1,45 @@
+{
+  "nodeModulesDir": "auto",
+  "imports": {
+    "@shared/": "./shared/",
+    "hono": "npm:hono@^4.13.7",
+    "sequelize": "npm:sequelize@^6.37.8",
+    "mysql2": "npm:mysql2@^3.24.4",
+    "umzug": "npm:umzug@^3.8.3",
+    "bcryptjs": "npm:bcryptjs@^3.0.2",
+    "@std/yaml": "jsr:@std/yaml@^1"
+  },
+  "tasks": {
+    "dev": {
+      "description": "Panel on :3200 (API, WebSockets, and the Vite dev server proxied behind it)",
+      "dependencies": ["dev:server", "dev:client"]
+    },
+    "dev:server": "deno run -A --watch=server/src/,shared/ --env-file=.env server/src/index.ts",
+    "dev:client": "cd client && npm run dev",
+    "start": {
+      "description": "Panel in production mode (serves client/dist; build it first with `deno task build`). DENO_ENV from the environment wins over .env",
+      "command": "DENO_ENV=production deno run -A --env-file=.env server/src/index.ts"
+    },
+    "migrate": "deno run -A --env-file=.env server/src/migrate.ts",
+    "protocol": "deno run --allow-read --allow-write=shared/protocol,agent/internal/protocol --allow-run=gofmt protocol/generate.ts",
+    "build": "cd client && npm run build",
+    "db:up": "docker compose -f docker-compose.dev.yml up -d --wait",
+    "db:down": "docker compose -f docker-compose.dev.yml down",
+    "check": "deno check server/src/index.ts server/src/migrate.ts server/src/definitions/DefinitionEngine.ts shared/index.ts protocol/generate.ts &&deno task protocol --check && deno lint && cd client && npm run typecheck",
+    "check:agent": "cd agent && go build ./... && go vet ./..."
+  },
+  "lint": {
+    "exclude": ["client/", "agent/", "node_modules/"],
+    "rules": {
+      "exclude": ["no-unused-vars", "require-await", "no-namespace"]
+    }
+  },
+  "fmt": {
+    "exclude": ["**"]
+  },
+  "exclude": ["client/", "agent/", "node_modules/"],
+  "compilerOptions": {
+    "strict": true,
+    "lib": ["deno.window"]
+  }
+}

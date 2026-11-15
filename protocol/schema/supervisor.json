@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervisor.json",
+  "title": "Supervisor",
+  "description": "M2: the agent and gss-init (PID 1 in every game container). gss-init reads `InitSpec` from a mounted file and serves this protocol on a unix socket; the agent is the only client and may reconnect at any time.",
+  "x-constants": {
+    "INIT_SPEC_PATH": { "value": "/gss/spec/spec.json", "description": "Where gss-init reads its spec (read-only mount)." },
+    "INIT_HOOKS_DIR": { "value": "/gss/spec/hooks", "description": "Hook scripts, by their definition-relative path minus `hooks/`." },
+    "INIT_SOCKET_PATH": { "value": "/gss/run/init.sock", "description": "The supervisor socket inside the container (the run folder is a read-write mount)." },
+    "INIT_DATA_PATH": { "value": "/data", "description": "The server's data folder inside the container." },
+    "INIT_BACKLOG_LINES": { "value": 2000, "description": "Console lines kept in gss-init's ring buffer." },
+    "GAME_UID": { "value": 1000, "description": "uid and gid the game and every hook run as (`gss` user in ionnet-gss-base)." }
+  },
+  "x-messages": [
+    {
+      "channel": "supervisor", "type": "status", "kind": "request", "from": "agent", "milestone": 2,
+      "request": "Empty", "response": "InitStatus",
+      "description": "Current state. The agent sends it first after every (re)connect."
+    },
+    {
+      "channel": "supervisor", "type": "install", "kind": "request", "from": "agent", "milestone": 2,
+      "request": "Empty", "response": "InitStatus",
+      "description": "Run the install steps from the start (first install, retry, reinstall). Answers when install has begun."
+    },
+    {
+      "channel": "supervisor", "type": "start", "kind": "request", "from": "agent", "milestone": 2,
+      "request": "Empty", "response": "InitStatus",
+      "description": "Apply configs, run the pre-start hook, launch the game on a pty."
+    },
+    {
+      "channel": "supervisor", "type": "stop", "kind": "request", "from": "agent", "milestone": 2,
+      "request": "InitStopRequest", "response": "InitStatus",
+      "description": "Stop command or signal, SIGKILL after the timeout, then the post-stop hook."
+    },
+    {
+      "channel": "supervisor", "type": "input", "kind": "request", "from": "agent", "milestone": 2,
+      "request": "InputLine", "response": "Empty",
+      "description": "One console line to stdin or rcon."
+    },
+    {
+      "channel": "supervisor", "type": "backlog", "kind": "request", "from": "agent", "milestone": 2,
+      "request": "InitBacklogRequest", "response": "BacklogResponse",
+      "description": "Lines from the ring buffer after `afterSeq`; how the agent catches up after a restart."
+    },
+    {
+      "channel": "supervisor", "type": "reload", "kind": "request", "from": "agent", "milestone": 2,
+      "request": "Empty", "response": "Empty",
+      "description": "Re-read the spec file after the agent rewrote it (settings changed). Takes effect at the next start."
+    },
+    {
+      "channel": "supervisor", "type": "console", "kind": "event", "from": "supervisor", "milestone": 2,
+      "data": "ConsoleLine",
+      "description": "One console line."
+    },
+    {
+      "channel": "supervisor", "type": "state", "kind": "event", "from": "supervisor", "milestone": 2,
+      "data": "StateChange",
+      "description": "gss-init changed state."
+    },
+    {
+      "channel": "supervisor", "type": "player", "kind": "event", "from": "supervisor", "milestone": 4,
+      "data": "PlayerEvent",
+      "description": "A `players` pattern matched."
+    }
+  ],
+  "$defs": {
+    "InitSpec": {
+      "type": "object",
+      "description": "The file gss-init reads (`INIT_SPEC_PATH`). Fully rendered by the panel.",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "install": { "type": "array", "items": { "$ref": "definition.json#/$defs/InstallStep" } },
+        "configs": { "type": "array", "items": { "$ref": "definition.json#/$defs/ConfigMapping" } },
+        "hooks": { "$ref": "definition.json#/$defs/HookDecl" },
+        "start": { "type": "string", "description": "Command line, run through `/bin/sh -c` as uid 1000 in /data." },
+        "ready": { "oneOf": [{ "$ref": "definition.json#/$defs/ReadyCheck" }, { "type": "null" }], "description": "null = `running` as soon as the process starts." },
+        "stop": { "$ref": "definition.json#/$defs/StopSpec" },
+        "console": { "$ref": "definition.json#/$defs/ConsoleSpec" },
+        "players": { "oneOf": [{ "$ref": "definition.json#/$defs/PlayersSpec" }, { "type": "null" }] },
+        "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment for the game and hooks: `GSS_VAR_<KEY>`, `GSS_PORT_<NAME>`, `GSS_SERVER_ID`." },
+        "autoRestart": { "$ref": "#/$defs/AutoRestart" }
+      },
+      "required": ["serverId", "install", "configs", "hooks", "start", "ready", "stop", "console", "players", "env", "autoRestart"]
+    },
+    "AutoRestart": {
+      "type": "object",
+      "description": "Restart after a crash, at most `max` times within `windowSec`; beyond that the state stays `crashed`.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "max": { "type": "integer", "description": "Default is 3." },
+        "windowSec": { "type": "integer", "description": "Default is 600." }
+      },
+      "required": ["enabled", "max", "windowSec"]
+    },
+    "InitStatus": {
+      "type": "object",
+      "properties": {
+        "state": { "$ref": "server.json#/$defs/ServerState" },
+        "since": { "type": "string", "format": "date-time" },
+        "pid": { "type": ["integer", "null"], "description": "Game process id inside the container, while it runs." },
+        "exitCode": { "type": ["integer", "null"] },
+        "installed": { "type": "boolean", "description": "Install completed at least once." },
+        "restarts": { "type": "integer", "description": "Auto-restarts in the current window." },
+        "lastSeq": { "type": "integer", "description": "`seq` of the newest console line." }
+      },
+      "required": ["state", "since", "pid", "exitCode", "installed", "restarts", "lastSeq"]
+    },
+    "InitStopRequest": {
+      "type": "object",
+      "properties": {
+        "kill": { "type": "boolean" }
+      },
+      "required": ["kill"]
+    },
+    "InputLine": {
+      "type": "object",
+      "properties": {
+        "line": { "type": "string" }
+      },
+      "required": ["line"]
+    },
+    "InitBacklogRequest": {
+      "type": "object",
+      "properties": {
+        "afterSeq": { "type": "integer", "description": "Return lines with a higher `seq`; 0 = from the oldest kept." },
+        "limit": { "type": "integer" }
+      },
+      "required": ["afterSeq", "limit"]
+    }
+  }
+}

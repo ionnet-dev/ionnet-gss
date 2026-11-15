@@ -1,0 +1,16 @@
+# systemd unit for the Ionnet GSS host agent. Installed to /etc/systemd/system/ by the install script (M5).
+[Unit]
+Description=Ionnet GSS host agent
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/local/bin/gss-agent run
+Restart=always
+RestartSec=5
+# Exit 3 = the panel revoked this host; restarting would only hammer the panel. Re-enrol instead.
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=multi-user.target

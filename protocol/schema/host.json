@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "host.json",
+  "title": "Host",
+  "description": "M1: enrolment, the authenticated hello, and heartbeats with host facts.",
+  "x-messages": [
+    {
+      "channel": "agent", "type": "enrol", "kind": "request", "from": "agent", "milestone": 1,
+      "request": "EnrolRequest", "response": "EnrolResponse",
+      "description": "First and only request on an enrolment socket: trade a one-time enrol token for a host id and a long-lived credential. The panel closes with `CLOSE_ENROLLED` after answering."
+    },
+    {
+      "channel": "agent", "type": "hello", "kind": "request", "from": "agent", "milestone": 1,
+      "request": "HelloRequest", "response": "HelloResponse",
+      "description": "First request on every run socket. Authenticates the host and replays the agent's view of its servers."
+    },
+    {
+      "channel": "agent", "type": "heartbeat", "kind": "event", "from": "agent", "milestone": 1,
+      "data": "Heartbeat",
+      "description": "Every `heartbeatSec` seconds after a successful hello."
+    }
+  ],
+  "$defs": {
+    "HostFacts": {
+      "type": "object",
+      "description": "What the agent knows about its machine. Collected at enrol, hello and every heartbeat.",
+      "properties": {
+        "hostname": { "type": "string" },
+        "agentVersion": { "type": "string", "description": "`gss-agent version`, e.g. `0.1.0`." },
+        "uptimeSec": { "type": "integer", "description": "Machine uptime in seconds." },
+        "os": { "$ref": "#/$defs/OsFacts" },
+        "cpu": { "$ref": "#/$defs/CpuFacts" },
+        "memory": { "$ref": "#/$defs/MemoryFacts" },
+        "disk": { "$ref": "#/$defs/DiskFacts" },
+        "docker": { "oneOf": [{ "$ref": "#/$defs/DockerFacts" }, { "type": "null" }], "description": "null = Docker is not reachable on this host." }
+      },
+      "required": ["hostname", "agentVersion", "uptimeSec", "os", "cpu", "memory", "disk", "docker"]
+    },
+    "OsFacts": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "`PRETTY_NAME` from /etc/os-release, e.g. `Debian GNU/Linux 13 (trixie)`." },
+        "id": { "type": "string", "description": "`ID` from /etc/os-release, e.g. `debian`, `arch`." },
+        "version": { "type": "string", "description": "`VERSION_ID` from /etc/os-release; empty on rolling releases." },
+        "kernel": { "type": "string", "description": "Kernel release, e.g. `6.12.0-1-amd64`." },
+        "arch": { "type": "string", "description": "Go's GOARCH, e.g. `amd64`, `arm64`." }
+      },
+      "required": ["name", "id", "version", "kernel", "arch"]
+    },
+    "CpuFacts": {
+      "type": "object",
+      "properties": {
+        "model": { "type": "string" },
+        "threads": { "type": "integer", "description": "Logical CPUs available to the agent." },
+        "load1": { "type": "number", "description": "One-minute load average." }
+      },
+      "required": ["model", "threads", "load1"]
+    },
+    "MemoryFacts": {
+      "type": "object",
+      "properties": {
+        "totalBytes": { "type": "integer" },
+        "availableBytes": { "type": "integer", "description": "`MemAvailable` from /proc/meminfo." }
+      },
+      "required": ["totalBytes", "availableBytes"]
+    },
+    "DiskFacts": {
+      "type": "object",
+      "description": "The filesystem holding the agent's data root (`/var/lib/ionnet-gss`).",
+      "properties": {
+        "path": { "type": "string" },
+        "totalBytes": { "type": "integer" },
+        "freeBytes": { "type": "integer", "description": "Bytes available to unprivileged users." }
+      },
+      "required": ["path", "totalBytes", "freeBytes"]
+    },
+    "DockerFacts": {
+      "type": "object",
+      "properties": {
+        "version": { "type": "string", "description": "Engine version, e.g. `29.0.1`." },
+        "apiVersion": { "type": "string", "description": "Engine API version, e.g. `1.52`." }
+      },
+      "required": ["version", "apiVersion"]
+    },
+    "EnrolRequest": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "description": "The one-time `gss_enrol_…` token an admin created in the panel." },
+        "protocolVersion": { "type": "integer" },
+        "facts": { "$ref": "#/$defs/HostFacts" }
+      },
+      "required": ["token", "protocolVersion", "facts"]
+    },
+    "EnrolResponse": {
+      "type": "object",
+      "properties": {
+        "hostId": { "type": "string", "format": "uuid" },
+        "hostName": { "type": "string" },
+        "credential": { "type": "string", "description": "The long-lived `gss_host_…` credential. Shown once; the panel keeps only its SHA-256." }
+      },
+      "required": ["hostId", "hostName", "credential"]
+    },
+    "HelloRequest": {
+      "type": "object",
+      "properties": {
+        "hostId": { "type": "string", "format": "uuid" },
+        "credential": { "type": "string" },
+        "protocolVersion": { "type": "integer" },
+        "facts": { "$ref": "#/$defs/HostFacts" },
+        "servers": {
+          "type": "array",
+          "items": { "$ref": "server.json#/$defs/ServerStatus" },
+          "description": "Every server the agent manages, with its current state (M2). Empty in M1."
+        }
+      },
+      "required": ["hostId", "credential", "protocolVersion", "facts", "servers"]
+    },
+    "HelloResponse": {
+      "type": "object",
+      "properties": {
+        "hostName": { "type": "string" },
+        "heartbeatSec": { "type": "integer", "description": "Seconds between heartbeats." },
+        "panelVersion": { "type": "string" }
+      },
+      "required": ["hostName", "heartbeatSec", "panelVersion"]
+    },
+    "Heartbeat": {
+      "type": "object",
+      "properties": {
+        "at": { "type": "string", "format": "date-time" },
+        "facts": { "$ref": "#/$defs/HostFacts" }
+      },
+      "required": ["at", "facts"]
+    }
+  }
+}

@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "definition.json",
+  "title": "Definition",
+  "description": "A game definition (`game.yml`) and the building blocks the resolved server spec reuses. YAML keys keep their snake_case spelling (`options_from`, `admin_only`); the panel validates against this at source sync (M3) and resolves `extends` and `{{…}}` templates before anything reaches an agent.",
+  "$defs": {
+    "GameDefinition": {
+      "type": "object",
+      "description": "One `game.yml`, as written in a source repo.",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$", "description": "Slug, equal to the folder name." },
+        "name": { "type": "string" },
+        "extends": { "type": "string", "description": "Id of another definition in the same source. Lists merge by `key`/`name`; scalars override." },
+        "image": { "type": "string", "description": "Container image, may use templates (`ionnet-gss-minecraft-server:java{{vars.java}}`). Default: inherited, else `ionnet-gss-base`." },
+        "packages": { "type": "array", "items": { "type": "string" }, "description": "apt packages; the agent builds and caches a derived image." },
+        "variables": { "type": "array", "items": { "$ref": "#/$defs/VariableDecl" } },
+        "ports": { "type": "array", "items": { "$ref": "#/$defs/PortDecl" } },
+        "install": { "type": "array", "items": { "$ref": "#/$defs/InstallStep" } },
+        "configs": { "type": "array", "items": { "$ref": "#/$defs/ConfigMapping" } },
+        "hooks": { "$ref": "#/$defs/HookDecl" },
+        "start": { "type": "string" },
+        "ready": { "$ref": "#/$defs/ReadyCheck" },
+        "stop": { "$ref": "#/$defs/StopSpec" },
+        "console": { "$ref": "#/$defs/ConsoleSpec" },
+        "players": { "$ref": "#/$defs/PlayersSpec" },
+        "backup": { "$ref": "#/$defs/BackupSpec" },
+        "services": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ServiceSpec" }, "description": "Extra containers of a stack, keyed by the host name the game reaches them under." }
+      },
+      "required": ["id"]
+    },
+    "VariableType": {
+      "type": "string",
+      "enum": ["string", "number", "boolean", "select", "secret"]
+    },
+    "VariableBind": {
+      "type": "string",
+      "description": "Resource limit a variable sets; the value counts against the owner's quota.",
+      "enum": ["limits.memory", "limits.cpu", "limits.disk"]
+    },
+    "VariableDecl": {
+      "type": "object",
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "type": { "$ref": "#/$defs/VariableType" },
+        "options": { "type": "array", "items": { "type": "string" }, "description": "`select` only: the fixed choices." },
+        "options_from": { "$ref": "#/$defs/OptionsSource" },
+        "default": { "type": ["string", "number", "boolean"] },
+        "unit": { "type": "string", "description": "Display unit, e.g. `MB`." },
+        "reinstall": { "type": "boolean", "description": "Changing the value re-runs install." },
+        "admin_only": { "type": "boolean", "description": "Only admins see and change it." },
+        "bind": { "$ref": "#/$defs/VariableBind" },
+        "generate": { "type": "integer", "description": "`secret` only: generate this many characters once at create; never shown." }
+      },
+      "required": ["key", "type"]
+    },
+    "OptionsSource": {
+      "type": "object",
+      "description": "A dynamic option list, produced by a hook that prints one option per line.",
+      "properties": {
+        "hook": { "type": "string", "description": "Path of the hook script inside the definition folder." }
+      },
+      "required": ["hook"]
+    },
+    "PortProto": {
+      "type": "string",
+      "enum": ["tcp", "udp"]
+    },
+    "PortDecl": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "proto": { "$ref": "#/$defs/PortProto" },
+        "default": { "type": "integer", "description": "Preferred port when it is free in the host's pool." },
+        "internal": { "type": "boolean", "description": "Not published on the host; only reachable inside the server's network." }
+      },
+      "required": ["name", "proto"]
+    },
+    "InstallStep": {
+      "type": "object",
+      "description": "One install step. Exactly one key is set; its name is the step type. A new step type is a new property here plus an executor in agent/internal/initd/steps/.",
+      "properties": {
+        "steamcmd": { "$ref": "#/$defs/SteamcmdStep" },
+        "download": { "$ref": "#/$defs/DownloadStep" },
+        "extract": { "$ref": "#/$defs/ExtractStep" },
+        "write": { "$ref": "#/$defs/WriteStep" },
+        "hook": { "type": "string", "description": "Path of a hook script in the definition folder, run as uid 1000 in /data." }
+      },
+      "minProperties": 1,
+      "maxProperties": 1
+    },
+    "SteamcmdStep": {
+      "type": "object",
+      "properties": {
+        "app": { "type": "integer", "description": "Steam app id, e.g. 4020 for Garry's Mod." },
+        "beta": { "type": "string" },
+        "validate": { "type": "boolean" }
+      },
+      "required": ["app"]
+    },
+    "DownloadStep": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "file": { "type": "string", "description": "Destination path below /data." }
+      },
+      "required": ["url", "sha256", "file"]
+    },
+    "ExtractStep": {
+      "type": "object",
+      "properties": {
+        "file": { "type": "string", "description": "Archive below /data (.zip, .tar, .tar.gz, .tar.xz)." },
+        "to": { "type": "string", "description": "Target folder below /data. Default is /data itself." },
+        "strip": { "type": "integer", "description": "Leading path components to drop." },
+        "remove": { "type": "boolean", "description": "Delete the archive afterwards." }
+      },
+      "required": ["file"]
+    },
+    "WriteStep": {
+      "type": "object",
+      "properties": {
+        "file": { "type": "string" },
+        "content": { "type": "string" }
+      },
+      "required": ["file", "content"]
+    },
+    "ConfigFormat": {
+      "type": "string",
+      "description": "How `set` keys are applied. properties/cfg: literal keys; ini: `section.key` (no dot = top of file); json/yaml: dotted path. A new format is a value here plus an applier in agent/internal/initd/configs/.",
+      "enum": ["properties", "ini", "json", "yaml", "cfg", "template"]
+    },
+    "ConfigMapping": {
+      "type": "object",
+      "description": "Managed keys in one config file. Only these keys are touched before every start; the rest stay the user's.",
+      "properties": {
+        "file": { "type": "string", "description": "Path below /data." },
+        "format": { "$ref": "#/$defs/ConfigFormat" },
+        "set": { "type": "object", "additionalProperties": { "type": "string" } },
+        "template": { "type": "string", "description": "`template` format, in game.yml: path of the template file in the definition folder." },
+        "content": { "type": "string", "description": "`template` format, resolved: the rendered whole file. Set by the panel, never in game.yml." }
+      },
+      "required": ["file", "format"]
+    },
+    "HookDecl": {
+      "type": "object",
+      "description": "Lifecycle hooks (paths in the definition folder). Install hooks are `install` steps.",
+      "properties": {
+        "pre-start": { "type": "string" },
+        "post-stop": { "type": "string" },
+        "update": { "type": "string" }
+      }
+    },
+    "ReadyCheck": {
+      "type": "object",
+      "properties": {
+        "log": { "type": "string", "description": "Regular expression (RE2) matched against console output; the first match moves `starting` to `running`." }
+      },
+      "required": ["log"]
+    },
+    "StopSpec": {
+      "type": "object",
+      "description": "Send `command` to the console, or `signal` to the process, then SIGKILL after `timeout`.",
+      "properties": {
+        "command": { "type": "string" },
+        "signal": { "type": "string", "description": "e.g. `SIGINT`. Default is SIGTERM when no command is set." },
+        "timeout": { "type": "integer", "description": "Seconds before SIGKILL. Default is 30." }
+      }
+    },
+    "ConsoleInput": {
+      "type": "string",
+      "enum": ["stdin", "rcon"]
+    },
+    "ConsoleSpec": {
+      "type": "object",
+      "properties": {
+        "input": { "$ref": "#/$defs/ConsoleInput" },
+        "rcon": { "$ref": "#/$defs/RconSpec" }
+      },
+      "required": ["input"]
+    },
+    "RconSpec": {
+      "type": "object",
+      "description": "`rcon` input. Strings, because they are templates in game.yml (`{{ports.rcon}}`).",
+      "properties": {
+        "port": { "type": "string" },
+        "password": { "type": "string" }
+      },
+      "required": ["port", "password"]
+    },
+    "PlayersSpec": {
+      "type": "object",
+      "description": "Console patterns whose first capture group is the player name.",
+      "properties": {
+        "join": { "type": "string" },
+        "leave": { "type": "string" }
+      }
+    },
+    "BackupSpec": {
+      "type": "object",
+      "properties": {
+        "before": { "type": "array", "items": { "type": "string" }, "description": "Console commands sent before the archive is taken." },
+        "after": { "type": "array", "items": { "type": "string" } },
+        "exclude": { "type": "array", "items": { "type": "string" }, "description": "Paths below /data; a trailing slash means a folder." }
+      }
+    },
+    "ServiceSpec": {
+      "type": "object",
+      "description": "One extra container of a stack.",
+      "properties": {
+        "image": { "type": "string" },
+        "env": { "type": "object", "additionalProperties": { "type": "string" } },
+        "volume": { "type": "string", "description": "Container path persisted under the server's folder on the host." },
+        "command": { "type": "string" }
+      },
+      "required": ["image"]
+    }
+  }
+}

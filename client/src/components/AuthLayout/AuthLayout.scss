@@ -1,0 +1,16 @@
+// Center the card in the viewport; the card itself is an Iontronic Card.
+.auth-layout {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--io-space-24);
+  background: var(--io-color-bg);
+
+  &__column {
+    width: min(100%, 26rem);
+
+    & > * {
+      width: 100%;
+    }
+  }
+}

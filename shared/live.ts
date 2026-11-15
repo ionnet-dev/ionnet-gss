@@ -1,0 +1,63 @@
+/**
+ * `/ws/live`: the browser's live socket. The panel pushes events; the client refetches what an event names.
+ * Browsers can't set headers on a WebSocket, so the first frame carries the bearer token.
+ *
+ * Client → panel: `auth` first (within 10 s), then `subscribe` / `unsubscribe` for per-server streams (M2).
+ * Panel → client: `ready` after auth, then `event` frames.
+ */
+import type { ConsoleLine, ServerState, ServerStats } from "./protocol/protocol.gen.ts";
+
+/**
+ * Every live event and its data. A `null` id means "the list changed, refetch it".
+ */
+export interface LiveEvents {
+  //#region M1
+  // Host added, edited, removed, or the facts the list shows changed (versions, OS, totals).
+  // Audience: HOSTS_MANAGE + users granted the host.
+  "host.updated": { hostId: string | null };
+  // New usage figures (load, available memory, free disk); at most once a minute per host. Only the host detail page
+  // listens. Same audience.
+  "host.facts": { hostId: string };
+  // Agent connected or went quiet. Same audience.
+  "host.status": { hostId: string; online: boolean; lastSeenAt: string | null };
+  // Audience: USERS_MANAGE + the user themself.
+  "user.updated": { userId: number | null };
+  // Audience: INVITES_MANAGE.
+  "invite.updated": { inviteId: number | null };
+  // Created, deleted or used. Audience: HOSTS_MANAGE.
+  "enrolToken.updated": { enrolTokenId: number | null };
+  //#endregion
+
+  //#region M2
+  // Created, edited or deleted. Audience: owner + SERVERS_MANAGE_ALL.
+  "server.updated": { serverId: string | null };
+  // Audience: owner + SERVERS_MANAGE_ALL.
+  "server.state": { serverId: string; state: ServerState; exitCode: number | null; reason: string | null; at: string };
+  // Audience: subscribers of `server:<id>` only.
+  "server.console": { serverId: string; lines: ConsoleLine[] };
+  // Audience: subscribers of `server:<id>` only.
+  "server.stats": { serverId: string; stats: ServerStats };
+  //#endregion
+}
+
+export type LiveEventName = keyof LiveEvents;
+
+/**
+ * Stream topics a client can subscribe to (M2): `server:<uuid>` carries `server.console` and `server.stats`.
+ */
+export type LiveTopic = `server:${string}`;
+
+export type LiveClientFrame =
+  | { t: "auth"; token: string }
+  | { t: "subscribe"; topic: LiveTopic }
+  | { t: "unsubscribe"; topic: LiveTopic };
+
+export type LiveServerFrame =
+  | { t: "ready"; userId: number }
+  | { t: "error"; message: string }
+  | { [E in LiveEventName]: { t: "event"; event: E; data: LiveEvents[E] } }[LiveEventName];
+
+/**
+ * Seconds the panel waits for the `auth` frame.
+ */
+export const LIVE_AUTH_TIMEOUT_SEC = 10;

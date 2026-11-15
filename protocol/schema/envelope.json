@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "envelope.json",
+  "title": "Envelope",
+  "description": "The frame every message travels in, on both channels. WebSocket text frames on the agent channel; newline-delimited JSON on the supervisor socket.",
+  "x-channels": {
+    "agent": {
+      "description": "Panel and agent, over the WebSocket the agent dials to /ws/agent.",
+      "parties": { "agent": "AgentToPanel", "panel": "PanelToAgent" },
+      "goPrefix": "Msg"
+    },
+    "supervisor": {
+      "description": "Agent and gss-init, over the unix socket gss-init listens on inside each game container.",
+      "parties": { "agent": "AgentToInit", "supervisor": "InitToAgent" },
+      "goPrefix": "InitMsg"
+    }
+  },
+  "x-constants": {
+    "PROTOCOL_VERSION": { "value": 1, "description": "Version of this protocol. Sent in `enrol` and `hello`; the panel refuses versions it does not speak with `CLOSE_UNSUPPORTED_VERSION`." },
+    "HELLO_TIMEOUT_SEC": { "value": 10, "description": "Seconds the panel waits for the first frame (`enrol` or `hello`) before closing with `CLOSE_HELLO_TIMEOUT`." },
+    "CLOSE_PROTOCOL_ERROR": { "value": 4400, "description": "WebSocket close code: a frame was not valid JSON or broke the envelope rules." },
+    "CLOSE_UNAUTHORIZED": { "value": 4401, "description": "WebSocket close code: the `enrol` token or the `hello` credential was refused (sent after an `unauthorized` response). An agent whose hello was answered `unauthorized` stops reconnecting." },
+    "CLOSE_REVOKED": { "value": 4403, "description": "WebSocket close code: the host was disabled or removed while connected, or a `hello` was refused because the host is disabled (`forbidden` response). The agent retries slowly; the next `hello` tells a disabled host (keep waiting) from a removed one (`unauthorized`, stop)." },
+    "CLOSE_HELLO_TIMEOUT": { "value": 4408, "description": "WebSocket close code: no `enrol` or `hello` within `HELLO_TIMEOUT_SEC`. Transient: the agent reconnects with its normal backoff." },
+    "CLOSE_REPLACED": { "value": 4409, "description": "WebSocket close code: a newer connection for the same host took over." },
+    "CLOSE_UNSUPPORTED_VERSION": { "value": 4426, "description": "WebSocket close code: the panel does not speak the agent's `protocolVersion`." },
+    "CLOSE_ENROLLED": { "value": 4000, "description": "WebSocket close code: enrolment finished; the socket was only for the `enrol` request." }
+  },
+  "$defs": {
+    "Envelope": {
+      "type": "object",
+      "description": "One frame. Requests carry `id` + `type` + `data`; responses echo `id` and `type` and carry `ok` with `data` or `error`; events carry `type` + `data` and no `id`.",
+      "properties": {
+        "kind": { "$ref": "#/$defs/MessageKind" },
+        "id": { "type": "string", "description": "Correlates a response with its request. Unique per sender for the life of the connection (e.g. `a-17`, `p-17`)." },
+        "type": { "type": "string", "description": "Message type, e.g. `hello` or `server.start`. Required on requests and events; echoed on responses." },
+        "data": { "description": "Payload. Its shape is given by `type` and `kind` (see the message tables)." },
+        "ok": { "type": "boolean", "description": "Responses only: whether the request succeeded." },
+        "error": { "$ref": "#/$defs/ErrorBody" }
+      },
+      "required": ["kind"]
+    },
+    "MessageKind": {
+      "type": "string",
+      "enum": ["request", "response", "event"]
+    },
+    "ErrorBody": {
+      "type": "object",
+      "description": "Why a request failed.",
+      "properties": {
+        "code": { "$ref": "#/$defs/ErrorCode" },
+        "message": { "type": "string", "description": "Readable sentence that tells the operator what to do." }
+      },
+      "required": ["code", "message"]
+    },
+    "ErrorCode": {
+      "type": "string",
+      "enum": ["bad_request", "unauthorized", "forbidden", "not_found", "conflict", "unsupported", "timeout", "internal"]
+    },
+    "Empty": {
+      "type": "object",
+      "description": "No payload.",
+      "properties": {}
+    }
+  }
+}

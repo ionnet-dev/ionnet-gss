@@ -1,0 +1,24 @@
+# Local development dependencies only. The panel and web app run natively: `deno task dev`.
+services:
+  mariadb:
+    image: mariadb:11.4
+    container_name: gss-mariadb-dev
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: gss
+      MARIADB_DATABASE: gss
+      MARIADB_USER: gss
+      MARIADB_PASSWORD: gss
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "127.0.0.1:3308:3306"
+    volumes:
+      - gss-mariadb-dev:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  gss-mariadb-dev:

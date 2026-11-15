@@ -1,0 +1,72 @@
+# Production: MariaDB + the panel (web app built in). Put a TLS-terminating reverse proxy in front of :3200 that
+# forwards WebSocket upgrades (/ws/agent, /ws/live). Agents dial out to PUBLIC_URL; hosts need no inbound port.
+services:
+  mariadb:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      MARIADB_DATABASE: gss
+      MARIADB_USER: gss
+      MARIADB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - gss-mariadb:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  panel:
+    build: .
+    image: ghcr.io/ionnet-dev/ionnet-gss-panel:latest
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in .env, e.g. https://gss.ionnet.dev}
+      # Empty = generated once and kept in the gss-panel-data volume.
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_TTL_HOURS: ${JWT_TTL_HOURS:-168}
+      INVITE_TTL_HOURS: ${INVITE_TTL_HOURS:-72}
+      BODY_LIMIT_KB: ${BODY_LIMIT_KB:-1024}
+      RATE_LIMIT_WINDOW_SEC: ${RATE_LIMIT_WINDOW_SEC:-900}
+      RATE_LIMIT_LOGIN_PER_IP: ${RATE_LIMIT_LOGIN_PER_IP:-30}
+      RATE_LIMIT_LOGIN_FAILURES_PER_USER: ${RATE_LIMIT_LOGIN_FAILURES_PER_USER:-10}
+      RATE_LIMIT_PUBLIC_PER_IP: ${RATE_LIMIT_PUBLIC_PER_IP:-60}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      ENROL_TOKEN_TTL_MINUTES: ${ENROL_TOKEN_TTL_MINUTES:-60}
+      AGENT_HEARTBEAT_SEC: ${AGENT_HEARTBEAT_SEC:-15}
+      AGENT_OFFLINE_AFTER_SEC: ${AGENT_OFFLINE_AFTER_SEC:-45}
+      AGENT_REQUEST_TIMEOUT_SEC: ${AGENT_REQUEST_TIMEOUT_SEC:-30}
+      DEFAULT_PORT_POOL: ${DEFAULT_PORT_POOL:-25565-25664,27015-27064}
+      DEFAULT_QUOTA_SERVERS: ${DEFAULT_QUOTA_SERVERS:-2}
+      DEFAULT_QUOTA_MEMORY_MB: ${DEFAULT_QUOTA_MEMORY_MB:-4096}
+      DEFAULT_QUOTA_CPU_MILLIS: ${DEFAULT_QUOTA_CPU_MILLIS:-2000}
+      DEFAULT_QUOTA_DISK_MB: ${DEFAULT_QUOTA_DISK_MB:-20480}
+      DEFAULT_QUOTA_BACKUPS: ${DEFAULT_QUOTA_BACKUPS:-5}
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_NAME: gss
+      DB_USER: gss
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      AUTO_MIGRATE: "true"
+    volumes:
+      - gss-panel-data:/var/lib/ionnet-gss-panel
+    healthcheck:
+      test: [
+        "CMD", "deno", "eval", "--no-config",
+        "const r = await fetch('http://127.0.0.1:3200/api/health').catch(() => null); Deno.exit(r?.ok ? 0 : 1)",
+      ]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${HOST_PORT:-3200}:3200"
+
+volumes:
+  gss-mariadb:
+  gss-panel-data:

@@ -1,0 +1,14 @@
+node_modules
+client/node_modules
+client/dist
+agent
+images
+games
+docs
+data
+.env
+.env.*
+!.env.example
+.git
+.claude
+*.log

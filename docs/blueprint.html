@@ -1,0 +1,399 @@
+<title>Ionnet GSS Blueprint</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column of design sections; wide figures, tables and code scroll inside their own box. */
+:root {
+  --bg: #f3f1fb; --surface: #ffffff; --fg: #1b1638; --muted: #5d5880; --line: #d9d4ee;
+  --accent: #6346ee; --accent-soft: #e9e3ff; --spark: #c2500a; --ok: #1f7a4d; --warn: #8a5a00; --code-bg: #ebe7fa;
+  --display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #120f26; --surface: #1b1736; --fg: #ece9fb; --muted: #a6a1c8; --line: #332d5c;
+  --accent: #9b83ff; --accent-soft: #2e2560; --spark: #ff8a45; --ok: #5fd39a; --warn: #ffbf47; --code-bg: #1f1a40; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #120f26; --surface: #1b1736; --fg: #ece9fb; --muted: #a6a1c8; --line: #332d5c;
+  --accent: #9b83ff; --accent-soft: #2e2560; --spark: #ff8a45; --ok: #5fd39a; --warn: #ffbf47; --code-bg: #1f1a40; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 16px/1.6 var(--body); }
+.wrap { max-width: 920px; margin: 0 auto; padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 44px; }
+header p.kicker { font: 600 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--spark); margin: 0 0 8px; }
+h1 { font: 700 clamp(30px, 6vw, 44px)/1.1 var(--display); margin: 0 0 12px; text-wrap: balance; }
+h2 { font: 600 24px/1.2 var(--display); margin: 0 0 12px; text-wrap: balance; }
+h3 { font: 600 16px/1.3 var(--display); margin: 20px 0 6px; }
+p { margin: 0 0 12px; max-width: 68ch; }
+.lead { font-size: 18px; color: var(--muted); }
+section { min-width: 0; }
+code, pre { font-family: var(--mono); font-size: 13px; }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code-bg); padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-height: 1.5; margin: 0 0 12px; }
+pre code { background: none; padding: 0; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; min-width: 560px; }
+th { text-align: left; font: 600 12px var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 8px 12px 8px 0; border-bottom: 2px solid var(--line); }
+td { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+td:first-child { font-weight: 600; white-space: nowrap; }
+figure { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+figure svg { max-width: 100%; height: auto; display: block; min-width: 640px; }
+figcaption { font-size: 13.5px; color: var(--muted); margin-top: 10px; }
+.tag { display: inline-block; font: 600 11px var(--mono); padding: 2px 7px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.tag.you { background: transparent; border: 1px solid var(--ok); color: var(--ok); }
+.tag.mine { background: transparent; border: 1px solid var(--warn); color: var(--warn); }
+ol.flow { padding-left: 22px; margin: 0; display: flex; flex-direction: column; gap: 8px; max-width: 72ch; }
+ul { padding-left: 20px; margin: 0 0 12px; max-width: 70ch; }
+li { margin-bottom: 4px; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+.cols > * { min-width: 0; }
+.open { border-left: 3px solid var(--spark); padding-left: 16px; }
+</style>
+
+<div class="wrap">
+<header>
+  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestone 1 built, milestone 2 next</p>
+  <h1>Ionnet GSS</h1>
+  <p class="lead">Ionnet Game Server Studio. A game server manager: one control panel, an agent on every Host Machine, and one Docker container or stack per Game Server. Each game is a folder of configuration in a git repo, so adding a game means pushing a folder.</p>
+  <p>This page is the design we agreed in three rounds of questions, plus the defaults I filled in around them. Rows tagged <span class="tag you">you chose</span> are settled. Rows tagged <span class="tag mine">my default</span> were my proposals, which you accepted on 2026-11-15.</p>
+</header>
+
+<section>
+  <h2>Vocabulary</h2>
+  <div class="scroll"><table>
+    <tr><th>Term</th><th>Meaning</th></tr>
+    <tr><td>Panel</td><td>The central web app and API. Holds users, quotas, hosts, game servers and the synced game definitions.</td></tr>
+    <tr><td>Host</td><td>A machine that runs game servers. Enrolled by an admin. Runs Docker and the agent.</td></tr>
+    <tr><td>Agent</td><td><code>gss-agent</code>, a Go binary on each host (systemd). Dials out to the panel and drives Docker.</td></tr>
+    <tr><td>Game Server</td><td>One instance of a game, owned by a user: a container (or a stack of containers) plus a data folder on the host.</td></tr>
+    <tr><td>Definition</td><td>A folder with <code>game.yml</code> and optional hook scripts. Describes how to install, configure, start, stop and observe one game.</td></tr>
+    <tr><td>Source</td><td>A git repo of definitions that the panel syncs. The default one is <code>ionnet-gss-games</code>.</td></tr>
+    <tr><td>Supervisor</td><td><code>gss-init</code>, a small Go binary that is PID 1 in every game container. Ships in <code>ionnet-gss-base</code>.</td></tr>
+  </table></div>
+</section>
+
+<section>
+  <h2>Architecture</h2>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 880 440" role="img" aria-label="Browser talks to the panel. Each host agent dials out to the panel over a WebSocket, drives Docker, and talks to a supervisor inside every game container over a unix socket. Players connect straight to game ports on the host." font-family="Inter, system-ui, sans-serif" font-size="12" fill="currentColor">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+        <marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#7a5aee"/></marker>
+      </defs>
+      <g fill="none" stroke="currentColor" stroke-width="1.3">
+        <rect x="20" y="40" width="130" height="50" rx="6"/>
+        <rect x="250" y="20" width="250" height="140" rx="6"/>
+        <rect x="270" y="104" width="210" height="40" rx="4" stroke-dasharray="4 3"/>
+        <rect x="620" y="40" width="200" height="50" rx="6"/>
+        <rect x="20" y="230" width="840" height="190" rx="8" stroke-dasharray="6 4"/>
+        <rect x="40" y="280" width="180" height="90" rx="6"/>
+        <rect x="310" y="262" width="240" height="140" rx="6"/>
+        <rect x="326" y="296" width="208" height="36" rx="4"/>
+        <rect x="326" y="342" width="208" height="46" rx="4"/>
+        <rect x="596" y="262" width="244" height="140" rx="6"/>
+        <rect x="612" y="296" width="212" height="36" rx="4"/>
+        <rect x="612" y="342" width="100" height="46" rx="4"/>
+        <rect x="724" y="342" width="100" height="46" rx="4"/>
+        <line x1="150" y1="65" x2="248" y2="65" marker-end="url(#ar)" marker-start="url(#ar)"/>
+        <line x1="620" y1="65" x2="502" y2="65" marker-end="url(#ar)"/>
+        <line x1="220" y1="310" x2="308" y2="310" marker-end="url(#ar)" marker-start="url(#ar)"/>
+        <path d="M220 350 H264 V416 H700 V404" marker-end="url(#ar)"/>
+        <line x1="720" y1="170" x2="720" y2="260" marker-end="url(#ar)"/>
+      </g>
+      <path d="M130 280 V200 H375 V162" fill="none" stroke="#7a5aee" stroke-width="2.2" marker-end="url(#ara)"/>
+      <g font-weight="600" font-size="13">
+        <text x="85" y="70" text-anchor="middle">Browser</text>
+        <text x="375" y="46" text-anchor="middle">Panel</text>
+        <text x="720" y="62" text-anchor="middle">Definition sources</text>
+        <text x="34" y="252">Host Machine</text>
+        <text x="130" y="312" text-anchor="middle">gss-agent</text>
+        <text x="430" y="282" text-anchor="middle">Game Server (container)</text>
+        <text x="718" y="282" text-anchor="middle">Game Server (stack)</text>
+      </g>
+      <g font-size="11.5">
+        <text x="375" y="66" text-anchor="middle">Deno · Hono API + WebSockets</text>
+        <text x="375" y="84" text-anchor="middle">serves the React web app</text>
+        <text x="375" y="129" text-anchor="middle">MariaDB</text>
+        <text x="720" y="80" text-anchor="middle">git repos of game folders</text>
+        <text x="199" y="58" text-anchor="middle">HTTPS / WSS</text>
+        <text x="561" y="58" text-anchor="middle">git fetch</text>
+        <text x="130" y="332" text-anchor="middle">Go · systemd</text>
+        <text x="130" y="350" text-anchor="middle">Docker API client</text>
+        <text x="430" y="318" text-anchor="middle">gss-init (PID 1)</text>
+        <text x="430" y="369" text-anchor="middle">game process, uid 1000</text>
+        <text x="718" y="318" text-anchor="middle">gss-init (PID 1)</text>
+        <text x="662" y="369" text-anchor="middle">game</text>
+        <text x="774" y="369" text-anchor="middle">mariadb</text>
+        <text x="264" y="302" text-anchor="middle">unix socket</text>
+        <text x="480" y="432" text-anchor="middle">same socket protocol for every server</text>
+        <text x="728" y="200">Players → game ports</text>
+        <text x="728" y="216">from the host's pool</text>
+      </g>
+      <text x="140" y="192" font-size="12" font-weight="600" fill="#7a5aee">WSS, dialled out by the agent</text>
+    </svg>
+    </div>
+    <figcaption>The agent opens the only connection between a host and the panel, so hosts need no inbound port except the game ports. The panel never touches Docker; the agent never decides policy.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>Decisions</h2>
+  <div class="scroll"><table>
+    <tr><th>Topic</th><th>Decision</th><th>Why</th><th></th></tr>
+    <tr><td>Starting point</td><td>Fresh repo <code>ionnet-gss</code>. The old <code>ionnet-gsm</code> is not consulted.</td><td>A clean design without the old one's shape.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>Grid</td><td>Standalone. Own panel, agent and accounts.</td><td>No coupling to Grid's release cycle.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>Agent</td><td>Go, one static binary, systemd unit.</td><td>Small, no runtime on hosts, first-class Docker client.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>Tenancy</td><td>Multi-tenant. Admins enrol hosts; users get quotas and build servers on hosts they are granted.</td><td>Friends and others can run servers without owning machines.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>Definitions</td><td>Declarative <code>game.yml</code> with typed steps, plus optional hook scripts.</td><td>Most games need no shell; odd ones are not blocked.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>Distribution</td><td>Git sources synced by the panel. Each server pins the commit it was created from.</td><td>Add a game by pushing a folder. An upstream change cannot break a running server.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>Supervisor</td><td><code>gss-init</code> as PID 1 in the base image.</td><td>Servers keep running and logging while the agent restarts or updates.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>Ports</td><td>Auto-allocated from a per-host pool; admins can override.</td><td>Users cannot collide.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>Auth</td><td>Local accounts, invites, TOTP 2FA.</td><td>Same as Ping.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>v1 features</td><td>Lifecycle, console, settings, file manager, backups, live metrics. Schedules are designed for and built later.</td><td></td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>First games</td><td>Minecraft Java, Garry's Mod, and one stack.</td><td>Covers a custom image, a steamcmd game, and multi-container.</td><td><span class="tag you">you chose</span></td></tr>
+    <tr><td>Panel stack</td><td>Deno 2, Hono, Sequelize + Umzug, MariaDB. Web: React + Vite + Iontronic. One port.</td><td>Your suite default; same as Grid and Ping.</td><td><span class="tag mine">my default</span></td></tr>
+    <tr><td>Protocol types</td><td>Panel↔agent messages are defined once as JSON Schema in <code>protocol/</code>. A generator emits the TypeScript types and the Go structs.</td><td>Go and TS cannot drift apart, and nobody mirrors structs by hand.</td><td><span class="tag mine">my default</span></td></tr>
+    <tr><td>Hook safety</td><td>Only admins add sources. Hooks run inside the container as uid 1000, never on the host.</td><td>In a multi-tenant panel a definition is code. Users choose games; they do not supply them.</td><td><span class="tag mine">my default</span></td></tr>
+    <tr><td>Data</td><td>Bind mount <code>/var/lib/ionnet-gss/servers/&lt;uuid&gt;/data</code> → <code>/data</code>.</td><td>The file manager and backups work on plain folders.</td><td><span class="tag mine">my default</span></td></tr>
+    <tr><td>Port mapping</td><td>The allocated port is used both outside and inside the container.</td><td>Many games advertise their own port to master servers; a remapped port breaks server lists.</td><td><span class="tag mine">my default</span></td></tr>
+    <tr><td>Extra packages</td><td>A definition may list <code>packages:</code>. The agent builds a small derived image (<code>FROM</code> the base, <code>apt-get install</code>) and caches it by hash.</td><td>This is "use the base as is and install through configuration" without running the game as root.</td><td><span class="tag mine">my default</span></td></tr>
+    <tr><td>Stack example</td><td>Garry's Mod with a MariaDB beside it (for MySQLOO addons), as <code>garrys-mod-mysql</code> that <code>extends: garrys-mod</code>.</td><td>A stack you would really use, and it proves definition inheritance.</td><td><span class="tag mine">my default</span></td></tr>
+    <tr><td>Ids</td><td>UUIDs for hosts and game servers, integers for everything else.</td><td>Server ids name folders and containers on hosts and appear in URLs.</td><td><span class="tag mine">my default</span></td></tr>
+    <tr><td>Disk quota</td><td>Soft in v1: the agent measures usage, warns, and refuses to start a server over its limit.</td><td>Hard limits on bind mounts need XFS project quotas on every host.</td><td><span class="tag mine">my default</span></td></tr>
+  </table></div>
+</section>
+
+<section>
+  <h2>A game definition</h2>
+  <p>This is the file you write to add a game. The example is a proposal for the format, not a tested file.</p>
+  <pre><code># games/minecraft-java/game.yml
+id: minecraft-java
+name: "Minecraft: Java Edition"
+image: ionnet-gss-minecraft-server:java{{vars.java}}   # extends ionnet-gss-base
+
+variables:                       # the form the user fills in
+  - key: flavour
+    label: Server software
+    type: select
+    options: [vanilla, paper]
+    default: paper
+    reinstall: true              # changing it re-runs install
+  - key: version
+    label: Minecraft version
+    type: select
+    options_from: { hook: hooks/versions.sh }   # dynamic list
+    reinstall: true
+  - key: java
+    type: select
+    options: ["8", "17", "21", "25"]
+    default: "21"
+  - key: memory
+    type: number
+    unit: MB
+    default: 2048
+    bind: limits.memory          # counts against the user's RAM quota
+  - key: motd
+    type: string
+    default: A Minecraft Server
+  - key: rcon_password
+    type: secret
+    generate: 24                 # never shown, created once
+
+ports:
+  - { name: game, proto: tcp, default: 25565 }
+  - { name: rcon, proto: tcp, internal: true }  # not published
+
+install:
+  - hook: hooks/install.sh       # resolves and downloads the right jar
+  - write: { file: eula.txt, content: "eula=true\n" }
+
+configs:                         # only these keys are managed; the rest stay the user's
+  - file: server.properties
+    format: properties
+    set:
+      server-port: "{{ports.game}}"
+      motd: "{{vars.motd}}"
+      enable-rcon: "true"
+      rcon.port: "{{ports.rcon}}"
+      rcon.password: "{{vars.rcon_password}}"
+
+start: java -Xms512M -Xmx{{vars.memory}}M -jar server.jar nogui
+ready: { log: 'Done \(\d' }
+stop:  { command: stop, timeout: 60 }
+
+console: { input: stdin }
+players:
+  join:  '(\w+) joined the game'
+  leave: '(\w+) left the game'
+
+backup:
+  before: [save-off, save-all flush]
+  after:  [save-on]
+  exclude: [logs/, cache/]</code></pre>
+  <div class="cols">
+    <div>
+      <h3>A steamcmd game needs less</h3>
+      <pre><code>id: garrys-mod
+image: ionnet-gss-base
+install:
+  - steamcmd: { app: 4020 }
+ports:
+  - { name: game, proto: udp, default: 27015 }
+start: >
+  ./srcds_run -game garrysmod -port {{ports.game}}
+  +map {{vars.map}} +maxplayers {{vars.slots}}
+stop: { command: quit }</code></pre>
+    </div>
+    <div>
+      <h3>A stack adds services</h3>
+      <pre><code>id: garrys-mod-mysql
+extends: garrys-mod
+variables:
+  - { key: db_password, type: secret, generate: 24 }
+services:
+  db:
+    image: mariadb:11
+    env:
+      MARIADB_DATABASE: gmod
+      MARIADB_PASSWORD: "{{vars.db_password}}"
+    volume: /var/lib/mysql
+# the game reaches it as host "db"</code></pre>
+    </div>
+  </div>
+  <h3>Building blocks</h3>
+  <div class="scroll"><table>
+    <tr><th>Block</th><th>Options in v1</th></tr>
+    <tr><td>Variable types</td><td><code>string</code>, <code>number</code>, <code>boolean</code>, <code>select</code>, <code>secret</code>. Flags: <code>reinstall</code>, <code>admin_only</code>, <code>bind</code> (to a resource limit).</td></tr>
+    <tr><td>Install steps</td><td><code>steamcmd</code>, <code>download</code> (with sha256), <code>extract</code>, <code>write</code>, <code>hook</code>.</td></tr>
+    <tr><td>Config formats</td><td><code>properties</code>, <code>ini</code>, <code>json</code>, <code>yaml</code>, <code>cfg</code> (Source style), <code>template</code> (whole file).</td></tr>
+    <tr><td>Hooks</td><td><code>install</code>, <code>pre-start</code>, <code>post-stop</code>, <code>update</code>, plus <code>options_from</code> for dynamic lists.</td></tr>
+    <tr><td>Stop</td><td>A console command or a signal, then SIGKILL after the timeout.</td></tr>
+    <tr><td>Console input</td><td><code>stdin</code> or <code>rcon</code>.</td></tr>
+  </table></div>
+</section>
+
+<section>
+  <h2>Images</h2>
+  <div class="scroll"><table>
+    <tr><th>Image</th><th>Contains</th><th>Used by</th></tr>
+    <tr><td>ionnet-gss-base</td><td>Debian slim, <code>gss-init</code>, curl, tar, unzip, CA certs, 32-bit runtime libs for steamcmd, a <code>gss</code> user (uid 1000).</td><td>Anything that installs through <code>game.yml</code> alone.</td></tr>
+    <tr><td>ionnet-gss-minecraft-server</td><td>Base + a Temurin JRE. Tags <code>java8</code>, <code>java17</code>, <code>java21</code>, <code>java25</code>.</td><td>Minecraft Java.</td></tr>
+    <tr><td>derived (local)</td><td>Base + a definition's <code>packages:</code>, built and cached on the host.</td><td>Games that need a few apt packages but no published image.</td></tr>
+  </table></div>
+  <p>steamcmd itself is downloaded once per host into a shared cache that is mounted read-only into containers, so it is not baked into every image.</p>
+</section>
+
+<section>
+  <h2>How a run works</h2>
+  <ol class="flow">
+    <li><strong>Create.</strong> The user picks a host, a game and fills in the variables. The panel checks quota, allocates ports from the host's pool, generates secrets and stores the server with the definition's commit pinned.</li>
+    <li><strong>Provision.</strong> The panel sends the agent one message holding the resolved definition, hook files, variables, ports and limits. The agent creates the data folder, pulls or builds the image and creates the container with memory, CPU and PID limits, all capabilities dropped and no Docker socket.</li>
+    <li><strong>Install.</strong> <code>gss-init</code> starts as PID 1, reads its spec from a mounted file and runs the install steps. Output streams to the console. State is <code>installing</code>.</li>
+    <li><strong>Configure.</strong> Before every start, <code>gss-init</code> applies the <code>configs</code> mappings, touching only the managed keys.</li>
+    <li><strong>Start.</strong> It launches the game as uid 1000 with a pseudo-terminal. State is <code>starting</code> until the <code>ready</code> pattern matches, then <code>running</code>.</li>
+    <li><strong>Observe.</strong> The agent holds the unix socket to <code>gss-init</code> for console lines, state changes and player events, samples Docker stats every 5 seconds, and forwards everything to the panel, which fans it out to browsers.</li>
+    <li><strong>Stop.</strong> The panel asks; <code>gss-init</code> sends the stop command or signal, waits for the timeout, then kills. The container stays, stopped.</li>
+  </ol>
+  <h3>States</h3>
+  <p><code>creating → installing → stopped ⇄ starting → running → stopping → stopped</code>, with <code>crashed</code> and <code>install_failed</code> as the two failure states. Optional auto-restart on crash, with a limit of 3 in 10 minutes.</p>
+</section>
+
+<section>
+  <h2>Users, quotas and hosts</h2>
+  <ul>
+    <li><strong>Roles:</strong> <code>admin</code> (hosts, sources, users, everything) and <code>user</code> (own servers only). Permission keys sit under the roles so more roles can be added later.</li>
+    <li><strong>Quota per user:</strong> number of servers, total RAM, total CPU, total disk, number of backups. Checked by the panel at create and at every change of a bound variable.</li>
+    <li><strong>Host access:</strong> an admin grants a user access to specific hosts. A host has its own capacity and port pool; the panel refuses a server the host cannot fit.</li>
+    <li><strong>Isolation:</strong> one bridge network per server (or stack), so one user's server cannot reach another's internal ports.</li>
+    <li><strong>Later:</strong> sharing a server with another user at a role (view, operate, manage). The table is planned; the UI is not in v1.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>How it fails</h2>
+  <div class="scroll"><table>
+    <tr><th>Failure</th><th>What happens</th></tr>
+    <tr><td>Panel down</td><td>Servers keep running. Agents reconnect with backoff and replay buffered state.</td></tr>
+    <tr><td>Agent restarts</td><td>Servers keep running under <code>gss-init</code>. The agent reconnects to each socket and reads the console backlog from <code>gss-init</code>'s ring buffer.</td></tr>
+    <tr><td>Host reboots</td><td>The agent starts servers that were <code>running</code> before, per a per-server autostart flag.</td></tr>
+    <tr><td>Install step fails</td><td><code>install_failed</code> with the step and its output in the console. Retry re-runs install from the start.</td></tr>
+    <tr><td>Game crashes</td><td><code>crashed</code> with the exit code; auto-restart if enabled and under the limit.</td></tr>
+    <tr><td>Source sync breaks a definition</td><td>Validation fails at sync, the previous version stays active, the error shows on the Sources page. Existing servers are pinned and unaffected.</td></tr>
+    <tr><td>Host out of ports or RAM</td><td>Creation is refused with a message naming the limit.</td></tr>
+    <tr><td>Path escape in the file manager</td><td>The agent resolves every path beneath the data folder with <code>openat2(RESOLVE_BENEATH)</code>; symlinks pointing out are refused.</td></tr>
+  </table></div>
+</section>
+
+<section>
+  <h2>Repository layout</h2>
+  <pre><code>ionnet-gss/
+  protocol/        JSON Schema for panel↔agent and agent↔supervisor messages + generator
+  server/          Deno · Hono · Sequelize (models/, migrations/, controllers/)
+  client/          React · Vite · Iontronic
+  shared/          types used by server and client (incl. generated protocol types)
+  agent/           Go: cmd/gss-agent, cmd/gss-init, internal/…
+  images/          base/, minecraft-server/
+  games/           starter definitions; later split out as the ionnet-gss-games source
+  docs/            this blueprint, definition reference, protocol, security
+  docker-compose.yml, Dockerfile, deno.json, .env.example</code></pre>
+</section>
+
+<section>
+  <h2>Build plan</h2>
+  <div class="scroll"><table>
+    <tr><th>Milestone</th><th>Delivers</th><th>Proof</th></tr>
+    <tr><td>M0</td><td>This blueprint agreed.</td><td>Your sign-off.</td></tr>
+    <tr><td>M1 Spine</td><td>Repo, protocol generator, panel auth, host enrolment, agent heartbeat.</td><td>A host shows online in the panel.</td></tr>
+    <tr><td>M2 First server</td><td>Base image, <code>gss-init</code>, definition engine, create/start/stop, live console.</td><td>A Minecraft server you can join, driven from the panel.</td></tr>
+    <tr><td>M3 Definitions</td><td>Git sources, variables form, config mappings, Garry's Mod, the stack.</td><td>All three games run from definitions in a git repo.</td></tr>
+    <tr><td>M4 Operations</td><td>File manager, backups and restore, metrics and players.</td><td>Restore a world from a backup.</td></tr>
+    <tr><td>M5 Tenancy</td><td>Quotas, host grants, invites, 2FA, agent install script, docs.</td><td>A second user limited by quota.</td></tr>
+  </table></div>
+</section>
+
+<section class="open">
+  <h2>Answered on 2026-11-15</h2>
+  <ol class="flow">
+    <li>GSS stands for Game Server Studio. The product name in the UI is "Ionnet GSS".</li>
+    <li>Images are published to GitHub Container Registry as <code>ghcr.io/ionnet-dev/ionnet-gss-*</code>.</li>
+    <li>The panel runs on hostion, and hostion is also the first host. Development uses this machine as both.</li>
+    <li>The stack example is Garry's Mod with MariaDB, as <code>garrys-mod-mysql</code> extending <code>garrys-mod</code>.</li>
+    <li>All proposed defaults are accepted.</li>
+  </ol>
+</section>
+
+<section>
+  <h2>Build log</h2>
+  <div class="scroll"><table>
+    <tr><th>Milestone</th><th>Status</th><th>Notes</th></tr>
+    <tr><td>M0</td><td>Done</td><td>Blueprint agreed 2026-11-15.</td></tr>
+    <tr><td>M1 Spine</td><td>Built, in review</td><td>Panel sign-in, users, invites, hosts, enrol tokens and live updates; Go agent enrol, run, heartbeat and reconnect; web pages. Not committed or deployed.</td></tr>
+    <tr><td>M2 First server</td><td>Next</td><td>Base image, <code>gss-init</code>, definition engine, create/start/stop and the live console, proven with Minecraft.</td></tr>
+  </table></div>
+  <h3>M1 proof, real output from this machine</h3>
+  <pre><code>$ gss-agent enrol --panel http://localhost:3200 --token gss_enrol_… --config …/agent.json
+Enrolled as "ion-desktop" (host e128f820-990b-4a83-b48b-59105b760594).
+
+$ gss-agent run --config …/agent.json
+INFO gss-agent starting version=0.1.0 panel=http://localhost:3200
+INFO connected to the panel host=ion-desktop panel=0.1.0 heartbeatSec=15
+
+GET /api/hosts →
+  name: ion-desktop   online: true   agentVersion: 0.1.0
+  os: Arch Linux, kernel 7.3.4-arch1-2, amd64
+  cpu: Intel(R) Core(TM) i7-14700F, 28 threads
+  memory: 62.6 GB   docker: 29.9.3
+  portPool: 25565-25664,27015-27064</code></pre>
+  <p>The Hosts page and Host detail page showed the same data in a headless browser with no page errors.</p>
+  <h3>Changes to the design found while building</h3>
+  <div class="scroll"><table>
+    <tr><th>Topic</th><th>What changed or was added</th></tr>
+    <tr><td>Templates</td><td>The panel renders every <code>{{…}}</code>, merges <code>extends</code>, allocates ports and generates secrets. The agent and <code>gss-init</code> receive concrete values only.</td></tr>
+    <tr><td>steamcmd cache</td><td>It cannot be mounted read-only, because steamcmd updates itself in place. To be redesigned in M3.</td></tr>
+    <tr><td>RCON</td><td>Definitions get <code>console.rcon: { port, password }</code>.</td></tr>
+    <tr><td>Config keys</td><td>Literal keys for <code>properties</code> and <code>cfg</code>, <code>section.key</code> for <code>ini</code>, dotted paths for <code>json</code> and <code>yaml</code>.</td></tr>
+    <tr><td>Secrets</td><td>Stored unencrypted in the panel database and never sent to the browser. Encryption at rest is open.</td></tr>
+    <tr><td>Sign-in</td><td>bcrypt and JWT bearer tokens with a per-user token version, so a password change or disable ends existing sessions.</td></tr>
+    <tr><td>Web app tooling</td><td>npm instead of Deno, because of the Iontronic git dependency.</td></tr>
+  </table></div>
+</section>
+</div>
