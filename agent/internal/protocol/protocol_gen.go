@@ -51,6 +51,10 @@ const (
 	InitBacklogLines = 2000
 	// InitInstallTimeoutSec default for InitSpec.installTimeoutSec: an install still running after this long is cancelled and ends install_failed.
 	InitInstallTimeoutSec = 7200
+	// InitSteamcmdDir this server's own steamcmd install (M3). Downloaded on first use from STEAMCMD_URL; never shared between servers.
+	InitSteamcmdDir = "/data/.gss/steamcmd"
+	// SteamcmdURL where gss-init fetches steamcmd from (https only).
+	SteamcmdURL = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz"
 	// GameUID uid and gid the game and every hook run as (gss user in ionnet-gss-base).
 	GameUID = 1000
 )
@@ -114,7 +118,7 @@ type GameDefinition struct {
 	Extends string `json:"extends,omitempty"`
 	// Image container image, may use templates (ionnet-gss-minecraft-server:java{{vars.java}}). Default: inherited, else ionnet-gss-base.
 	Image string `json:"image,omitempty"`
-	// Packages apt packages; the agent builds and caches a derived image.
+	// Packages apt packages (Debian names, optional :i386, at most 50). The agent builds FROM <image> + apt-get install --no-install-recommends once per (image, sorted list) and caches it as ionnet-gss-derived:<hash16>; the panel validates the names, the agent re-validates.
 	Packages  []string        `json:"packages,omitempty"`
 	Variables []VariableDecl  `json:"variables,omitempty"`
 	Ports     []PortDecl      `json:"ports,omitempty"`
@@ -130,7 +134,7 @@ type GameDefinition struct {
 	Console        *ConsoleSpec `json:"console,omitempty"`
 	Players        *PlayersSpec `json:"players,omitempty"`
 	Backup         *BackupSpec  `json:"backup,omitempty"`
-	// Services extra containers of a stack, keyed by the host name the game reaches them under.
+	// Services extra containers of a stack, keyed by the host name the game reaches them under (^[a-z][a-z0-9-]{0,30}$, at most 4). On the server's bridge only, never published, started before the game (waiting for healthcheck), stopped after it, removed with it.
 	Services map[string]ServiceSpec `json:"services,omitempty"`
 }
 
@@ -165,7 +169,9 @@ type VariableDecl struct {
 	// Options select only: the fixed choices.
 	Options     []string       `json:"options,omitempty"`
 	OptionsFrom *OptionsSource `json:"options_from,omitempty"`
-	Default     any            `json:"default,omitempty"`
+	// Pattern string and select: RE2 the whole value must match; the fallback check for options_from selects when the list can't be fetched.
+	Pattern string `json:"pattern,omitempty"`
+	Default any    `json:"default,omitempty"`
 	// Unit display unit, e.g. MB.
 	Unit string `json:"unit,omitempty"`
 	// Min number only: smallest accepted value.
@@ -181,10 +187,22 @@ type VariableDecl struct {
 	Generate int64 `json:"generate,omitempty"`
 }
 
-// OptionsSource A dynamic option list, produced by a hook that prints one option per line.
+// OptionsSource A dynamic select list fetched by the panel (never by a host or a hook): GET url (https, host on OPTIONS_FETCH_HOSTS, ≤ 2 MiB JSON, 10 s, cached OPTIONS_CACHE_MIN), take the array at items, keep entries whose fields equal where, map each to value, keep those matching include, optionally reverse, cut to limit. Static options are listed first (e.g. latest). If the fetch fails, a submitted value is accepted when it matches the variable's pattern.
 type OptionsSource struct {
-	// Hook path of the hook script inside the definition folder.
-	Hook string `json:"hook"`
+	// URL https URL; no templates.
+	URL string `json:"url"`
+	// Items dotted path to the array in the response, e.g. versions. Empty = the response is the array.
+	Items string `json:"items,omitempty"`
+	// Value dotted path inside each item, e.g. id. Empty = the item itself (arrays of strings).
+	Value string `json:"value,omitempty"`
+	// Where item field (dotted path) → required string value, e.g. { type: release }.
+	Where map[string]string `json:"where,omitempty"`
+	// Include RE2 the value must match.
+	Include string `json:"include,omitempty"`
+	// Reverse reverse the order (newest last in the source).
+	Reverse bool `json:"reverse,omitempty"`
+	// Limit at most this many options. Default 100, max 500.
+	Limit int64 `json:"limit,omitempty"`
 }
 
 // PortProto is defined in protocol/schema/definition.json.
@@ -222,6 +240,8 @@ type SteamcmdStep struct {
 	App      int64  `json:"app"`
 	Beta     string `json:"beta,omitempty"`
 	Validate bool   `json:"validate,omitempty"`
+	// Dir install folder below /data. Default is /data itself. steamcmd itself lives in INIT_STEAMCMD_DIR (per server, never shared).
+	Dir string `json:"dir,omitempty"`
 }
 
 // DownloadStep is defined in protocol/schema/definition.json.
@@ -333,13 +353,37 @@ type BackupSpec struct {
 	Exclude []string `json:"exclude,omitempty"`
 }
 
-// ServiceSpec one extra container of a stack.
+// ServiceSpec one extra container of a stack. Images are admin-trusted (they come from a source). Same hardening as the game container (CapDrop ALL plus what the image needs, no Docker socket, no published ports, the server's egress rules).
 type ServiceSpec struct {
-	Image string            `json:"image"`
-	Env   map[string]string `json:"env,omitempty"`
-	// Volume container path persisted under the server's folder on the host.
-	Volume  string `json:"volume,omitempty"`
-	Command string `json:"command,omitempty"`
+	// Image pulled as is (e.g. mariadb:11); templates allowed.
+	Image string `json:"image"`
+	// Env templates allowed ({{vars.db_password}}).
+	Env map[string]string `json:"env,omitempty"`
+	// Volume container path persisted at <server>/services/<name> on the host.
+	Volume string `json:"volume,omitempty"`
+	// Command overrides the image's CMD (run through /bin/sh -c).
+	Command     string              `json:"command,omitempty"`
+	Healthcheck *ServiceHealthcheck `json:"healthcheck,omitempty"`
+	Limits      *ServiceLimits      `json:"limits,omitempty"`
+}
+
+// ServiceHealthcheck docker healthcheck (CMD-SHELL). The game starts only after it reports healthy, or fails the start after startTimeout.
+type ServiceHealthcheck struct {
+	// Command e.g. healthcheck.sh --connect --innodb_initialized.
+	Command string `json:"command"`
+	// Interval seconds. Default 5.
+	Interval int64 `json:"interval,omitempty"`
+	// Retries default 30.
+	Retries int64 `json:"retries,omitempty"`
+	// StartTimeout seconds the game waits for healthy. Default 120.
+	StartTimeout int64 `json:"startTimeout,omitempty"`
+}
+
+// ServiceLimits per-service limits. Optional in game.yml (defaults 512 MB, 500 millis, 256 pids); always set by the panel in a resolved spec. They count toward the server's quota usage.
+type ServiceLimits struct {
+	MemoryMB  int64 `json:"memoryMb,omitempty"`
+	CPUMillis int64 `json:"cpuMillis,omitempty"`
+	Pids      int64 `json:"pids,omitempty"`
 }
 
 // HostFacts what the agent knows about its machine. Collected at enrol, hello and every heartbeat.
@@ -485,6 +529,36 @@ type ServerStatus struct {
 	InstallProgress *InstallProgress `json:"installProgress"`
 	// Reason cause of install_failed / crashed, as in the last StateChange.
 	Reason *string `json:"reason"`
+	// Services stack services (M3); empty for single-container servers.
+	Services []ServiceStatus `json:"services"`
+}
+
+// ServiceState docker's view of one stack service. missing = no container (not provisioned yet, or removed by hand).
+type ServiceState string
+
+// ServiceState values.
+const (
+	ServiceStateMissing   ServiceState = "missing"
+	ServiceStateCreated   ServiceState = "created"
+	ServiceStateStarting  ServiceState = "starting"
+	ServiceStateHealthy   ServiceState = "healthy"
+	ServiceStateUnhealthy ServiceState = "unhealthy"
+	ServiceStateRunning   ServiceState = "running"
+	ServiceStateExited    ServiceState = "exited"
+)
+
+// ServiceStatus is defined in protocol/schema/server.json.
+type ServiceStatus struct {
+	Name     string       `json:"name"`
+	Image    string       `json:"image"`
+	State    ServiceState `json:"state"`
+	ExitCode *int64       `json:"exitCode"`
+}
+
+// ServicesChange is defined in protocol/schema/server.json.
+type ServicesChange struct {
+	ServerID string          `json:"serverId"`
+	Services []ServiceStatus `json:"services"`
 }
 
 // ServerRef is defined in protocol/schema/server.json.
@@ -618,7 +692,7 @@ const (
 
 // ConsoleLine is defined in protocol/schema/server.json.
 type ConsoleLine struct {
-	// Seq monotonic per server for the life of the gss-init process.
+	// Seq monotonic per server for the life of the gss-init process. 0 = a line from the agent itself (image pull, derived build, service start), stream system: not in the backlog, never deduped.
 	Seq    int64         `json:"seq"`
 	At     time.Time     `json:"at"`
 	Stream ConsoleStream `json:"stream"`
@@ -787,6 +861,10 @@ const (
 	MsgServerStats = "server.stats"
 	// MsgServerPlayer: agent → panel, event PlayerEvent (M4).
 	MsgServerPlayer = "server.player"
+	// MsgServerUpdate: panel → agent, request ServerRef, response ServerStatus (M3).
+	MsgServerUpdate = "server.update"
+	// MsgServerServices: agent → panel, event ServicesChange (M3).
+	MsgServerServices = "server.services"
 	// InitMsgStatus: agent → supervisor, request Empty, response InitStatus (M2).
 	InitMsgStatus = "status"
 	// InitMsgInstall: agent → supervisor, request Empty, response InitStatus (M2).
@@ -799,6 +877,8 @@ const (
 	InitMsgInput = "input"
 	// InitMsgBacklog: agent → supervisor, request InitBacklogRequest, response BacklogResponse (M2).
 	InitMsgBacklog = "backlog"
+	// InitMsgUpdate: agent → supervisor, request Empty, response InitStatus (M3).
+	InitMsgUpdate = "update"
 	// InitMsgReload: agent → supervisor, request Empty, response Empty (M2).
 	InitMsgReload = "reload"
 	// InitMsgConsole: supervisor → agent, event ConsoleLine (M2).
@@ -834,12 +914,15 @@ var Messages = []MessageSpec{
 	{Channel: "agent", Type: "server.state", Kind: MessageKindEvent, From: "agent", Milestone: 2},
 	{Channel: "agent", Type: "server.stats", Kind: MessageKindEvent, From: "agent", Milestone: 2},
 	{Channel: "agent", Type: "server.player", Kind: MessageKindEvent, From: "agent", Milestone: 4},
+	{Channel: "agent", Type: "server.update", Kind: MessageKindRequest, From: "panel", Milestone: 3},
+	{Channel: "agent", Type: "server.services", Kind: MessageKindEvent, From: "agent", Milestone: 3},
 	{Channel: "supervisor", Type: "status", Kind: MessageKindRequest, From: "agent", Milestone: 2},
 	{Channel: "supervisor", Type: "install", Kind: MessageKindRequest, From: "agent", Milestone: 2},
 	{Channel: "supervisor", Type: "start", Kind: MessageKindRequest, From: "agent", Milestone: 2},
 	{Channel: "supervisor", Type: "stop", Kind: MessageKindRequest, From: "agent", Milestone: 2},
 	{Channel: "supervisor", Type: "input", Kind: MessageKindRequest, From: "agent", Milestone: 2},
 	{Channel: "supervisor", Type: "backlog", Kind: MessageKindRequest, From: "agent", Milestone: 2},
+	{Channel: "supervisor", Type: "update", Kind: MessageKindRequest, From: "agent", Milestone: 3},
 	{Channel: "supervisor", Type: "reload", Kind: MessageKindRequest, From: "agent", Milestone: 2},
 	{Channel: "supervisor", Type: "console", Kind: MessageKindEvent, From: "supervisor", Milestone: 2},
 	{Channel: "supervisor", Type: "state", Kind: MessageKindEvent, From: "supervisor", Milestone: 2},

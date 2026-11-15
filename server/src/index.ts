@@ -9,6 +9,7 @@ import { createApp } from "./App.ts";
 import { AgentGateway } from "./gateways/agent/AgentGateway.ts";
 import { LiveGateway } from "./gateways/live/LiveGateway.ts";
 import { DefinitionSync } from "./definitions/DefinitionSync.ts";
+import { startSourceSync } from "./jobs/sourceSync.ts";
 
 // Last-resort net: log instead of exiting, which would drop every agent and browser socket at once.
 globalThis.addEventListener("unhandledrejection", (event) => {
@@ -27,6 +28,7 @@ await DefinitionSync.syncBuiltin(); // games/ → definitions rows; logs failure
 const app = createApp();
 AgentGateway.start();
 LiveGateway.start();
+const stopSourceSync = startSourceSync();
 
 const server = Deno.serve({
   port: Config.PORT,
@@ -38,6 +40,7 @@ async function shutdown(): Promise<void> {
   console.log("shutting down");
   AgentGateway.stop();
   LiveGateway.stop();
+  stopSourceSync();
   await server.shutdown();
   await sequelize.close();
   Deno.exit(0);

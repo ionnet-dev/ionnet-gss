@@ -10,7 +10,7 @@ import {
   type NonAttribute,
   type Sequelize,
 } from "sequelize";
-import { SERVER_STATE_VALUES, type ServerState } from "@shared/protocol/protocol.gen.ts";
+import { SERVER_STATE_VALUES, type ServerState, type ServiceStatus } from "@shared/protocol/protocol.gen.ts";
 import { jsonColumn, UUID_ID, intFk, uuidFk } from "./columns.ts";
 import type { Definition } from "./Definition.ts";
 import type { Host } from "./Host.ts";
@@ -41,6 +41,7 @@ export class GameServer extends Model<InferAttributes<GameServer>, InferCreation
   declare specHash: string | null; // Hash of the spec last provisioned; null = never provisioned.
   declare installedAt: Date | null;
   declare deleteKeepData: CreationOptional<boolean>; // keepData of the pending delete (state "deleting").
+  declare servicesStatus: ServiceStatus[] | null; // Last stack service states from the agent (M3); null = never reported.
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;
 
@@ -70,6 +71,7 @@ export class GameServer extends Model<InferAttributes<GameServer>, InferCreation
       specHash: { type: DataTypes.CHAR(64), allowNull: true },
       installedAt: { type: DataTypes.DATE, allowNull: true },
       deleteKeepData: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+      servicesStatus: jsonColumn("servicesStatus", true, null),
       createdAt: DataTypes.DATE,
       updatedAt: DataTypes.DATE,
     }, { sequelize, tableName: "game_servers" });

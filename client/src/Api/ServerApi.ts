@@ -8,6 +8,7 @@ import type {
   UpdateServerBody,
   UpdateServerResponse,
 } from "@shared/api/servers.ts";
+import type { UpgradeServerBody, UpgradeServerResponse } from "@shared/api/servers.ts";
 import { useEffect, useState } from "react";
 import type { LiveEvents } from "@shared/live.ts";
 import { useResource } from "@/hooks/useResource.ts";
@@ -53,6 +54,20 @@ export namespace ServerApi {
 
   export function reinstall(id: string): Promise<GameServerDto> {
     return BaseApi.POST(`/servers/${id}/reinstall`);
+  }
+
+  /**
+   * Move to the latest (or the given) definition version (M3). Stopped only.
+   */
+  export function upgrade(id: string, body: UpgradeServerBody = {}): Promise<UpgradeServerResponse> {
+    return BaseApi.POST(`/servers/${id}/upgrade`, body);
+  }
+
+  /**
+   * Re-run steamcmd + the update hook (M3). Stopped only.
+   */
+  export function updateGame(id: string): Promise<GameServerDto> {
+    return BaseApi.POST(`/servers/${id}/update`);
   }
 
   export function remove(id: string, keepData = false): Promise<OkResponse> {

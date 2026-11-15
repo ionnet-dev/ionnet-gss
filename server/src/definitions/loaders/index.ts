@@ -3,8 +3,10 @@
  */
 import type { Source } from "../../models/Source.ts";
 import type { DefinitionLoader } from "./DefinitionLoader.ts";
+import { GitLoader } from "./GitLoader.ts";
 import { LocalLoader } from "./LocalLoader.ts";
 
 export const LOADERS: { [K in Source.Kind]?: DefinitionLoader } = {
   local: new LocalLoader(),
+  git: new GitLoader(),
 };

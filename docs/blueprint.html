@@ -50,7 +50,7 @@ li { margin-bottom: 4px; }
 
 <div class="wrap">
 <header>
-  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 and 2 built, milestone 2 in review</p>
+  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 and 2 done, milestone 3 starting</p>
   <h1>Ionnet GSS</h1>
   <p class="lead">Ionnet Game Server Studio. A game server manager: one control panel, an agent on every Host Machine, and one Docker container or stack per Game Server. Each game is a folder of configuration in a git repo, so adding a game means pushing a folder.</p>
   <p>This page is the design we agreed in three rounds of questions, plus the defaults I filled in around them. Rows tagged <span class="tag you">you chose</span> are settled. Rows tagged <span class="tag mine">my default</span> were my proposals, which you accepted on 2026-11-15.</p>
@@ -368,8 +368,9 @@ services:
     <tr><th>Milestone</th><th>Status</th><th>Notes</th></tr>
     <tr><td>M0</td><td>Done</td><td>Blueprint agreed 2026-11-15.</td></tr>
     <tr><td>M1 Spine</td><td>Done</td><td>Panel sign-in, users, invites, hosts, enrol tokens and live updates; Go agent enrol, run, heartbeat and reconnect; web pages. Reviewed, 15 findings fixed, committed as <code>84cfb97</code>.</td></tr>
-    <tr><td>M2 First server</td><td>Built, fixing review findings</td><td>Base and Minecraft images, <code>gss-init</code>, agent Docker side, definition engine, game server API, servers pages with live console. The review found 14 issues, the worst being mismatched console size limits that could disconnect a host. Not committed yet. The outbound network block is built right after the fixes.</td></tr>
-    <tr><td>M3 Definitions</td><td>Next</td><td>Git sources, remaining config formats, steamcmd, Garry's Mod and the stack.</td></tr>
+    <tr><td>M2 First server</td><td>Done</td><td>Base and Minecraft images, <code>gss-init</code>, agent Docker side, definition engine, game server API, servers pages with live console. Reviewed, 14 findings fixed, committed as <code>1ac1557</code>.</td></tr>
+    <tr><td>Outbound block</td><td>Done</td><td>Private, host and link-local destinations are rejected by default; admin switch per server. Committed as <code>a6b884f</code>. Not separately reviewed yet.</td></tr>
+    <tr><td>M3 Definitions</td><td>Starting</td><td>Git sources, remaining config formats, steamcmd, Garry's Mod and the stack.</td></tr>
   </table></div>
   <h3>M1 proof, real output from this machine</h3>
   <pre><code>$ gss-agent enrol --panel http://localhost:3200 --token gss_enrol_… --config …/agent.json
@@ -405,6 +406,16 @@ agent restarted while the server ran:
 
 stop → "The game stopped (exit code 0)."   state: stopped</code></pre>
   <p>The container is <code>ghcr.io/ionnet-dev/ionnet-gss-minecraft-server:java25</code>, built locally. A second server got port 25566, and deleting it removed its container, network and files. Nobody has joined with a real Minecraft client yet; the ping above speaks the same protocol the client's server list uses.</p>
+  <h3>Outbound block, real output from the Survival container</h3>
+  <pre><code>curl http://192.168.1.1/        → failed at once (router on the LAN)
+curl http://172.17.0.1:3200/    → failed at once (Docker host)
+curl http://169.254.169.254/    → failed at once (link-local metadata)
+curl https://example.com        → 200
+game port 25565 from the host   → accepts connections
+
+host facts: egress { filtering: true, restricted: 1 }
+agent log:  applied the egress table table="inet ionnet_gss" restricted=1</code></pre>
+  <p>The rules live in one nftables table the agent owns, <code>inet ionnet_gss</code>, applied through a short-lived helper container. The builder showed the rest of this machine's ruleset was identical before and after its tests. A server that may not reach private networks refuses to start on a host where filtering is broken.</p>
   <h3>How M2 was tested</h3>
   <div class="scroll"><table>
     <tr><th>Part</th><th>Tested against</th><th>Result</th></tr>
@@ -428,7 +439,13 @@ stop → "The game stopped (exit code 0)."   state: stopped</code></pre>
     <tr><td>Settings</td><td>Changeable only while a server is stopped; saving re-provisions it. A server keeps the definition it was created from until then.</td></tr>
     <tr><td>Capabilities</td><td>All dropped except the six <code>gss-init</code> needs to own <code>/data</code> and switch to uid 1000: CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL. <code>no-new-privileges</code> is set.</td></tr>
     <tr><td>Deleting files</td><td>A non-root agent cannot remove root-owned files a container left behind, so it deletes them from a short-lived cleanup container.</td></tr>
-    <tr><td>Minecraft</td><td>Paper downloads use the v3 API (v2 is shut down). Default Java is 25 because Minecraft 26.3 needs it. The version field is free text; <code>latest</code> is resolved at install.</td></tr>
+    <tr><td>Minecraft</td><td>Paper downloads use the v3 API (v2 is shut down). Default Java is 25 because Minecraft 26.3 needs it. The version field is free text; <code>latest</code> is resolved at install. The heap is 75% of the memory setting, which has a minimum of 1024 MB.</td></tr>
+    <tr><td>Console limits</td><td>One set of limits for all three hops: 8 KiB per line, 500 lines and 1 MiB per batch. History pages backwards 500 lines at a time.</td></tr>
+    <tr><td>Control socket</td><td>Owner-only: the socket is 0600 and its folder 0700, owned by the agent's user.</td></tr>
+    <tr><td>Deleting</td><td>A server stays in a <code>deleting</code> state with its ports held until the host confirms, so a slow or offline host cannot leave an orphan or bring a deleted server back.</td></tr>
+    <tr><td>Template filters</td><td>User text in a start command must use <code>{{vars.x|sh}}</code>; <code>|json</code> exists for config templates. A definition that skips the filter fails validation.</td></tr>
+    <tr><td>Disk limit</td><td>Checked about once a minute; a server over its limit is stopped with the measured size as the reason.</td></tr>
+    <tr><td>steamcmd</td><td>Decided for M3: each server keeps its own copy under its data folder. A shared writable copy would let one tenant tamper with another's install.</td></tr>
   </table></div>
 </section>
 </div>

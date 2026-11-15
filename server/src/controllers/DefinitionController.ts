@@ -31,6 +31,15 @@ export namespace DefinitionController {
     if (!definition) throw HttpError.notFound("There is no game definition with that id.");
     return c.json<DefinitionDto>(definition.toClientJSON(c.var.user.isAdmin()));
   });
+
+  /**
+   * GET /api/definitions/:id/options/:key → VariableOptionsResponse (M3). 404 unknown variable, 400 when it has no
+   * `options_from`; `admin_only` variables 404 for non-admins.
+   */
+  router.get("/:id/options/:key", async (c) => {
+    const id = paramInt(c, "id");
+    throw HttpError.notImplemented("GET /api/definitions/:id/options/:key"); // TODO(builder): C — OptionsFetcher.getOptions
+  });
 }
 
 export default DefinitionController;

@@ -56,6 +56,7 @@ function parseServers(value: unknown): ServerStatus[] {
       specHash: status.specHash,
       installProgress: progress,
       reason: status.reason?.slice(0, 2000) ?? null,
+      services: [], // TODO(builder): C (M3) — validate and keep status.services (≤ 4, name/image/state checked).
     };
   });
 }

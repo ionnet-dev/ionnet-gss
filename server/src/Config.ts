@@ -114,6 +114,20 @@ function load() {
     /** Registry prefix for bare `ionnet-gss-*` image names in game.yml; untagged ones get `:latest`. */
     IMAGE_REGISTRY: readString("IMAGE_REGISTRY", "ghcr.io/ionnet-dev").replace(/\/+$/, ""),
 
+    // Sources (M3)
+    /** Minutes between automatic syncs of git sources (per-source override; 0 = manual only). */
+    SOURCE_SYNC_INTERVAL_MIN: readInt("SOURCE_SYNC_INTERVAL_MIN", 60, 0),
+    /** Seconds one git clone/fetch may take before it is killed. */
+    SOURCE_GIT_TIMEOUT_SEC: readInt("SOURCE_GIT_TIMEOUT_SEC", 60, 5),
+    /** Largest checkout accepted, in MB (the clone is deleted when it is larger). */
+    SOURCE_MAX_MB: readInt("SOURCE_MAX_MB", 50, 1),
+    /** Most files accepted in a checkout. */
+    SOURCE_MAX_FILES: readInt("SOURCE_MAX_FILES", 5000, 1),
+    /** Comma-separated https hosts `options_from` may fetch from. */
+    OPTIONS_FETCH_HOSTS: readString("OPTIONS_FETCH_HOSTS", "piston-meta.mojang.com,launchermeta.mojang.com,api.papermc.io"),
+    /** Minutes a fetched option list is cached. */
+    OPTIONS_CACHE_MIN: readInt("OPTIONS_CACHE_MIN", 15, 1),
+
     // Quotas (used where a user's own quota field is null)
     DEFAULT_QUOTA_SERVERS: readInt("DEFAULT_QUOTA_SERVERS", 2, 0),
     DEFAULT_QUOTA_MEMORY_MB: readInt("DEFAULT_QUOTA_MEMORY_MB", 4096, 0),

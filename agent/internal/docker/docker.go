@@ -91,6 +91,15 @@ type ContainerSpec struct {
 	Tty    bool
 	// Restart is the Docker restart policy name; empty = "no".
 	Restart string
+	// Healthcheck is a CMD-SHELL check (stack services, M3); nil = the image's own, if any.
+	Healthcheck *Healthcheck
+}
+
+// Healthcheck is a Docker HEALTHCHECK set at create time.
+type Healthcheck struct {
+	Command  string // Run through /bin/sh -c.
+	Interval time.Duration
+	Retries  int
 }
 
 // Port is one published port.
@@ -111,6 +120,8 @@ type ContainerInfo struct {
 	Status string
 	// StartedAt is when the container's current (or last) run started; it changes on every restart. Empty in lists.
 	StartedAt string
+	// Health is State.Health.Status from inspect: "starting", "healthy", "unhealthy", or "" without a healthcheck (M3).
+	Health string
 }
 
 // Stats is one sample, already converted from Docker's cumulative counters.

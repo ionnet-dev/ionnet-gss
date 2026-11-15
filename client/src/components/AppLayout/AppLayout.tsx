@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { AppShell, Icon, NavItem, NavSection, Sidebar, TabBar, TabBarItem } from "@ionnet/iontronic/react";
-import { Gamepad2, Server, Ticket, UserRound, Users } from "@ionnet/iontronic/icons";
+import { Gamepad2, GitBranch, Server, Ticket, UserRound, Users } from "@ionnet/iontronic/icons";
 import { APP_NAME } from "@shared/constants.ts";
 import { useAuth } from "@/hooks/useAuth.ts";
 import { Link, useLocation } from "@/router/Router.tsx";
@@ -30,8 +30,9 @@ export default function AppLayout(props: AppLayoutProps) {
         >
           <NavItem icon={Gamepad2} label="Servers" active={onServers} href="/servers" render={<Link to="/servers" />} />
           {auth.has("HOSTS_VIEW") && <NavItem icon={Server} label="Hosts" active={onHosts} href="/hosts" render={<Link to="/hosts" />} />}
-          {(auth.has("USERS_MANAGE") || auth.has("INVITES_MANAGE")) && (
+          {(auth.has("USERS_MANAGE") || auth.has("INVITES_MANAGE") || auth.has("SOURCES_MANAGE")) && (
             <NavSection label="Manage">
+              {auth.has("SOURCES_MANAGE") && <NavItem icon={GitBranch} label="Sources" active={path === "/sources"} href="/sources" render={<Link to="/sources" />} />}
               {auth.has("USERS_MANAGE") && <NavItem icon={Users} label="Users" active={path === "/users"} href="/users" render={<Link to="/users" />} />}
               {auth.has("INVITES_MANAGE") && <NavItem icon={Ticket} label="Invites" active={path === "/invites"} href="/invites" render={<Link to="/invites" />} />}
             </NavSection>

@@ -9,6 +9,7 @@ import { handleEnrol } from "./enrol.ts";
 import { handleHello } from "./hello.ts";
 import { handleHeartbeat } from "./heartbeat.ts";
 import { handleServerConsole } from "./serverConsole.ts";
+import { handleServerServices } from "./serverServices.ts";
 import { handleServerState } from "./serverState.ts";
 
 export type AgentRequestHandler<T extends keyof AgentToPanelRequests> = (
@@ -30,5 +31,6 @@ export const EVENT_HANDLERS: { [T in keyof AgentToPanelEvents]?: AgentEventHandl
   "heartbeat": handleHeartbeat,
   "server.state": handleServerState,
   "server.console": handleServerConsole,
+  "server.services": handleServerServices,
   // M4: "server.stats", "server.player"
 };

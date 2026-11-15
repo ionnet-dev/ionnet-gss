@@ -12,7 +12,7 @@
         "name": { "type": "string" },
         "extends": { "type": "string", "description": "Id of another definition in the same source. Lists merge by `key`/`name`; scalars override." },
         "image": { "type": "string", "description": "Container image, may use templates (`ionnet-gss-minecraft-server:java{{vars.java}}`). Default: inherited, else `ionnet-gss-base`." },
-        "packages": { "type": "array", "items": { "type": "string" }, "description": "apt packages; the agent builds and caches a derived image." },
+        "packages": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]{0,62}(:i386)?$" }, "description": "apt packages (Debian names, optional `:i386`, at most 50). The agent builds `FROM <image>` + `apt-get install --no-install-recommends` once per (image, sorted list) and caches it as `ionnet-gss-derived:<hash16>`; the panel validates the names, the agent re-validates." },
         "variables": { "type": "array", "items": { "$ref": "#/$defs/VariableDecl" } },
         "ports": { "type": "array", "items": { "$ref": "#/$defs/PortDecl" } },
         "install": { "type": "array", "items": { "$ref": "#/$defs/InstallStep" } },
@@ -25,7 +25,7 @@
         "console": { "$ref": "#/$defs/ConsoleSpec" },
         "players": { "$ref": "#/$defs/PlayersSpec" },
         "backup": { "$ref": "#/$defs/BackupSpec" },
-        "services": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ServiceSpec" }, "description": "Extra containers of a stack, keyed by the host name the game reaches them under." }
+        "services": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ServiceSpec" }, "description": "Extra containers of a stack, keyed by the host name the game reaches them under (`^[a-z][a-z0-9-]{0,30}$`, at most 4). On the server's bridge only, never published, started before the game (waiting for `healthcheck`), stopped after it, removed with it." }
       },
       "required": ["id"]
     },
@@ -47,6 +47,7 @@
         "type": { "$ref": "#/$defs/VariableType" },
         "options": { "type": "array", "items": { "type": "string" }, "description": "`select` only: the fixed choices." },
         "options_from": { "$ref": "#/$defs/OptionsSource" },
+        "pattern": { "type": "string", "description": "`string` and `select`: RE2 the whole value must match; the fallback check for `options_from` selects when the list can't be fetched." },
         "default": { "type": ["string", "number", "boolean"] },
         "unit": { "type": "string", "description": "Display unit, e.g. `MB`." },
         "min": { "type": "number", "description": "`number` only: smallest accepted value." },
@@ -60,11 +61,17 @@
     },
     "OptionsSource": {
       "type": "object",
-      "description": "A dynamic option list, produced by a hook that prints one option per line.",
+      "description": "A dynamic `select` list fetched by the panel (never by a host or a hook): GET `url` (https, host on OPTIONS_FETCH_HOSTS, ≤ 2 MiB JSON, 10 s, cached OPTIONS_CACHE_MIN), take the array at `items`, keep entries whose fields equal `where`, map each to `value`, keep those matching `include`, optionally reverse, cut to `limit`. Static `options` are listed first (e.g. `latest`). If the fetch fails, a submitted value is accepted when it matches the variable's `pattern`.",
       "properties": {
-        "hook": { "type": "string", "description": "Path of the hook script inside the definition folder." }
+        "url": { "type": "string", "description": "https URL; no templates." },
+        "items": { "type": "string", "description": "Dotted path to the array in the response, e.g. `versions`. Empty = the response is the array." },
+        "value": { "type": "string", "description": "Dotted path inside each item, e.g. `id`. Empty = the item itself (arrays of strings)." },
+        "where": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Item field (dotted path) → required string value, e.g. `{ type: release }`." },
+        "include": { "type": "string", "description": "RE2 the value must match." },
+        "reverse": { "type": "boolean", "description": "Reverse the order (newest last in the source)." },
+        "limit": { "type": "integer", "description": "At most this many options. Default 100, max 500." }
       },
-      "required": ["hook"]
+      "required": ["url"]
     },
     "PortProto": {
       "type": "string",
@@ -98,7 +105,8 @@
       "properties": {
         "app": { "type": "integer", "description": "Steam app id, e.g. 4020 for Garry's Mod." },
         "beta": { "type": "string" },
-        "validate": { "type": "boolean" }
+        "validate": { "type": "boolean" },
+        "dir": { "type": "string", "description": "Install folder below /data. Default is /data itself. steamcmd itself lives in INIT_STEAMCMD_DIR (per server, never shared)." }
       },
       "required": ["app"]
     },
@@ -210,14 +218,36 @@
     },
     "ServiceSpec": {
       "type": "object",
-      "description": "One extra container of a stack.",
+      "description": "One extra container of a stack. Images are admin-trusted (they come from a source). Same hardening as the game container (CapDrop ALL plus what the image needs, no Docker socket, no published ports, the server's egress rules).",
       "properties": {
-        "image": { "type": "string" },
-        "env": { "type": "object", "additionalProperties": { "type": "string" } },
-        "volume": { "type": "string", "description": "Container path persisted under the server's folder on the host." },
-        "command": { "type": "string" }
+        "image": { "type": "string", "description": "Pulled as is (e.g. `mariadb:11`); templates allowed." },
+        "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Templates allowed (`{{vars.db_password}}`)." },
+        "volume": { "type": "string", "description": "Container path persisted at <server>/services/<name> on the host." },
+        "command": { "type": "string", "description": "Overrides the image's CMD (run through /bin/sh -c)." },
+        "healthcheck": { "$ref": "#/$defs/ServiceHealthcheck" },
+        "limits": { "$ref": "#/$defs/ServiceLimits" }
       },
       "required": ["image"]
+    },
+    "ServiceHealthcheck": {
+      "type": "object",
+      "description": "Docker healthcheck (CMD-SHELL). The game starts only after it reports healthy, or fails the start after `startTimeout`.",
+      "properties": {
+        "command": { "type": "string", "description": "e.g. `healthcheck.sh --connect --innodb_initialized`." },
+        "interval": { "type": "integer", "description": "Seconds. Default 5." },
+        "retries": { "type": "integer", "description": "Default 30." },
+        "startTimeout": { "type": "integer", "description": "Seconds the game waits for healthy. Default 120." }
+      },
+      "required": ["command"]
+    },
+    "ServiceLimits": {
+      "type": "object",
+      "description": "Per-service limits. Optional in game.yml (defaults 512 MB, 500 millis, 256 pids); always set by the panel in a resolved spec. They count toward the server's quota usage.",
+      "properties": {
+        "memoryMb": { "type": "integer" },
+        "cpuMillis": { "type": "integer" },
+        "pids": { "type": "integer" }
+      }
     }
   }
 }

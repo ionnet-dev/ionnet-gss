@@ -1,0 +1,25 @@
+# Garry's Mod with a MariaDB beside it, for MySQLOO addons. Proves `extends` and `services`. M3 skeleton (C).
+# The game reaches the database as host "db"; the details are rendered into garrysmod/data/gss_database.json.
+id: garrys-mod-mysql
+name: "Garry's Mod + MySQL"
+extends: garrys-mod
+
+variables:
+  - { key: db_password, type: secret, generate: 24 }
+
+services:
+  db:
+    image: mariadb:11.4
+    env:
+      MARIADB_DATABASE: gmod
+      MARIADB_USER: gmod
+      MARIADB_PASSWORD: "{{vars.db_password}}"
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    volume: /var/lib/mysql
+    healthcheck: { command: "healthcheck.sh --connect --innodb_initialized", interval: 5, retries: 30, startTimeout: 120 }
+    limits: { memoryMb: 512, cpuMillis: 500 }
+
+configs:
+  - file: garrysmod/data/gss_database.json
+    format: template
+    template: templates/gss_database.json

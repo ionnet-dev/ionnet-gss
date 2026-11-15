@@ -39,7 +39,9 @@ server/src/
   gateways/live/       LiveGateway (static: push(event, data, audience))
   definitions/         DefinitionEngine (pure: parse, resolve extends, variables, limits, image, render, buildSpec),
                        DefinitionSync (load → validate → definitions rows), loaders/ (DefinitionLoader per Source.kind:
-                       LocalLoader = games/; M3 GitLoader)
+                       LocalLoader = games/; GitLoader = safe shallow git clone, M3), OptionsFetcher (M3:
+                       options_from lists, https allowlist + cache)
+  jobs/                sourceSync.ts (M3: interval sync of git sources)
   servers/             GameServerService: every server operation (access, quota, ports, provision, lifecycle,
                        console, agent state → rows + live events, reconcile after hello)
   lib/                 HttpError, http (AppEnv, readBody, paramInt/Uuid, clientIp), RateLimiter, tokens, portPool, totp (M5)
@@ -55,7 +57,7 @@ client/                npm + Vite (Iontronic is a github: dep Deno can't install
   src/live/            LiveSocket (the /ws/live client, on(event))
   src/components/      AppLayout (AppShell/Sidebar/TabBar), AuthLayout
   src/pages/<Name>/    Login, Setup, Register, Hosts, HostDetail, Users, Invites, Account, NotFound;
-                       M2: Servers (also `/`), ServerCreate, ServerDetail; component Console
+                       M2: Servers (also `/`), ServerCreate, ServerDetail; component Console; M3: Sources
 agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
   cmd/gss-agent        enrol | run | version | help
   cmd/gss-init         PID 1 in game containers (M2)
@@ -69,6 +71,8 @@ agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
   internal/supervisor  agent's client for gss-init's socket (M2)
   internal/servers     Manager (manager.go), New(Options) + container/network naming and labels (new.go) (M2),
                        egress.go (bridge names, egress checks before a container or game starts)
+  internal/images      Resolver: image ensure + derived `packages:` images, ionnet-gss-derived:<hash16> (M3)
+  internal/stacks      Stack: a server's service containers (Ensure/Start with health wait/Stop/Remove/Status) (M3)
   internal/egress      Firewall: the agent's nftables table `inet ionnet_gss` (ruleset.go: pure script builder;
                        firewall.go: desired state, incremental adds, rebuilds, nft helper container)
   internal/initd       gss-init: Supervisor (initd.go), Console/Game/Launcher/RconClient interfaces (parts.go),
@@ -78,7 +82,8 @@ agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
 images/                build.sh (deno task images:build; local tags only), base/ (Dockerfile builds gss-init from
                        agent/; Dockerfile.dockerignore; has nftables for the agent's nft helper), minecraft-server/
                        (ARG JAVA → :java8/17/21/25)
-games/                 built-in definition source: README.md, minecraft-java/{game.yml, hooks/install.sh}
+games/                 built-in definition source: README.md, minecraft-java/{game.yml, hooks/install.sh},
+                       M3: garrys-mod/game.yml, garrys-mod-mysql/{game.yml, templates/gss_database.json}
 docs/                  blueprint.html
 ```
 
@@ -419,3 +424,92 @@ Main-session-only files (same as M1, plus): `protocol/schema/*` (ask; the M2 con
 Order: all four in parallel. A and B meet at the socket protocol (`supervisor.json`), B and C at `server.json`, C
 and D at `shared/api/servers.ts` and `shared/live.ts`. Integration (main): `deno task images:build`, one real
 Minecraft server created from the UI on this machine, joinable at the shown address.
+
+## M3: definitions
+
+### Contracts
+
+- **Sources.** `sources.kind` = `local` (the built-in `builtin` = GAMES_DIR, commit `"local"`, edit-only `enabled`)
+  or `git` (https only, branch, subfolder `path`, optional write-only `authToken`, `syncIntervalMin`). Clones go in
+  `AppSystem.sourcesDir/<id>`. Safety rules are in the `GitLoader` doc comment (protocol allowlist, no hooks,
+  submodules or symlinks, header-only token, timeout, size and file limits). Sync = `DefinitionSync.syncSource`
+  (one at a time per source; `jobs/sourceSync.ts` on the interval, `POST /api/sources/:id/sync` on demand). A
+  game that fails validation keeps its previous active row; its error is in `definitionErrors[gameId]`.
+- **Pinning and upgrade.** A server keeps its `definitionId` (one version). `updateAvailable` + `latestDefinition`
+  on the detail; `POST /api/servers/:id/upgrade` while stopped re-resolves the variables and re-provisions
+  (`reinstall` when the install steps or a `reinstall` variable changed).
+- **`options_from`** (decided: panel-side fetcher, no hooks). `OptionsSource {url, items, value, where, include,
+  reverse, limit}`; https host on OPTIONS_FETCH_HOSTS; ≤ 2 MiB; 10 s; cached OPTIONS_CACHE_MIN; static `options`
+  first; on fetch failure the value must match the variable's new `pattern`. Route
+  `GET /api/definitions/:id/options/:key`. Replaces the blueprint's `options_from: { hook }`.
+- **steamcmd** (gss-init): per-server copy in `INIT_STEAMCMD_DIR` (`/data/.gss/steamcmd`), fetched from
+  `STEAMCMD_URL`, anonymous login only, `+force_install_dir <dir>` (below /data), `+app_update <app> [-beta b]
+  [validate]`, progress lines to the console, install progress per step. `server.update` (panel → agent) and
+  supervisor `update` re-run only the steamcmd steps + the `update` hook while stopped (`POST /api/servers/:id/update`).
+- **Config formats** (gss-init `configs/`): addressing per `ConfigFormat` (properties/cfg literal keys; ini
+  `section.key`; json/yaml dotted paths). cfg = Source-engine `key "value"` lines (quotes escaped, comments kept).
+  yaml uses `gopkg.in/yaml.v3` (in go.mod) node editing to keep comments. Only managed keys change; a missing file is
+  created.
+- **`packages:`** → `images.Resolver.Ensure`: generated Dockerfile only, names re-validated (`images.PackageName`, ≤
+  50), cached as `ionnet-gss-derived:<hash16>`; build lines go to the console with `seq: 0`.
+- **`services:`** → `stacks.Stack`: ≤ 4, containers `gss-<id>-<name>` on the server's bridge with alias `<name>`,
+  never published, same hardening, `ServiceSpec.limits` (panel always fills them; they count toward quota usage),
+  volume at `<server>/services/<name>`, healthcheck wait before the game starts. Status travels in
+  `ServerStatus.services` (hello, every response) and the `server.services` event → `game_servers.services_status` →
+  live `server.services`. The egress rules must keep intra-bridge traffic (game ↔ db) allowed.
+- **Migration** `20261119000000-m3-sources.ts`: `sources.auth_token`, `sources.sync_interval_min`,
+  `game_servers.services_status`.
+- **Live:** `source.updated {sourceId, syncing}` (SOURCES_MANAGE), `definitions.updated {sourceId}` (everyone),
+  `server.services {serverId, services}` (owner + SERVERS_MANAGE_ALL).
+
+### API routes (M3)
+
+| Method | Path | Auth | Body | Response |
+| --- | --- | --- | --- | --- |
+| GET | /api/sources | P:SOURCES_MANAGE | | `SourceDto[]` |
+| POST | /api/sources | P:SOURCES_MANAGE | `CreateSourceBody` | 201 `SourceDto`; 400, 409 name |
+| PATCH | /api/sources/:id | P:SOURCES_MANAGE | `UpdateSourceBody` | `SourceDto` (builtin: `enabled` only) |
+| DELETE | /api/sources/:id | P:SOURCES_MANAGE | | `OkResponse`; 409 builtin or pinned servers |
+| POST | /api/sources/:id/sync | P:SOURCES_MANAGE | | `SyncSourceResponse`; 409 already syncing |
+| GET | /api/definitions/:id/options/:key | S | | `VariableOptionsResponse` |
+| POST | /api/servers/:id/upgrade | O | `UpgradeServerBody` | `UpgradeServerResponse`; 409 not stopped, 400 values |
+| POST | /api/servers/:id/update | O | | `GameServerDto`; 409 not stopped, 400 nothing to update |
+
+`DefinitionDto` gains `sourceKind` and `isStack`; `GameServerDetailResponse` gains `latestDefinition`, `source`,
+`services` and `canUpdateGame`. Client route `/sources` (nav: Manage → Sources).
+
+### Boundaries added in M3
+
+| From | May import | Never |
+| --- | --- | --- |
+| `definitions/loaders/GitLoader.ts` | `Deno.Command("git")` with the fixed flags, `node:fs`, Config, AppSystem | a shell, `git` without the `-c` safety flags, the token in argv-visible URLs |
+| `definitions/OptionsFetcher.ts` | `fetch` (allowlisted hosts), Config | hosts, hooks, the DB |
+| `jobs/sourceSync.ts` | `DefinitionSync`, models | controllers |
+| `agent/internal/images`, `stacks` | `docker`, `paths`, `protocol` | `panel`, `servers` (servers calls them) |
+| `agent/internal/initd/configs`, `steps` | stdlib, `yaml.v3`, `datafs` (all file access below /data) | paths outside /data |
+
+### Extension points (M3)
+
+- `LOADERS` (`definitions/loaders/index.ts`): a new source kind = a `DefinitionLoader` + a `Source.KINDS` value
+  (+ migration for the enum).
+- `OptionsSource` selectors: new keys in `definition.json` + `OptionsFetcher.select`.
+- `configs.Registry` / `steps.Registry` (gss-init), `stacks.Stack` (agent), `images.Resolver` (agent).
+
+## M3 work split
+
+Main-session-only files (as before, plus): `protocol/schema/*`, `agent/go.mod`/`go.sum` (yaml.v3 is already in),
+`shared/api/{sources,servers,definitions}.ts`, `shared/live.ts`, `server/src/migrations/*`,
+`server/src/{index,Config}.ts`, `ApiController.ts`, `client/src/routes.tsx`, `AppLayout.tsx`, `docker/docker.go`
+(the `ContainerSpec.Healthcheck` / `ContainerInfo.Health` fields are fixed; B implements them in `containers.go`).
+
+| Parcel | Difficulty / route | Owns | Verify on its own |
+| --- | --- | --- | --- |
+| **A: gss-init config formats + steamcmd + update** | Medium–hard (format-preserving edits, steamcmd quirks): `builder-opus` | `agent/internal/initd/configs/**` (ini, json, yaml, cfg appliers + tests), `agent/internal/initd/steps/steamcmd.go`, the `update` request in `initd` (server.go / initd.go), `images/base/**` if srcds needs more libs | `go test ./internal/initd/...` (table tests per format: keeps comments and unmanaged keys, creates missing files, refuses paths outside /data); `deno task images:build base`, then `docker run` the base image by hand with a hand-written spec holding one `steamcmd: { app: 4020 }` step and the NDJSON scratch client from M2: `install` → progress lines → `stopped`, `/data/.gss/steamcmd` exists, then `update` re-runs only steamcmd |
+| **B: agent derived images + stacks + egress interplay** | Hard (Docker build API, health waits, reconcile, nftables): `builder-opus` | `agent/internal/{images,stacks}/**`, `agent/internal/servers/**` (wiring: provision → Resolver + Stack, start order, Statuses with services, `server.services` events, `server.update` passthrough), `agent/internal/docker/**` except the fixed struct fields, `agent/internal/egress/**` (intra-bridge allow), `agent/internal/agent/agent.go` (MsgServerUpdate handler) | `make lint`, `go test ./...`; scratch driver with a hand-written `ProvisionRequest` that has `packages: [jq]` and `services.db: mariadb:11.4` + healthcheck: derived image built once (second provision reuses it), `docker inspect` shows service hardening/limits/alias/no ports, game waits for healthy, `docker exec gss-<id> getent hosts db` resolves and connects while other servers' bridges can't, egress table still blocks private ranges; stop/remove order; `Statuses()` lists services |
+| **C: panel sources, pinning/upgrade, options_from, Garry's Mod definitions** | Medium–hard (git safety, upgrade semantics): `builder` (route GitLoader review to the reviewer) | `server/src/definitions/**`, `server/src/jobs/**`, `server/src/servers/**`, `server/src/controllers/{Source,Definition,Server}Controller.ts`, `server/src/gateways/agent/handlers/{serverServices,hello}.ts`, `server/src/models/{Source,Definition,GameServer}.ts`, `games/garrys-mod*/**` | `deno task check`; scratch script: `DefinitionEngine` parses/resolves both Garry's Mod definitions (extends merge, services limits filled, `|sh`/`|json` rendered) and prints the `ServerSpec`; `OptionsFetcher.select` on saved Mojang/Paper JSON. Dev panel without an agent: add a public https git source (a throwaway repo with one valid and one broken game) → sync → `definitionErrors` shows the broken one, the valid one is listed; push a change → sync → old servers keep their version, `updateAvailable` true; `file://`, `ssh://`, `http://`, submodule and oversized repos all refused. Fake-agent WebSocket from M2 for `upgrade`/`update`/`server.services` |
+| **D: client** | Medium: `builder` | `client/src/pages/{Sources,ServerCreate,ServerDetail}/**`, `client/src/components/**` (except `AppLayout`), `client/src/Api/{Source,Definition,Server}Api.ts` | `npm run typecheck && npm run build`; headless Playwright with mocked routes and socket: Sources page (add, sync, errors per game), picker shows source + version + stack badge, a select with `options_from` loads `getOptions` (and falls back to free text with the `pattern` hint on error), server page "Update available → Apply" (disabled unless stopped), "Update game" for steamcmd games, services list with state badges updating on `server.services`; screenshots light + dark |
+
+Order: all four in parallel. A ↔ B meet at `supervisor.json` (`update`), B ↔ C at `server.json` (`server.update`,
+`server.services`, `ServiceSpec`), C ↔ D at `shared/api/*` and `shared/live.ts`. Integration (main): images rebuilt,
+a git source with both Garry's Mod games synced, `garrys-mod-mysql` created from the UI, MySQLOO-style connection to
+`db` works, upgrade after a pushed change.

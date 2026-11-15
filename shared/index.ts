@@ -13,4 +13,5 @@ export type * from "./api/invites.ts";
 export type * from "./api/hosts.ts";
 export type * from "./api/definitions.ts";
 export type * from "./api/servers.ts";
+export type * from "./api/sources.ts";
 export * from "./protocol/protocol.gen.ts";

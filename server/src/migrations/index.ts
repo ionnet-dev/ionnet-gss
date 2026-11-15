@@ -8,6 +8,7 @@ import * as m20261115000000 from "./20261115000000-initial.ts";
 import * as m20261116000000 from "./20261116000000-m2-servers.ts";
 import * as m20261117000000 from "./20261117000000-server-deleting.ts";
 import * as m20261118000000 from "./20261118000000-server-private-network.ts";
+import * as m20261119000000 from "./20261119000000-m3-sources.ts";
 
 export interface Migration {
   name: string;
@@ -20,4 +21,5 @@ export const migrations: Migration[] = [
   { name: "20261116000000-m2-servers", ...m20261116000000 },
   { name: "20261117000000-server-deleting", ...m20261117000000 },
   { name: "20261118000000-server-private-network", ...m20261118000000 },
+  { name: "20261119000000-m3-sources", ...m20261119000000 },
 ];

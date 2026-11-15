@@ -107,6 +107,16 @@ export const INIT_BACKLOG_LINES = 2000;
 export const INIT_INSTALL_TIMEOUT_SEC = 7200;
 
 /**
+ * This server's own steamcmd install (M3). Downloaded on first use from STEAMCMD_URL; never shared between servers.
+ */
+export const INIT_STEAMCMD_DIR = "/data/.gss/steamcmd";
+
+/**
+ * Where gss-init fetches steamcmd from (https only).
+ */
+export const STEAMCMD_URL = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz";
+
+/**
  * uid and gid the game and every hook run as (`gss` user in ionnet-gss-base).
  */
 export const GAME_UID = 1000;
@@ -181,7 +191,7 @@ export interface GameDefinition {
    */
   image?: string;
   /**
-   * apt packages; the agent builds and caches a derived image.
+   * apt packages (Debian names, optional `:i386`, at most 50). The agent builds `FROM <image>` + `apt-get install --no-install-recommends` once per (image, sorted list) and caches it as `ionnet-gss-derived:<hash16>`; the panel validates the names, the agent re-validates.
    */
   packages?: string[];
   variables?: VariableDecl[];
@@ -203,7 +213,7 @@ export interface GameDefinition {
   players?: PlayersSpec;
   backup?: BackupSpec;
   /**
-   * Extra containers of a stack, keyed by the host name the game reaches them under.
+   * Extra containers of a stack, keyed by the host name the game reaches them under (`^[a-z][a-z0-9-]{0,30}$`, at most 4). On the server's bridge only, never published, started before the game (waiting for `healthcheck`), stopped after it, removed with it.
    */
   services?: Record<string, ServiceSpec>;
 }
@@ -227,6 +237,10 @@ export interface VariableDecl {
    */
   options?: string[];
   options_from?: OptionsSource;
+  /**
+   * `string` and `select`: RE2 the whole value must match; the fallback check for `options_from` selects when the list can't be fetched.
+   */
+  pattern?: string;
   default?: string | number | boolean;
   /**
    * Display unit, e.g. `MB`.
@@ -256,13 +270,37 @@ export interface VariableDecl {
 }
 
 /**
- * A dynamic option list, produced by a hook that prints one option per line.
+ * A dynamic `select` list fetched by the panel (never by a host or a hook): GET `url` (https, host on OPTIONS_FETCH_HOSTS, ≤ 2 MiB JSON, 10 s, cached OPTIONS_CACHE_MIN), take the array at `items`, keep entries whose fields equal `where`, map each to `value`, keep those matching `include`, optionally reverse, cut to `limit`. Static `options` are listed first (e.g. `latest`). If the fetch fails, a submitted value is accepted when it matches the variable's `pattern`.
  */
 export interface OptionsSource {
   /**
-   * Path of the hook script inside the definition folder.
+   * https URL; no templates.
    */
-  hook: string;
+  url: string;
+  /**
+   * Dotted path to the array in the response, e.g. `versions`. Empty = the response is the array.
+   */
+  items?: string;
+  /**
+   * Dotted path inside each item, e.g. `id`. Empty = the item itself (arrays of strings).
+   */
+  value?: string;
+  /**
+   * Item field (dotted path) → required string value, e.g. `{ type: release }`.
+   */
+  where?: Record<string, string>;
+  /**
+   * RE2 the value must match.
+   */
+  include?: string;
+  /**
+   * Reverse the order (newest last in the source).
+   */
+  reverse?: boolean;
+  /**
+   * At most this many options. Default 100, max 500.
+   */
+  limit?: number;
 }
 
 export type PortProto = "tcp" | "udp";
@@ -302,6 +340,10 @@ export interface SteamcmdStep {
   app: number;
   beta?: string;
   validate?: boolean;
+  /**
+   * Install folder below /data. Default is /data itself. steamcmd itself lives in INIT_STEAMCMD_DIR (per server, never shared).
+   */
+  dir?: string;
 }
 
 export interface DownloadStep {
@@ -431,16 +473,58 @@ export interface BackupSpec {
 }
 
 /**
- * One extra container of a stack.
+ * One extra container of a stack. Images are admin-trusted (they come from a source). Same hardening as the game container (CapDrop ALL plus what the image needs, no Docker socket, no published ports, the server's egress rules).
  */
 export interface ServiceSpec {
+  /**
+   * Pulled as is (e.g. `mariadb:11`); templates allowed.
+   */
   image: string;
+  /**
+   * Templates allowed (`{{vars.db_password}}`).
+   */
   env?: Record<string, string>;
   /**
-   * Container path persisted under the server's folder on the host.
+   * Container path persisted at <server>/services/<name> on the host.
    */
   volume?: string;
+  /**
+   * Overrides the image's CMD (run through /bin/sh -c).
+   */
   command?: string;
+  healthcheck?: ServiceHealthcheck;
+  limits?: ServiceLimits;
+}
+
+/**
+ * Docker healthcheck (CMD-SHELL). The game starts only after it reports healthy, or fails the start after `startTimeout`.
+ */
+export interface ServiceHealthcheck {
+  /**
+   * e.g. `healthcheck.sh --connect --innodb_initialized`.
+   */
+  command: string;
+  /**
+   * Seconds. Default 5.
+   */
+  interval?: number;
+  /**
+   * Default 30.
+   */
+  retries?: number;
+  /**
+   * Seconds the game waits for healthy. Default 120.
+   */
+  startTimeout?: number;
+}
+
+/**
+ * Per-service limits. Optional in game.yml (defaults 512 MB, 500 millis, 256 pids); always set by the panel in a resolved spec. They count toward the server's quota usage.
+ */
+export interface ServiceLimits {
+  memoryMb?: number;
+  cpuMillis?: number;
+  pids?: number;
 }
 
 //#endregion
@@ -630,6 +714,28 @@ export interface ServerStatus {
    * Cause of install_failed / crashed, as in the last StateChange.
    */
   reason: string | null;
+  /**
+   * Stack services (M3); empty for single-container servers.
+   */
+  services: ServiceStatus[];
+}
+
+/**
+ * Docker's view of one stack service. `missing` = no container (not provisioned yet, or removed by hand).
+ */
+export type ServiceState = "missing" | "created" | "starting" | "healthy" | "unhealthy" | "running" | "exited";
+export const SERVICE_STATE_VALUES: readonly ServiceState[] = ["missing", "created", "starting", "healthy", "unhealthy", "running", "exited"];
+
+export interface ServiceStatus {
+  name: string;
+  image: string;
+  state: ServiceState;
+  exitCode: number | null;
+}
+
+export interface ServicesChange {
+  serverId: string;
+  services: ServiceStatus[];
 }
 
 export interface ServerRef {
@@ -802,7 +908,7 @@ export const CONSOLE_STREAM_VALUES: readonly ConsoleStream[] = ["output", "input
 
 export interface ConsoleLine {
   /**
-   * Monotonic per server for the life of the gss-init process.
+   * Monotonic per server for the life of the gss-init process. 0 = a line from the agent itself (image pull, derived build, service start), stream `system`: not in the backlog, never deduped.
    */
   seq: number;
   at: string;
@@ -1032,6 +1138,10 @@ export interface AgentToPanelEvents {
    * A player joined or left (from the definition's `players` patterns). (M4)
    */
   "server.player": PlayerEvent;
+  /**
+   * A stack service changed state (created, healthy, exited…). (M3)
+   */
+  "server.services": ServicesChange;
 }
 
 /**
@@ -1066,6 +1176,10 @@ export interface PanelToAgentRequests {
    * Recent console lines from gss-init's ring buffer, for a browser that opens the console. (M2)
    */
   "server.backlog": { request: BacklogRequest; response: BacklogResponse };
+  /**
+   * Re-run the `steamcmd` install steps and the `update` hook (state `installing`, then `stopped`). Only while stopped. Answers when it has begun. (M3)
+   */
+  "server.update": { request: ServerRef; response: ServerStatus };
 }
 
 /**
@@ -1101,6 +1215,10 @@ export interface AgentToInitRequests {
    * Lines from the ring buffer between `afterSeq` and `beforeSeq`, capped by count and encoded size (`more` says the answer was cut); how the agent catches up after a restart and how browsers page back. (M2)
    */
   "backlog": { request: InitBacklogRequest; response: BacklogResponse };
+  /**
+   * Run only the `steamcmd` steps (in order) and then the `update` hook, as an install would (state `installing` with progress, then `stopped`; failure → `install_failed`). Refused unless stopped. (M3)
+   */
+  "update": { request: Empty; response: InitStatus };
   /**
    * Re-read the spec file after the agent rewrote it (settings changed). Takes effect at the next start. (M2)
    */
@@ -1153,12 +1271,15 @@ export const MESSAGES: readonly MessageSpec[] = [
   { channel: "agent", type: "server.state", kind: "event", from: "agent", milestone: 2 },
   { channel: "agent", type: "server.stats", kind: "event", from: "agent", milestone: 2 },
   { channel: "agent", type: "server.player", kind: "event", from: "agent", milestone: 4 },
+  { channel: "agent", type: "server.update", kind: "request", from: "panel", milestone: 3 },
+  { channel: "agent", type: "server.services", kind: "event", from: "agent", milestone: 3 },
   { channel: "supervisor", type: "status", kind: "request", from: "agent", milestone: 2 },
   { channel: "supervisor", type: "install", kind: "request", from: "agent", milestone: 2 },
   { channel: "supervisor", type: "start", kind: "request", from: "agent", milestone: 2 },
   { channel: "supervisor", type: "stop", kind: "request", from: "agent", milestone: 2 },
   { channel: "supervisor", type: "input", kind: "request", from: "agent", milestone: 2 },
   { channel: "supervisor", type: "backlog", kind: "request", from: "agent", milestone: 2 },
+  { channel: "supervisor", type: "update", kind: "request", from: "agent", milestone: 3 },
   { channel: "supervisor", type: "reload", kind: "request", from: "agent", milestone: 2 },
   { channel: "supervisor", type: "console", kind: "event", from: "supervisor", milestone: 2 },
   { channel: "supervisor", type: "state", kind: "event", from: "supervisor", milestone: 2 },

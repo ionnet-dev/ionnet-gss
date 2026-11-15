@@ -1,0 +1,35 @@
+# Garry's Mod dedicated server (steamcmd app 4020). M3 skeleton: keys are the contract, values are the builder's (C).
+# The base image already has lib32gcc-s1 / lib32stdc++6; add `packages:` only if srcds needs more (C checks).
+id: garrys-mod
+name: "Garry's Mod"
+image: ionnet-gss-base
+
+variables:
+  - { key: hostname, label: Server name, type: string, default: "A Garry's Mod Server" }
+  - { key: map, label: Map, type: string, default: gm_construct, pattern: '^[A-Za-z0-9_]{1,64}$' }
+  - { key: slots, label: Player slots, type: number, default: 16, min: 2, max: 128 }
+  - { key: gamemode, label: Gamemode, type: string, default: sandbox, pattern: '^[a-z0-9_]{1,32}$' }
+  - { key: workshop_collection, label: Workshop collection id, type: string, default: "", pattern: '^[0-9]{0,20}$' }
+  - { key: rcon_password, type: secret, generate: 24 }
+
+ports:
+  - { name: game, proto: udp, default: 27015 }
+
+install:
+  - steamcmd: { app: 4020, validate: true }
+
+configs:
+  - file: garrysmod/cfg/server.cfg
+    format: cfg
+    set:
+      hostname: "{{vars.hostname}}"
+      rcon_password: "{{vars.rcon_password}}"
+      sv_lan: "0"
+
+# TODO(builder): C — +host_workshop_collection only when set; |sh filter on every interpolated value.
+start: >
+  ./srcds_run -game garrysmod -console -port {{ports.game}}
+  +map {{vars.map|sh}} +maxplayers {{vars.slots}} +gamemode {{vars.gamemode|sh}}
+ready: { log: 'VAC secure mode is activated' }
+stop: { command: quit, timeout: 30 }
+console: { input: stdin }

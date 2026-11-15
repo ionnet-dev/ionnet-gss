@@ -1,6 +1,6 @@
 import { type Context, Hono } from "hono";
 import type { OkResponse } from "@shared/api/common.ts";
-import type { ConsoleInputBody, CreateServerBody, GameServerDto, StopServerBody, UpdateServerBody } from "@shared/api/servers.ts";
+import type { ConsoleInputBody, CreateServerBody, GameServerDto, StopServerBody, UpdateServerBody, UpgradeServerBody } from "@shared/api/servers.ts";
 import { CONSOLE_BACKLOG_MAX_LINES } from "@shared/protocol/protocol.gen.ts";
 import { type AppEnv, clientIp, paramUuid, readBody, readOptionalBody } from "../lib/http.ts";
 import { AuditLog, User } from "../models/index.ts";
@@ -103,6 +103,23 @@ export namespace ServerController {
     const server = await GameServerService.reinstall(c.var.user, paramUuid(c, "id"));
     await auditDto(c, "server.reinstalled", server);
     return c.json(server);
+  });
+
+  /**
+   * POST /api/servers/:id/upgrade  UpgradeServerBody → UpgradeServerResponse (M3). 409 unless stopped / crashed /
+   * install_failed, 404 unknown target, 400 when kept values don't fit the new version. Audit `server.upgraded`.
+   */
+  router.post("/:id/upgrade", async (c) => {
+    const body = await readBody<UpgradeServerBody>(c);
+    return c.json(await GameServerService.upgrade(c.var.user, paramUuid(c, "id"), body));
+  });
+
+  /**
+   * POST /api/servers/:id/update → GameServerDto (M3): re-run steamcmd steps + the update hook. 409 unless stopped,
+   * 400 when the game has neither. Audit `server.game_updated`.
+   */
+  router.post("/:id/update", async (c) => {
+    return c.json(await GameServerService.updateGame(c.var.user, paramUuid(c, "id")));
   });
 
   /**

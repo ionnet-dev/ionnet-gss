@@ -65,6 +65,16 @@
       "channel": "agent", "type": "server.player", "kind": "event", "from": "agent", "milestone": 4,
       "data": "PlayerEvent",
       "description": "A player joined or left (from the definition's `players` patterns)."
+    },
+    {
+      "channel": "agent", "type": "server.update", "kind": "request", "from": "panel", "milestone": 3,
+      "request": "ServerRef", "response": "ServerStatus",
+      "description": "Re-run the `steamcmd` install steps and the `update` hook (state `installing`, then `stopped`). Only while stopped. Answers when it has begun."
+    },
+    {
+      "channel": "agent", "type": "server.services", "kind": "event", "from": "agent", "milestone": 3,
+      "data": "ServicesChange",
+      "description": "A stack service changed state (created, healthy, exited…)."
     }
   ],
   "$defs": {
@@ -82,9 +92,33 @@
         "exitCode": { "type": ["integer", "null"], "description": "Last exit code of the game process; null when it has not exited." },
         "specHash": { "type": "string", "description": "SHA-256 of the spec the server currently runs, as sent in `ProvisionRequest`. In `hello`, a hash that differs from the panel's makes the panel re-provision (while stopped)." },
         "installProgress": { "oneOf": [{ "$ref": "#/$defs/InstallProgress" }, { "type": "null" }] },
-        "reason": { "type": ["string", "null"], "description": "Cause of install_failed / crashed, as in the last StateChange." }
+        "reason": { "type": ["string", "null"], "description": "Cause of install_failed / crashed, as in the last StateChange." },
+        "services": { "type": "array", "items": { "$ref": "#/$defs/ServiceStatus" }, "description": "Stack services (M3); empty for single-container servers." }
       },
-      "required": ["serverId", "state", "since", "exitCode", "specHash", "installProgress", "reason"]
+      "required": ["serverId", "state", "since", "exitCode", "specHash", "installProgress", "reason", "services"]
+    },
+    "ServiceState": {
+      "type": "string",
+      "description": "Docker's view of one stack service. `missing` = no container (not provisioned yet, or removed by hand).",
+      "enum": ["missing", "created", "starting", "healthy", "unhealthy", "running", "exited"]
+    },
+    "ServiceStatus": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "image": { "type": "string" },
+        "state": { "$ref": "#/$defs/ServiceState" },
+        "exitCode": { "type": ["integer", "null"] }
+      },
+      "required": ["name", "image", "state", "exitCode"]
+    },
+    "ServicesChange": {
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string", "format": "uuid" },
+        "services": { "type": "array", "items": { "$ref": "#/$defs/ServiceStatus" } }
+      },
+      "required": ["serverId", "services"]
     },
     "ServerRef": {
       "type": "object",
@@ -221,7 +255,7 @@
     "ConsoleLine": {
       "type": "object",
       "properties": {
-        "seq": { "type": "integer", "description": "Monotonic per server for the life of the gss-init process." },
+        "seq": { "type": "integer", "description": "Monotonic per server for the life of the gss-init process. 0 = a line from the agent itself (image pull, derived build, service start), stream `system`: not in the backlog, never deduped." },
         "at": { "type": "string", "format": "date-time" },
         "stream": { "$ref": "#/$defs/ConsoleStream" },
         "text": { "type": "string", "description": "One line, without the trailing newline. ANSI colour codes are kept." }

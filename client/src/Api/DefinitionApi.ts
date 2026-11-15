@@ -1,4 +1,4 @@
-import type { DefinitionDto } from "@shared/api/definitions.ts";
+import type { DefinitionDto, VariableOptionsResponse } from "@shared/api/definitions.ts";
 import { useResource } from "@/hooks/useResource.ts";
 import { BaseApi } from "./BaseApi.ts";
 
@@ -12,6 +12,13 @@ export namespace DefinitionApi {
 
   export function get(id: number): Promise<DefinitionDto> {
     return BaseApi.GET(`/definitions/${id}`);
+  }
+
+  /**
+   * The current list of an `options_from` select (M3).
+   */
+  export function getOptions(id: number, key: string): Promise<VariableOptionsResponse> {
+    return BaseApi.GET(`/definitions/${id}/options/${encodeURIComponent(key)}`);
   }
 
   export function useDefinitions() {

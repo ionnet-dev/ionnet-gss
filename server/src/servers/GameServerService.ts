@@ -19,7 +19,10 @@ import type {
   ServerVariableDto,
   UpdateServerBody,
   UpdateServerResponse,
+  UpgradeServerBody,
+  UpgradeServerResponse,
 } from "@shared/api/servers.ts";
+import type { ServicesChange } from "@shared/protocol/protocol.gen.ts";
 import { LIMITS } from "@shared/constants.ts";
 import {
   CONSOLE_BACKLOG_MAX_LINES,
@@ -313,6 +316,29 @@ export namespace GameServerService {
     else throw notStartable(server.state);
     await storeStatus(serverId, status);
     return await dtoOf(serverId);
+  }
+
+  /**
+   * Move a stopped server to another (normally the latest active) version of its definition (M3): see
+   * `UpgradeServerBody`. Re-allocates ports when the port declarations changed; refuses (409) when quota or host
+   * capacity no longer fit.
+   */
+  export async function upgrade(user: User, serverId: string, body: Partial<UpgradeServerBody>): Promise<UpgradeServerResponse> {
+    throw HttpError.notImplemented("GameServerService.upgrade"); // TODO(builder): C
+  }
+
+  /**
+   * `server.update` on the agent (M3): steamcmd steps + update hook. 409 unless stopped, 400 when the game has neither.
+   */
+  export async function updateGame(user: User, serverId: string): Promise<GameServerDto> {
+    throw HttpError.notImplemented("GameServerService.updateGame"); // TODO(builder): C
+  }
+
+  /**
+   * `server.services` event (M3): store `servicesStatus`, push `server.services`.
+   */
+  export async function applyServicesChange(hostId: string, change: ServicesChange): Promise<void> {
+    // TODO(builder): C
   }
 
   /**
@@ -776,7 +802,17 @@ export namespace GameServerService {
     const newer = await Definition.count({
       where: { sourceId: server.definition!.sourceId, gameId: server.definition!.gameId, active: true, id: { [Op.ne]: server.definitionId } },
     });
-    return { ...toDto(server), variables, updateAvailable: newer > 0 };
+    // TODO(builder): C (M3) — latestDefinition (the newest active row), canUpdateGame (steamcmd steps or update hook).
+    const doc = server.definition!.document;
+    return {
+      ...toDto(server),
+      variables,
+      updateAvailable: newer > 0,
+      latestDefinition: null,
+      source: { name: server.definition!.source?.name ?? "", kind: server.definition!.source?.kind ?? "local" },
+      services: server.servicesStatus ?? [],
+      canUpdateGame: (doc.install ?? []).some((step) => step.steamcmd !== undefined) || doc.hooks?.update !== undefined,
+    };
   }
 
   async function mayUseHost(user: User, hostId: string): Promise<boolean> {

@@ -161,7 +161,7 @@ export namespace DefinitionEngine {
    * `options_from` hooks.
    */
   export function referencedFiles(def: GameDefinition): string[] {
-    return [...new Set([...hookPaths(def), ...templatePaths(def), ...(def.variables ?? []).flatMap((v) => v.options_from ? [v.options_from.hook] : [])])];
+    return [...new Set([...hookPaths(def), ...templatePaths(def), ])];
   }
 
   function hookPaths(def: GameDefinition): string[] {
@@ -270,8 +270,8 @@ export namespace DefinitionEngine {
         }
         if (item.options_from !== undefined) {
           if (item.type !== "select") fail(`${at} options_from`, "is only for type select.");
-          if (!isRecord(item.options_from)) return fail(`${at} options_from`, "must be a mapping with a hook.");
-          safePath(item.options_from.hook, `${at} options_from.hook`);
+          if (!isRecord(item.options_from)) return fail(`${at} options_from`, "must be a mapping with a url.");
+          // TODO(builder): C (M3) — validate OptionsSource: https url on OPTIONS_FETCH_HOSTS, paths, include RE2, limit ≤ 500.
         }
         if (item.type === "select" && item.options === undefined && item.options_from === undefined) {
           fail(at, "is a select, so it needs \"options\" (or \"options_from\").");

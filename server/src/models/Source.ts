@@ -23,6 +23,8 @@ export class Source extends Model<InferAttributes<Source>, InferCreationAttribut
   declare lastCommit: string | null; // Commit of the last successful sync.
   declare lastError: string | null; // Sync-level failure (clone, fetch). null = last sync worked.
   declare definitionErrors: CreationOptional<Record<string, string>>; // gameId → validation error from the last sync.
+  declare authToken: string | null; // git: optional https token for a private repo (sent as a header, never in the URL or .git/config). Never leaves the server.
+  declare syncIntervalMin: number | null; // git: null = SOURCE_SYNC_INTERVAL_MIN; 0 = manual only.
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;
 
@@ -39,6 +41,8 @@ export class Source extends Model<InferAttributes<Source>, InferCreationAttribut
       lastCommit: { type: DataTypes.STRING(64), allowNull: true },
       lastError: { type: DataTypes.TEXT, allowNull: true },
       definitionErrors: { ...jsonColumn("definitionErrors", false, {}), defaultValue: {} },
+      authToken: { type: DataTypes.TEXT, allowNull: true },
+      syncIntervalMin: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
       createdAt: DataTypes.DATE,
       updatedAt: DataTypes.DATE,
     }, { sequelize, tableName: "sources" });

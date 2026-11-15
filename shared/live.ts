@@ -5,7 +5,7 @@
  * Client → panel: `auth` first (within 10 s), then `subscribe` / `unsubscribe` for per-server streams (M2).
  * Panel → client: `ready` after auth, then `event` frames.
  */
-import type { ConsoleLine, InstallProgress, ServerState, ServerStats } from "./protocol/protocol.gen.ts";
+import type { ConsoleLine, InstallProgress, ServerState, ServerStats, ServiceStatus } from "./protocol/protocol.gen.ts";
 
 /**
  * Every live event and its data. A `null` id means "the list changed, refetch it".
@@ -45,6 +45,16 @@ export interface LiveEvents {
   "server.console": { serverId: string; lines: ConsoleLine[] };
   // Audience: subscribers of `server:<id>` only.
   "server.stats": { serverId: string; stats: ServerStats };
+  //#endregion
+
+  //#region M3
+  // Created, edited, deleted, sync started or finished. Audience: SOURCES_MANAGE.
+  "source.updated": { sourceId: number | null; syncing: boolean };
+  // A sync changed the active definitions (new game, new version). Audience: everyone signed in (the create form
+  // and "update available" refetch).
+  "definitions.updated": { sourceId: number };
+  // Stack service states changed. Audience: owner + SERVERS_MANAGE_ALL. Apply in place.
+  "server.services": { serverId: string; services: ServiceStatus[] };
   //#endregion
 }
 

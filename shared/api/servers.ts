@@ -3,7 +3,7 @@
  * Settings can change only while the server is stopped (409 otherwise); they apply at the next start.
  */
 import type { IsoDate } from "./common.ts";
-import type { ConsoleLine, InstallProgress, PortProto, ServerState, VariableType } from "../protocol/protocol.gen.ts";
+import type { ConsoleLine, InstallProgress, PortProto, ServerState, ServiceStatus, VariableType } from "../protocol/protocol.gen.ts";
 
 export type VariableValue = string | number | boolean;
 
@@ -66,9 +66,40 @@ export interface ServerVariableDto {
 export interface GameServerDetailResponse extends GameServerDto {
   variables: ServerVariableDto[]; // admin_only ones only for admins.
   /**
-   * A newer active version of the definition exists (upgrading is M3).
+   * A newer active version of the definition exists (same source and game id, different row). Apply it with
+   * `POST /api/servers/:id/upgrade` while stopped.
    */
   updateAvailable: boolean;
+  /**
+   * The version `upgrade` would move to; null when up to date.
+   */
+  latestDefinition: { id: number; commit: string; syncedAt: IsoDate } | null;
+  /**
+   * The definition's source (name, kind).
+   */
+  source: { name: string; kind: "local" | "git" };
+  /**
+   * Stack services and their last known state (M3); empty for single-container games.
+   */
+  services: ServiceStatus[];
+  /**
+   * The definition has `steamcmd` steps or an `update` hook, so `POST /api/servers/:id/update` applies.
+   */
+  canUpdateGame: boolean;
+}
+
+/**
+ * `POST /api/servers/:id/upgrade`. Stopped only (409). Re-resolves the variables against the new version (new keys
+ * get defaults/generated secrets, removed keys are dropped, invalid kept values → 400 naming them) and re-provisions,
+ * with `reinstall` when the resolved install steps or a `reinstall` variable changed.
+ */
+export interface UpgradeServerBody {
+  definitionId?: number; // Default: the latest active version of the same source and game.
+}
+
+export interface UpgradeServerResponse {
+  server: GameServerDetailResponse;
+  reinstall: boolean; // Install ran (or will run at the agent) because of the upgrade.
 }
 
 export interface CreateServerBody {

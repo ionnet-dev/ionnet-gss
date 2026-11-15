@@ -76,7 +76,8 @@ export const routes: RouteDef[] = [
   requirement({ permission: "HOSTS_VIEW" }, { path: /^\/hosts$/, render: appPage(() => import("./pages/Hosts/Hosts.tsx")) }),
   requirement({ permission: "HOSTS_VIEW" }, { path: /^\/hosts\/([0-9a-f-]{36})$/, render: appPage(() => import("./pages/HostDetail/HostDetail.tsx")) }),
   requirement({ permission: "USERS_MANAGE" }, { path: /^\/users$/, render: appPage(() => import("./pages/Users/Users.tsx")) }),
-  requirement({ permission: "INVITES_MANAGE" }, { path: /^\/invites$/, render: appPage(() => import("./pages/Invites/Invites.tsx")) }),
+  requirement({ permission: "SOURCES_MANAGE" }, { path: /^\/sources$/, render: appPage(() => import("./pages/Sources/Sources.tsx")) }),
+  requirement({ permission: "INVITES_MANAGE" },{ path: /^\/invites$/, render: appPage(() => import("./pages/Invites/Invites.tsx")) }),
   requirement({ signedIn: true }, { path: /^\/account$/, render: appPage(() => import("./pages/Account/Account.tsx")) }),
   // M2: /servers, /servers/<uuid> (console, settings); M3: /sources; M4: /servers/<uuid>/files, /backups.
 ];

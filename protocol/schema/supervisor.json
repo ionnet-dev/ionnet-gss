@@ -10,6 +10,8 @@
     "INIT_DATA_PATH": { "value": "/data", "description": "The server's data folder inside the container." },
     "INIT_BACKLOG_LINES": { "value": 2000, "description": "Console lines kept in gss-init's ring buffer." },
     "INIT_INSTALL_TIMEOUT_SEC": { "value": 7200, "description": "Default for `InitSpec.installTimeoutSec`: an install still running after this long is cancelled and ends `install_failed`." },
+    "INIT_STEAMCMD_DIR": { "value": "/data/.gss/steamcmd", "description": "This server's own steamcmd install (M3). Downloaded on first use from STEAMCMD_URL; never shared between servers." },
+    "STEAMCMD_URL": { "value": "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz", "description": "Where gss-init fetches steamcmd from (https only)." },
     "GAME_UID": { "value": 1000, "description": "uid and gid the game and every hook run as (`gss` user in ionnet-gss-base)." }
   },
   "x-messages": [
@@ -42,6 +44,11 @@
       "channel": "supervisor", "type": "backlog", "kind": "request", "from": "agent", "milestone": 2,
       "request": "InitBacklogRequest", "response": "BacklogResponse",
       "description": "Lines from the ring buffer between `afterSeq` and `beforeSeq`, capped by count and encoded size (`more` says the answer was cut); how the agent catches up after a restart and how browsers page back."
+    },
+    {
+      "channel": "supervisor", "type": "update", "kind": "request", "from": "agent", "milestone": 3,
+      "request": "Empty", "response": "InitStatus",
+      "description": "Run only the `steamcmd` steps (in order) and then the `update` hook, as an install would (state `installing` with progress, then `stopped`; failure → `install_failed`). Refused unless stopped."
     },
     {
       "channel": "supervisor", "type": "reload", "kind": "request", "from": "agent", "milestone": 2,

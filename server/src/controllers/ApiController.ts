@@ -3,6 +3,7 @@ import type { AppEnv } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { AuthController } from "./AuthController.ts";
 import { DefinitionController } from "./DefinitionController.ts";
+import { SourceController } from "./SourceController.ts";
 import { ServerController } from "./ServerController.ts";
 import { EnrolTokenController } from "./EnrolTokenController.ts";
 import { HostController } from "./HostController.ts";
@@ -26,6 +27,7 @@ export namespace ApiController {
   router.route("/enrol-tokens", EnrolTokenController.router);
   router.route("/servers", ServerController.router);
   router.route("/definitions", DefinitionController.router);
+  router.route("/sources", SourceController.router);
   // M3: router.route("/sources", SourceController.router);
   // M4: router.route("/servers/:id/files", FileController.router); /backups → BackupController
 
