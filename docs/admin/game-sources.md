@@ -6,10 +6,10 @@ A game is a folder with a `game.yml` in it: variables, ports, install steps, how
 
 There are two kinds:
 
-- **builtin**: the `games/` folder of the panel's own checkout (`GAMES_DIR`). It ships Minecraft: Java Edition, Garry's Mod and Garry's Mod + MySQL. The panel syncs it at startup. You can switch it off but not edit or delete it.
-- **git**: any git repository you can reach over https.
+- **git**: any git repository you can reach over https. A panel run from the Docker image adds the official one, [ionnet-gss-games](https://github.com/ionnet-dev/ionnet-gss-games), by itself at its first start (`OFFICIAL_SOURCE_URL`; set it empty to add none). It ships Minecraft: Java Edition, Garry's Mod and Garry's Mod + MySQL, and behaves like any source you add. If you delete it and have no other git source, it comes back at the next restart; switch it off instead.
+- **builtin**: the `games/` folder of the panel's own checkout (`GAMES_DIR`), for a panel run from source. That folder is the official repository as a git submodule. The panel syncs it at startup. You can switch it off but not edit or delete it. The Docker image has no such folder, so it has no builtin source.
 
-How to write a `game.yml` (variables, install steps, config formats, services, `options_from`) is in [games/README.md](../../games/README.md). The full schema is `protocol/schema/definition.json`. This page is about adding and running sources.
+How to write a `game.yml` (variables, install steps, config formats, services, `options_from`) is in [games/README.md](https://github.com/ionnet-dev/ionnet-gss-games#format). The full schema is `protocol/schema/definition.json`. This page is about adding and running sources.
 
 Managing sources needs the `SOURCES_MANAGE` permission, which admins have. Open **Manage → Sources**.
 
@@ -84,7 +84,7 @@ After a sync that finds a changed `game.yml`, every server created from the olde
 - If provisioning fails, the panel puts the old definition back, on a best effort basis.
 - The new version's limits are checked against the owner's [quota](users-and-quotas.md#quotas) and the host's [capacity](add-host.md#ports-and-capacity) first. A refusal leaves the server as it was.
 
-The builtin source is the exception: its definitions update in place when `games/` changes and the panel restarts (or on **Sync now**), so its servers don't show "Update available".
+The builtin source (panels run from source) is the exception: its definitions update in place when `games/` changes and the panel restarts (or on **Sync now**), so its servers don't show "Update available".
 
 A different action, **Update game** in the server's menu, is for steamcmd games: it re-runs only the steamcmd steps (a new game version) while the server is stopped. It does not change the definition.
 

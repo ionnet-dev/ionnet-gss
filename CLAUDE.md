@@ -17,6 +17,9 @@ cd agent && make build      # bin/gss-agent, bin/gss-init
 
 ## Conventions
 
+- `games/` is a git submodule (the public `ionnet-dev/ionnet-gss-games`, the official definition source): commit and
+  push definition changes there, then bump the submodule here. Panels from the Docker image sync that repo directly.
+
 - Panel↔agent and agent↔gss-init shapes come only from `protocol/schema/*.json`. Never hand-edit
   `shared/protocol/protocol.gen.ts` or `agent/internal/protocol/protocol_gen.go`.
 - Models: one class per file with `declare` attributes and `initModel()`; associations only in `models/index.ts`;

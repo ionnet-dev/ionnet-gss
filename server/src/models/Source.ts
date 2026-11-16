@@ -86,6 +86,11 @@ export namespace Source {
    * Name of the built-in source created at startup from GAMES_DIR.
    */
   export const BUILTIN_NAME = "builtin";
+
+  /**
+   * Name of the git source a panel without a games/ folder adds at its first start (`OFFICIAL_SOURCE_URL`).
+   */
+  export const OFFICIAL_NAME = "ionnet-gss-games";
 }
 
 export type SourceAttributes = InferAttributes<Source>;

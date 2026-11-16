@@ -16,7 +16,7 @@ Hosts that run game servers are separate machines. Add them after the panel work
 `docker-compose.yml` starts MariaDB and the panel. The image builds the web app and the agent downloads inside Docker, so the first build takes a few minutes.
 
 ```sh
-git clone <repository> ionnet-gss
+git clone --recurse-submodules <repository> ionnet-gss
 cd ionnet-gss
 cat > .env <<'EOF'
 PUBLIC_URL=https://gss.example.com
@@ -49,7 +49,7 @@ To upgrade, pull the new code and run `docker compose up -d --build` again. Pend
 ## From source
 
 ```sh
-git clone <repository> ionnet-gss
+git clone --recurse-submodules <repository> ionnet-gss
 cd ionnet-gss
 cp .env.example .env              # then edit it, see below
 deno task db:up                   # a MariaDB for development on 127.0.0.1:3308

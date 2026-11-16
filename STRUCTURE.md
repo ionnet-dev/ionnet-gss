@@ -96,7 +96,9 @@ agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
 images/                build.sh (deno task images:build; local tags only), base/ (Dockerfile builds gss-init from
                        agent/; Dockerfile.dockerignore; has nftables for the agent's nft helper), minecraft-server/
                        (ARG JAVA → :java8/17/21/25)
-games/                 built-in definition source: README.md, minecraft-java/{game.yml, hooks/install.sh},
+games/                 git submodule of ionnet-dev/ionnet-gss-games (public, the official source): the built-in
+                       source of a panel run from source; the Docker image has none and seeds the repo as a git
+                       source (`DefinitionSync.seedOfficial`, `OFFICIAL_SOURCE_URL`). README.md, minecraft-java/{game.yml, hooks/install.sh},
                        M3: garrys-mod/game.yml, garrys-mod-mysql/{game.yml, templates/gss_database.json}
 scripts/               install-agent.sh (M5: served by the panel at /api/agent/install.sh, Arch + Debian/Ubuntu)
 docs/                  blueprint.html; M5: admin/ (install panel, add a host, game sources, users and quotas)

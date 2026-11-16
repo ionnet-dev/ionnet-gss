@@ -117,6 +117,8 @@ function load() {
     // Games
     /** The built-in definition source: the repo's own games/ folder, relative to the repo root. */
     GAMES_DIR: readString("GAMES_DIR", "games"),
+    /** Git source added at the first start when GAMES_DIR doesn't exist (the Docker image). Empty = none. */
+    OFFICIAL_SOURCE_URL: (Deno.env.get("OFFICIAL_SOURCE_URL") ?? "https://github.com/ionnet-dev/ionnet-gss-games.git").trim(),
     /** Registry prefix for bare `ionnet-gss-*` image names in game.yml; untagged ones get `:latest`. */
     IMAGE_REGISTRY: readString("IMAGE_REGISTRY", "ghcr.io/ionnet-dev").replace(/\/+$/, ""),
 

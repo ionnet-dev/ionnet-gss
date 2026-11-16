@@ -6,6 +6,8 @@
  * files didn't change since the active version keeps that version (no new row, so no "update available").
  * One sync at a time per source; listeners (`onChange`) hear when one starts and ends.
  */
+import fsp from "node:fs/promises";
+import Path from "node:path";
 import { Op } from "sequelize";
 import type { GameDefinition } from "@shared/protocol/protocol.gen.ts";
 import { Config } from "../Config.ts";
@@ -76,12 +78,23 @@ export namespace DefinitionSync {
   }
 
   /**
-   * Create the built-in `local` source for GAMES_DIR if missing, then sync it. Called once from index.ts at startup;
-   * never throws (logs instead), so a broken game.yml can't stop the panel.
+   * Create the built-in `local` source for GAMES_DIR if missing, then sync it. Without that folder (the Docker
+   * image doesn't carry one) the official git source is added instead, see `seedOfficial`. Called once from
+   * index.ts at startup; never throws (logs instead), so a broken game.yml can't stop the panel.
    */
   export async function syncBuiltin(): Promise<void> {
     try {
       let source = await Source.findOne({ where: { name: Source.BUILTIN_NAME } });
+      const hasFolder = await fsp.stat(Path.resolve(Config.GAMES_DIR)).then((stat) => stat.isDirectory()).catch(() => false);
+      if (!hasFolder) {
+        // A built-in source that never held a game is only a leftover "sync failed" card.
+        if (source && await Definition.count({ where: { sourceId: source.id } }) === 0) {
+          await source.destroy();
+          source = null;
+        }
+        await seedOfficial();
+        if (!source) return;
+      }
       if (!source) {
         source = await Source.create({ name: Source.BUILTIN_NAME, kind: "local", url: Config.GAMES_DIR, lastSyncAt: null, lastCommit: null, lastError: null });
       }
@@ -96,6 +109,30 @@ export namespace DefinitionSync {
     } catch (error) {
       console.error(`definitions: the built-in source could not be synced: ${(error as Error).message}`);
     }
+  }
+
+  /**
+   * Add the official definitions repository (`OFFICIAL_SOURCE_URL`) as a git source and sync it in the background.
+   * Only on a panel that has no git source yet, so one an admin removed comes back only when no other was added;
+   * disable it instead to keep it away.
+   */
+  async function seedOfficial(): Promise<void> {
+    if (Config.OFFICIAL_SOURCE_URL === "") return;
+    if (await Source.count({ where: { kind: "git" } }) > 0) return;
+    const source = await Source.create({
+      name: Source.OFFICIAL_NAME,
+      kind: "git",
+      url: Config.OFFICIAL_SOURCE_URL,
+      branch: "main",
+      path: "",
+      lastSyncAt: null,
+      lastCommit: null,
+      lastError: null,
+      authToken: null,
+      syncIntervalMin: null,
+    });
+    console.log(`definitions: added the official source ${source.url}`);
+    resyncSoon(source);
   }
 
   /**

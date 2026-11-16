@@ -38,7 +38,7 @@ For admins:
 - [Game sources](docs/admin/game-sources.md): add a git repository of games, pinning and upgrades.
 - [Users and quotas](docs/admin/users-and-quotas.md): invites, permissions, quotas, host grants, sharing, two-factor.
 
-Writing games: [games/README.md](games/README.md). Design notes and the build plan: [STRUCTURE.md](STRUCTURE.md) and [docs/blueprint.html](docs/blueprint.html).
+Writing games: the [ionnet-gss-games](https://github.com/ionnet-dev/ionnet-gss-games) README (the `games` submodule; clone with `--recurse-submodules`). Design notes and the build plan: [STRUCTURE.md](STRUCTURE.md) and [docs/blueprint.html](docs/blueprint.html).
 
 ## Current limits
 
