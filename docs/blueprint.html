@@ -384,7 +384,51 @@ services:
     <tr><td>Outbound block</td><td>Done</td><td>Private, host and link-local destinations are rejected by default; admin switch per server. Committed as <code>a6b884f</code>. Not separately reviewed yet.</td></tr>
     <tr><td>M3 Definitions</td><td>Done</td><td>Git sources with pinning and upgrade, <code>ini</code>/<code>json</code>/<code>yaml</code>/<code>cfg</code> formats, steamcmd, derived images for packages, stacks, dynamic dropdowns, Garry's Mod and Garry's Mod + MariaDB. Reviewed together with the outbound block; 15 findings fixed; committed as <code>1a1d15a</code>.</td></tr>
     <tr><td>M4 Operations</td><td>Done</td><td>File manager with chunked upload and download, backups and restore, live metrics and the player list, with Overview, Files and Backups tabs. Contracts <code>18fa86c</code>; built in four parallel parcels, run end to end in the real UI, reviewed (13 findings, 7 fixed, 6 on the hardening list), committed as <code>dd425e9</code> on 2026-11-16.</td></tr>
-    <tr><td>M5 Tenancy</td><td>Next</td><td>Quotas, host grants, sharing, 2FA, agent install script, docs.</td></tr>
+    <tr><td>M5 Tenancy</td><td>Done</td><td>User-wide quotas with a usage view, host grants, server sharing, two-factor sign-in with recovery codes, the agent install script, a README and admin docs. Contracts <code>d63acc2</code> (no protocol change); built in four parallel parcels, run end to end with a real agent and a real Paper server, reviewed (10 findings, 6 fixed, 4 on the hardening list), committed as <code>441db37</code> on 2026-11-16.</td></tr>
+    <tr><td>Deploy</td><td>Next</td><td>Create the GitHub repo, publish images to <code>ghcr.io/ionnet-dev</code>, deploy the panel to hostion and install the first agent there. Waiting for your go-ahead.</td></tr>
+  </table></div>
+  <h3>M5 design, as set in the contracts</h3>
+  <p>These are my defaults, chosen so the build could start. None is built in a way that is hard to change; say so if you want one different.</p>
+  <div class="scroll"><table>
+    <tr><th>Topic</th><th>Decision</th><th>Why, and the alternative</th></tr>
+    <tr><td>Access levels</td><td><code>view</code> &lt; <code>operate</code> &lt; <code>manage</code> &lt; <code>owner</code>. Only the owner (or an admin) can delete a server or change who it is shared with.</td><td>A shared manager who could re-share or delete would effectively be a second owner. Alternative: let <code>manage</code> re-share.</td></tr>
+    <tr><td>No access</td><td>A server you have no share on answers 404, not 403.</td><td>Server ids and names don't leak to other tenants.</td></tr>
+    <tr><td>Who pays</td><td>RAM, CPU, disk, server count and backups count against the server's owner, whoever makes the change. Servers being deleted no longer count.</td><td>A shared user can't spend their own quota on your server, and can't exceed yours. Alternative: count a server until the host confirms the delete.</td></tr>
+    <tr><td>Disk quota</td><td>Counts the sum of each server's disk limit, not measured bytes.</td><td>Predictable at create time and needs no host round trip. Alternative: measured use from the stats stream.</td></tr>
+    <tr><td>Editing quotas</td><td>A non-admin with the users permission can't edit their own quota.</td><td>Otherwise they could raise their own limits.</td></tr>
+    <tr><td>Host grants</td><td>Added by username (<code>POST /api/hosts/:id/grants</code>), like shares.</td><td>Someone who manages hosts may not be allowed to list users.</td></tr>
+    <tr><td>Recovery codes</td><td>Ten single-use codes, stored hashed in their own table and consumed with one conditional update.</td><td>Two requests can't spend the same code. Alternative: a JSON column on the user, which needs a row lock.</td></tr>
+    <tr><td>2FA and sessions</td><td>Turning 2FA on or off yourself ends no sessions. An admin reset ends all of that user's sessions.</td><td>The reset is the lost-phone or compromised-account path. Alternative: end every other session when 2FA is turned on.</td></tr>
+    <tr><td>QR code</td><td>Drawn in the browser with <code>qrcode-generator</code> (MIT, no dependencies, loaded only when the setup dialog opens).</td><td>The secret never goes to a third-party QR service. Alternative: a hand-written encoder, about 250 lines.</td></tr>
+    <tr><td>Install one-liner</td><td><code>curl … | sudo bash</code>; the script asks for the enrol token at a hidden prompt (or reads <code>GSS_ENROL_TOKEN</code> from the environment), handles Arch and Debian/Ubuntu and is safe to re-run.</td><td>Changed after review: the first version put the token in sudo's arguments, where any local user could read it from the process list during the install.</td></tr>
+    <tr><td>nftables</td><td>The script installs the package but never enables <code>nftables.service</code>.</td><td>Debian's default config starts with <code>flush ruleset</code>, which would wipe a host's existing firewall.</td></tr>
+  </table></div>
+  <h3>M5 integration run (real output, 2026-11-16)</h3>
+  <p>A private panel, a real agent with its own data folder and firewall table, and three invited users: alice (limited to 1 server, 2048 MB, 1 backup), bob and carol.</p>
+  <div class="scroll"><table>
+    <tr><th>Step</th><th>Result</th></tr>
+    <tr><td>Host grant</td><td>alice's host list was empty before the grant and showed one host with <code>canCreate: true</code> after it.</td></tr>
+    <tr><td>Quota</td><td>A real Paper 26.3 server installed and ran on port 25600. Second create: <code>409 You already have 1 game server, the most your quota allows (1).</code> Raising memory: <code>409 This would use 3072 MB of RAM; your quota is 2048 MB.</code> Three parallel creates with room for one: one 201, two 409.</td></tr>
+    <tr><td>Backups</td><td>First backup done (154,566,547 bytes, a real <code>tar.zst</code>). Second: <code>409 Your servers already have 1 backup, the most your quota allows (1). Delete an old one first.</code></td></tr>
+    <tr><td>Sharing</td><td>carol at <code>view</code> received live console and stats but got 404 on start and stop; at <code>operate</code> she stopped and started the real server; at <code>manage</code> files and backups worked and delete was refused. Removing the share closed her live stream with "You no longer have access to this server." Her own quota stayed at zero throughout.</td></tr>
+    <tr><td>Two-factor</td><td>Challenge then code signed in; a replayed code and a reused recovery code were refused; the live socket and download tickets worked on that session; the admin reset ended all of alice's sessions.</td></tr>
+    <tr><td>Grant revoked</td><td>alice's existing server kept running and stayed manageable; a new create answered <code>403 You may not create servers on this host. Ask an administrator for access.</code></td></tr>
+    <tr><td>Install script</td><td>Run from the panel's one-liner inside a Debian 12 container with real systemd: Docker and nftables installed, agent downloaded and checksum verified, enrolled, <code>systemctl is-active gss-agent</code> answered <code>active</code>, and the host showed online. A re-run upgraded without enrolling again.</td></tr>
+  </table></div>
+  <p>Not proven in this run: the firewall rules inside the nested test container (they can't work there), Ubuntu, and a browser pass over the admin quota dialog, the owner's Sharing tab and the host access card (each was checked by its own builder, not in the integrated run).</p>
+  <h3>M5 review: what it found</h3>
+  <div class="scroll"><table>
+    <tr><th>Finding</th><th>Outcome</th><th>Proof</th></tr>
+    <tr><td>Enrol token readable in the process list during install</td><td>Fixed</td><td>Every process's arguments sampled through two installs (974 and 1,683 samples): the token appeared in none.</td></tr>
+    <tr><td>Two users backing up each other's servers at once could deadlock</td><td>Fixed</td><td>Before: 20 rounds gave 20 failures. After: 30 rounds, 60 backups started, no deadlocks.</td></tr>
+    <tr><td>A host could be overcommitted while an upgrade adds bigger services</td><td>Fixed</td><td>Before: a create that should not fit got 201. After: <code>409 … 3071 of 65535 MB are free.</code> (fake agent)</td></tr>
+    <tr><td>Subscribing while a share is being removed kept the live stream</td><td>Fixed</td><td>With a forced 3 second gap the subscribe was refused.</td></tr>
+    <tr><td>Limits restored after an unanswered change could leave the agent on the new spec</td><td>Fixed</td><td>After a timeout the next start provisions the stored spec first. Tested with a timeout code from a fake agent, not a real wait.</td></tr>
+    <tr><td>Install script: no download timeouts, misleading <code>--no-start</code> message, no plain-http warning</td><td>Fixed</td><td>Re-run in a Debian 12 container.</td></tr>
+    <tr><td>Second-factor lockout resets on a panel restart and doesn't grow</td><td>Open</td><td>About 960 guesses a day for someone who already has the password.</td></tr>
+    <tr><td>Agent checksum comes from the same place as the binary</td><td>Open</td><td>Catches truncation, not tampering; signed releases would close it.</td></tr>
+    <tr><td>Panel crash in the middle of a limit change</td><td>Open</td><td>The row keeps the new limits while the agent runs the old spec until the next change.</td></tr>
+    <tr><td>Controllers importing each other</td><td>Partly fixed</td><td>The panel URL helper moved to <code>lib/</code>; the two-factor controller still shares the sign-in limiter.</td></tr>
   </table></div>
   <h3>M4 design, as agreed in the contracts</h3>
   <p>These are my defaults, filled in while you were away. They are built as described; say so if you want one changed.</p>
