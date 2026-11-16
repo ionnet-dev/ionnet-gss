@@ -259,15 +259,66 @@ type GameDefinition struct {
 	Players        *PlayersSpec `json:"players,omitempty"`
 	Backup         *BackupSpec  `json:"backup,omitempty"`
 	// Services extra containers of a stack, keyed by the host name the game reaches them under (^[a-z][a-z0-9-]{0,30}$, at most 4). On the server's bridge only, never published, started before the game (waiting for healthcheck), stopped after it, removed with it.
-	Services map[string]ServiceSpec `json:"services,omitempty"`
-	Settings *SettingsSpec          `json:"settings,omitempty"`
+	Services    map[string]ServiceSpec `json:"services,omitempty"`
+	Settings    *SettingsSpec          `json:"settings,omitempty"`
+	GameVersion *GameVersionSpec       `json:"game_version,omitempty"`
+	// Mods the server's Mods tab: folders whose entries are mods (files or folders), at most 8. The panel lists, uploads, disables (moves to disabled_folder), deletes and installs them from a catalog through the file API; nothing reaches the agent's spec. Merge by key.
+	Mods []ModFolder `json:"mods,omitempty"`
+}
+
+// GameVersionSpec where the panel learns the installed game version, for settings fields (since/until) and mod catalogs. file wins when it holds a version; else value; a value that isn't a version (latest) is unknown.
+type GameVersionSpec struct {
+	// Value template of {{vars.<key>}} only, e.g. {{vars.version}}.
+	Value string `json:"value,omitempty"`
+	// File file below /data whose first line is the installed version (written by the install hook, e.g. gss-version).
+	File string `json:"file,omitempty"`
+}
+
+// ModFolder one kind of mod and the folder it lives in, e.g. Forge mods (.jar files in mods), Paper plugins (.jar files in plugins) or Garry's Mod addons (folders and .gma files in garrysmod/addons).
+type ModFolder struct {
+	// Key unique within the definition; used in URLs and the manifest.
+	Key string `json:"key"`
+	// Label section title, e.g. Mods. Default is the key.
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
+	// Folder folder below /data, e.g. mods. Created on the first upload or install.
+	Folder string `json:"folder"`
+	// DisabledFolder where disabled mods are moved to (the game doesn't load them there). Default <folder>.disabled. Must not be inside folder.
+	DisabledFolder string `json:"disabled_folder,omitempty"`
+	// Match patterns for the entry names that count as mods (one path segment; * and ?; a trailing / matches folders only), e.g. *.jar, or a folder pattern (* plus a trailing slash) next to *.gma. Other entries in the folder are left alone and not listed. Uploads must match a file pattern.
+	Match []string `json:"match"`
+	// When only applies while each named variable has one of the listed values, like VariableDecl.when (e.g. { flavour: [forge, neoforge] }).
+	When map[string][]string `json:"when,omitempty"`
+	// Catalogs where the folder's mods can be searched and installed from, in the order the tab offers them (at most 4, one per provider).
+	Catalogs []ModCatalogRef `json:"catalogs,omitempty"`
+	Packs    *ModPackSpec    `json:"packs,omitempty"`
+}
+
+// ModCatalogProvider A catalog the panel can search and download from (panel-side, hosts on MOD_CATALOG_HOSTS). curseforge needs the operator's own API key (Settings → Mod catalogs); without it the catalog shows as unavailable. A new provider is a value here plus a ModCatalog in server/src/mods/catalogs/.
+type ModCatalogProvider string
+
+// ModCatalogProvider values.
+const (
+	ModCatalogProviderModrinth   ModCatalogProvider = "modrinth"
+	ModCatalogProviderCurseforge ModCatalogProvider = "curseforge"
+)
+
+// ModCatalogRef where the folder's mods can be searched and installed from, filtered to the server's loaders and game version (game_version).
+type ModCatalogRef struct {
+	Provider ModCatalogProvider `json:"provider"`
+	// ProjectType the provider's kind of project: Modrinth mod, plugin, datapack…; CurseForge the class slug, e.g. mc-mods, bukkit-plugins.
+	ProjectType string `json:"project_type"`
+	// Loaders the loader names the server can run, templates of {{vars.<key>}} allowed, e.g. ["{{vars.flavour}}"] or [paper, spigot, bukkit]. Modrinth's names; CurseForge maps forge, neoforge, fabric, quilt to its mod loader types. Empty = any (plugins on CurseForge).
+	Loaders []string `json:"loaders,omitempty"`
+	// GameID curseforge only, required there: the CurseForge game id (432 = Minecraft).
+	GameID int64 `json:"game_id,omitempty"`
 }
 
 // SettingsSpec the server's Game settings tab: keys of the game's own config files, edited in place by the panel through the file API (the file stays the source of truth; nothing reaches the agent's spec). A child definition's settings replace the parent's whole block.
 type SettingsSpec struct {
-	// Version the game version since/until compare against, a template of {{vars.<key>}} only, e.g. {{vars.version}}. A value that isn't a version (latest) counts as unknown: the newest fields apply.
+	// Version older spelling of game_version.value, used when the definition has no game_version. A template of {{vars.<key>}} only. A value that isn't a version (latest) counts as unknown: the newest fields apply.
 	Version string `json:"version,omitempty"`
-	// VersionFile file below /data whose first line is the installed version (written by the install hook, e.g. gss-version). Wins over version when it exists.
+	// VersionFile older spelling of game_version.file, used when the definition has no game_version.
 	VersionFile string         `json:"version_file,omitempty"`
 	Files       []SettingsFile `json:"files"`
 }
@@ -584,6 +635,23 @@ type ServiceLimits struct {
 	MemoryMB  int64 `json:"memoryMb,omitempty"`
 	CPUMillis int64 `json:"cpuMillis,omitempty"`
 	Pids      int64 `json:"pids,omitempty"`
+}
+
+// ModPackFormat pack files the folder can import. mrpack: a Modrinth modpack (files downloaded from Modrinth with their hashes, client-only ones skipped). curseforge: a CurseForge profile or modpack export (manifest.json, alone or in its zip); files are downloaded with the operator's CurseForge key, else listed for the owner to download and drop in. zip: any zip of mod files (e.g. a server pack) whose files are extracted.
+type ModPackFormat string
+
+// ModPackFormat values.
+const (
+	ModPackFormatMrpack     ModPackFormat = "mrpack"
+	ModPackFormatCurseforge ModPackFormat = "curseforge"
+	ModPackFormatZip        ModPackFormat = "zip"
+)
+
+// ModPackSpec importing a modpack into the folder: its mod files land in folder, and its other files (overrides, a server pack's configs) only below the listed top-level folders; everything else in the pack is reported and skipped.
+type ModPackSpec struct {
+	Formats []ModPackFormat `json:"formats"`
+	// Overrides top-level folders below /data the pack may write other files into, e.g. [config, defaultconfigs, kubejs]. Same path rules as folder.
+	Overrides []string `json:"overrides,omitempty"`
 }
 
 // FileType other = sockets, devices, fifos: listed, never opened.

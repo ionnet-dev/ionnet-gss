@@ -68,3 +68,36 @@ export interface TestMailBody {
   to: string;
   settings?: UpdateMailSettingsBody;
 }
+
+/**
+ * `GET /api/settings/catalogs` (M9): credentials for mod catalogs. Only CurseForge needs one: its API and CDN take the
+ * operator's own key from https://console.curseforge.com (the panel never uses another app's key or a proxy). The key
+ * never leaves the panel; it is stored encrypted like the SMTP password.
+ */
+export interface CatalogSettingsDto {
+  curseforge: {
+    hasApiKey: boolean;
+    keyUnreadable: boolean; // Stored but can't be decrypted (JWT_SECRET changed); enter it again.
+    updatedAt: IsoDate | null;
+  };
+}
+
+/**
+ * `PUT /api/settings/catalogs`. `curseforgeApiKey`: absent = keep, `null` or `""` = remove, a string = replace (checked
+ * against the CurseForge API first; 400 with CurseForge's answer when it is refused).
+ */
+export interface UpdateCatalogSettingsBody {
+  curseforgeApiKey?: string | null;
+}
+
+/**
+ * `POST /api/settings/catalogs/test`: try the given key (or the stored one when absent) against the CurseForge API.
+ */
+export interface TestCatalogBody {
+  curseforgeApiKey?: string;
+}
+
+export interface TestCatalogResponse {
+  ok: boolean;
+  message: string; // e.g. "CurseForge accepted the key." or its refusal.
+}

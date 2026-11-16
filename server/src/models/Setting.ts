@@ -48,6 +48,9 @@ export class Setting extends Model<InferAttributes<Setting>, InferCreationAttrib
       verifyCertificate: true,
       requireConfirmedEmail: false,
     }),
+    catalogs: Object.freeze({
+      curseforgeKeyBox: null,
+    }),
   });
 
   private static _cache: Map<Setting.Key, Setting.CacheEntry> | null = null;
@@ -230,6 +233,7 @@ export namespace Setting {
    */
   export interface Values {
     mail: StoredMail;
+    catalogs: StoredCatalogs; // M9
   }
 
   export type Key = keyof Values;
@@ -248,6 +252,14 @@ export namespace Setting {
     fromName: string | null;
     verifyCertificate: boolean;
     requireConfirmedEmail: boolean;
+  }
+
+  /**
+   * Mod catalog credentials (M9). `curseforgeKeyBox` is the operator's CurseForge API key sealed by
+   * `lib/secretBox.ts` (never plain); null = none.
+   */
+  export interface StoredCatalogs {
+    curseforgeKeyBox: string | null;
   }
 
   export interface CacheEntry {

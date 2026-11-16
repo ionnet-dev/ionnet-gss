@@ -1,0 +1,373 @@
+.mod-manager {
+  position: relative;
+
+  &[data-dragging] {
+    outline: 2px dashed var(--io-color-accent);
+    outline-offset: -2px;
+  }
+
+  &__input {
+    display: none;
+  }
+
+  &__link {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--io-space-4);
+    color: var(--io-color-accent);
+    font-size: var(--io-text-sm);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  &__line {
+    display: block;
+  }
+
+  &__warning {
+    color: var(--io-color-warn);
+    font-size: var(--io-text-sm);
+  }
+
+  &__hint {
+    font-size: var(--io-text-sm);
+  }
+
+  &__refused {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-4);
+    padding: var(--io-space-8) var(--io-space-12);
+    border: 1px solid var(--io-color-warn);
+    border-radius: var(--io-radius-sm);
+    font-size: var(--io-text-sm);
+
+    ul {
+      margin: 0;
+      padding-inline-start: var(--io-space-16);
+      overflow-wrap: anywhere;
+    }
+  }
+
+  &__refused-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  &__uploads {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-8);
+  }
+
+  &__upload {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-4);
+    padding: var(--io-space-8) var(--io-space-12);
+    border: 1px solid var(--io-color-line);
+    border-radius: var(--io-radius-sm);
+    font-size: var(--io-text-sm);
+
+    &[data-state="failed"] {
+      border-color: var(--io-color-bad);
+    }
+  }
+
+  &__upload-head {
+    display: flex;
+    align-items: center;
+    gap: var(--io-space-12);
+  }
+
+  &__upload-name {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+
+  // The empty folder is itself the drop target and a button for the file picker.
+  &__empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--io-space-8);
+    padding: var(--io-space-24);
+    border: 2px dashed var(--io-color-line);
+    border-radius: var(--io-radius-sm);
+    background: transparent;
+    color: var(--io-color-text);
+    font: inherit;
+    text-align: center;
+    cursor: pointer;
+
+    &:hover {
+      border-color: var(--io-color-accent);
+    }
+  }
+
+  &__toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--io-space-12);
+    padding-inline: var(--io-space-12);
+    font-size: var(--io-text-sm);
+  }
+
+  &__filter {
+    flex: 1 1 14rem;
+    max-inline-size: 22rem;
+  }
+
+  &__bulk {
+    margin-inline-start: auto;
+  }
+
+  &__list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--io-color-line);
+    border-radius: var(--io-radius-sm);
+  }
+
+  &__row {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: var(--io-space-12);
+    padding: var(--io-space-8) var(--io-space-12);
+
+    & + & {
+      border-block-start: 1px solid var(--io-color-line);
+    }
+
+    &[data-selected] {
+      background: var(--io-color-surface-soft);
+    }
+
+    // A disabled mod stays readable but clearly out of play; its switch and delete keep full strength.
+    &:not([data-enabled]) > .mod-manager__icon,
+    &:not([data-enabled]) > .mod-manager__main {
+      opacity: 0.55;
+    }
+
+    @media (max-width: 40rem) {
+      grid-template-columns: auto auto minmax(0, 1fr);
+
+      > .mod-manager__size {
+        display: none;
+      }
+
+      > .mod-manager__row-actions {
+        grid-column: 2 / -1;
+      }
+    }
+  }
+
+  &__icon {
+    display: flex;
+    align-items: center;
+  }
+
+  &__main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-4);
+    min-inline-size: 0;
+    font-size: var(--io-text-sm);
+  }
+
+  &__title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--io-space-8);
+  }
+
+  &__name {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+
+  &__entry {
+    overflow-wrap: anywhere;
+  }
+
+  &__size {
+    font-size: var(--io-text-sm);
+    white-space: nowrap;
+  }
+
+  &__row-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--io-space-8);
+  }
+
+  &__names {
+    margin: 0;
+    padding-inline-start: var(--io-space-16);
+    font-family: var(--io-font-mono);
+    font-size: var(--io-text-sm);
+    overflow-wrap: anywhere;
+  }
+
+  &__drop {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: inherit;
+    background: color-mix(in srgb, var(--io-color-surface) 80%, transparent);
+    font-weight: 600;
+    pointer-events: none;
+  }
+}
+
+.mod-browser {
+  &__results {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-8);
+  }
+
+  &__hit {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-8);
+    padding: var(--io-space-8) var(--io-space-12);
+    border: 1px solid var(--io-color-line);
+    border-radius: var(--io-radius-sm);
+  }
+
+  &__head,
+  &__version {
+    display: flex;
+    align-items: center;
+    gap: var(--io-space-12);
+  }
+
+  &__text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: var(--io-space-4);
+    min-inline-size: 0;
+    font-size: var(--io-text-sm);
+  }
+
+  &__title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--io-space-8);
+  }
+
+  &__name {
+    font-weight: 600;
+  }
+
+  &__downloads {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--io-space-4);
+    white-space: nowrap;
+  }
+
+  &__description {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  &__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--io-space-8);
+  }
+
+  &__versions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-8);
+    padding-block-start: var(--io-space-8);
+    border-block-start: 1px solid var(--io-color-line);
+  }
+
+  &__version {
+    padding-inline-start: var(--io-space-8);
+  }
+}
+
+.mod-pack {
+  &__warnings {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--io-space-12);
+    padding: var(--io-space-12);
+    border: 1px solid var(--io-color-warn);
+    border-radius: var(--io-radius-sm);
+    color: var(--io-color-hue-text-warn);
+    font-size: var(--io-text-sm);
+
+    ul {
+      margin: 0;
+      padding-inline-start: var(--io-space-16);
+    }
+  }
+
+  &__bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--io-space-12);
+    font-size: var(--io-text-sm);
+  }
+
+  &__bulk {
+    margin-inline-start: auto;
+  }
+
+  &__mods {
+    display: flex;
+    flex-direction: column;
+    max-block-size: 20rem;
+    overflow: auto;
+    border: 1px solid var(--io-color-line);
+    border-radius: var(--io-radius-sm);
+  }
+
+  &__mod {
+    display: flex;
+    align-items: center;
+    gap: var(--io-space-12);
+    padding: var(--io-space-8) var(--io-space-12);
+
+    & + & {
+      border-block-start: 1px solid var(--io-color-line);
+    }
+
+    &[data-unavailable] > .mod-pack__text {
+      opacity: 0.8;
+    }
+  }
+
+  &__text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: var(--io-space-4);
+    min-inline-size: 0;
+    font-size: var(--io-text-sm);
+    overflow-wrap: anywhere;
+  }
+}

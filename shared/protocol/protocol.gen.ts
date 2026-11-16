@@ -419,6 +419,86 @@ export interface GameDefinition {
    */
   services?: Record<string, ServiceSpec>;
   settings?: SettingsSpec;
+  game_version?: GameVersionSpec;
+  /**
+   * The server's Mods tab: folders whose entries are mods (files or folders), at most 8. The panel lists, uploads, disables (moves to `disabled_folder`), deletes and installs them from a catalog through the file API; nothing reaches the agent's spec. Merge by `key`.
+   */
+  mods?: ModFolder[];
+}
+
+/**
+ * Where the panel learns the installed game version, for `settings` fields (`since`/`until`) and mod catalogs. `file` wins when it holds a version; else `value`; a value that isn't a version (`latest`) is unknown.
+ */
+export interface GameVersionSpec {
+  /**
+   * Template of `{{vars.<key>}}` only, e.g. `{{vars.version}}`.
+   */
+  value?: string;
+  /**
+   * File below /data whose first line is the installed version (written by the install hook, e.g. `gss-version`).
+   */
+  file?: string;
+}
+
+/**
+ * One kind of mod and the folder it lives in, e.g. Forge mods (`.jar` files in `mods`), Paper plugins (`.jar` files in `plugins`) or Garry's Mod addons (folders and `.gma` files in `garrysmod/addons`).
+ */
+export interface ModFolder {
+  /**
+   * Unique within the definition; used in URLs and the manifest.
+   */
+  key: string;
+  /**
+   * Section title, e.g. `Mods`. Default is the key.
+   */
+  label?: string;
+  description?: string;
+  /**
+   * Folder below /data, e.g. `mods`. Created on the first upload or install.
+   */
+  folder: string;
+  /**
+   * Where disabled mods are moved to (the game doesn't load them there). Default `<folder>.disabled`. Must not be inside `folder`.
+   */
+  disabled_folder?: string;
+  /**
+   * Patterns for the entry names that count as mods (one path segment; `*` and `?`; a trailing `/` matches folders only), e.g. `*.jar`, or a folder pattern (`*` plus a trailing slash) next to `*.gma`. Other entries in the folder are left alone and not listed. Uploads must match a file pattern.
+   */
+  match: string[];
+  /**
+   * Only applies while each named variable has one of the listed values, like `VariableDecl.when` (e.g. `{ flavour: [forge, neoforge] }`).
+   */
+  when?: Record<string, string[]>;
+  /**
+   * Where the folder's mods can be searched and installed from, in the order the tab offers them (at most 4, one per provider).
+   */
+  catalogs?: ModCatalogRef[];
+  packs?: ModPackSpec;
+}
+
+/**
+ * A catalog the panel can search and download from (panel-side, hosts on MOD_CATALOG_HOSTS). `curseforge` needs the operator's own API key (Settings → Mod catalogs); without it the catalog shows as unavailable. A new provider is a value here plus a `ModCatalog` in server/src/mods/catalogs/.
+ */
+export type ModCatalogProvider = "modrinth" | "curseforge";
+export const MOD_CATALOG_PROVIDER_VALUES: readonly ModCatalogProvider[] = ["modrinth", "curseforge"];
+
+/**
+ * Where the folder's mods can be searched and installed from, filtered to the server's loaders and game version (`game_version`).
+ */
+export interface ModCatalogRef {
+  provider: ModCatalogProvider;
+  /**
+   * The provider's kind of project: Modrinth `mod`, `plugin`, `datapack`…; CurseForge the class slug, e.g. `mc-mods`, `bukkit-plugins`.
+   */
+  project_type: string;
+  /**
+   * The loader names the server can run, templates of `{{vars.<key>}}` allowed, e.g. `["{{vars.flavour}}"]` or `[paper, spigot, bukkit]`. Modrinth's names; CurseForge maps `forge`, `neoforge`, `fabric`, `quilt` to its mod loader types. Empty = any (plugins on CurseForge).
+   */
+  loaders?: string[];
+  /**
+   * `curseforge` only, required there: the CurseForge game id (432 = Minecraft).
+   */
+  game_id?: number;
 }
 
 /**
@@ -426,11 +506,11 @@ export interface GameDefinition {
  */
 export interface SettingsSpec {
   /**
-   * The game version `since`/`until` compare against, a template of `{{vars.<key>}}` only, e.g. `{{vars.version}}`. A value that isn't a version (`latest`) counts as unknown: the newest fields apply.
+   * Older spelling of `game_version.value`, used when the definition has no `game_version`. A template of `{{vars.<key>}}` only. A value that isn't a version (`latest`) counts as unknown: the newest fields apply.
    */
   version?: string;
   /**
-   * File below /data whose first line is the installed version (written by the install hook, e.g. `gss-version`). Wins over `version` when it exists.
+   * Older spelling of `game_version.file`, used when the definition has no `game_version`.
    */
   version_file?: string;
   files: SettingsFile[];
@@ -840,6 +920,23 @@ export interface ServiceLimits {
   memoryMb?: number;
   cpuMillis?: number;
   pids?: number;
+}
+
+/**
+ * Pack files the folder can import. `mrpack`: a Modrinth modpack (files downloaded from Modrinth with their hashes, client-only ones skipped). `curseforge`: a CurseForge profile or modpack export (`manifest.json`, alone or in its zip); files are downloaded with the operator's CurseForge key, else listed for the owner to download and drop in. `zip`: any zip of mod files (e.g. a server pack) whose files are extracted.
+ */
+export type ModPackFormat = "mrpack" | "curseforge" | "zip";
+export const MOD_PACK_FORMAT_VALUES: readonly ModPackFormat[] = ["mrpack", "curseforge", "zip"];
+
+/**
+ * Importing a modpack into the folder: its mod files land in `folder`, and its other files (overrides, a server pack's configs) only below the listed top-level folders; everything else in the pack is reported and skipped.
+ */
+export interface ModPackSpec {
+  formats: ModPackFormat[];
+  /**
+   * Top-level folders below /data the pack may write other files into, e.g. `[config, defaultconfigs, kubejs]`. Same path rules as `folder`.
+   */
+  overrides?: string[];
 }
 
 //#endregion

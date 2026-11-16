@@ -20,4 +20,5 @@ export type * from "./api/backups.ts";
 export type * from "./api/metrics.ts";
 export type * from "./api/settings.ts";
 export type * from "./api/gameSettings.ts";
+export type * from "./api/mods.ts";
 export * from "./protocol/protocol.gen.ts";

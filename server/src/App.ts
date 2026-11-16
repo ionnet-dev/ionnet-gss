@@ -11,6 +11,7 @@ import { Config, isDevelopment } from "./Config.ts";
 import { FILE_TEXT_MAX_BYTES } from "@shared/protocol/protocol.gen.ts";
 import { ApiController } from "./controllers/ApiController.ts";
 import { FileController } from "./controllers/FileController.ts";
+import { ModController } from "./controllers/ModController.ts";
 import { AgentGateway } from "./gateways/agent/AgentGateway.ts";
 import { LiveGateway } from "./gateways/live/LiveGateway.ts";
 import { HttpError } from "./lib/HttpError.ts";
@@ -42,6 +43,8 @@ export function createApp(): Hono {
   });
   app.use("/api/*", (c, next) => {
     if (FileController.BODY_PATHS.UPLOAD.test(c.req.path)) return next(); // Streamed; FileService checks UPLOAD_MAX_MB.
+    if (ModController.BODY_PATHS.UPLOAD.test(c.req.path)) return next(); // M9: streamed like file uploads.
+    if (ModController.BODY_PATHS.PACKS.test(c.req.path)) return next(); // M9: streamed; ModPackService checks MOD_PACK_MAX_MB.
     if (FileController.BODY_PATHS.CONTENT.test(c.req.path)) return textLimit(c, next);
     return jsonLimit(c, next);
   });

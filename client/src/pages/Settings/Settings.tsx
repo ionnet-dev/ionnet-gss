@@ -1,7 +1,7 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Badge, Button, Card, CardBody, CardFooter, CardHeader, Grid, Input, Select, Separator, Spinner, Stack, Switch } from "@ionnet/iontronic/react";
-import { Send } from "@ionnet/iontronic/icons";
-import type { MailSecurity, MailSettingsDto, UpdateMailSettingsBody } from "@shared/api/settings.ts";
+import { Badge, Button, Card, CardBody, CardFooter, CardHeader, Grid, Icon, Input, Select, Separator, Spinner, Stack, Switch } from "@ionnet/iontronic/react";
+import { ExternalLink, Send } from "@ionnet/iontronic/icons";
+import type { CatalogSettingsDto, MailSecurity, MailSettingsDto, UpdateMailSettingsBody } from "@shared/api/settings.ts";
 import { SettingsApi } from "@/Api/SettingsApi.ts";
 import FormError from "@/components/FormError/FormError.tsx";
 import LoadError from "@/components/LoadError/LoadError.tsx";
@@ -87,7 +87,140 @@ export default function Settings(_props: Props) {
       {mail.data === null && mail.loading && <Stack align="center"><Spinner label="Loading settings" /></Stack>}
       {mail.data === null && mail.error && <LoadError title="Couldn't load the settings" error={mail.error} onRetry={mail.reload} />}
       {mail.data && <MailCard dto={mail.data} onSaved={mail.reload} />}
+      <CatalogsSection />
     </Stack>
+  );
+}
+
+function CatalogsSection() {
+  const catalogs = SettingsApi.useCatalogs();
+  if (catalogs.data) return <CatalogsCard dto={catalogs.data} onChanged={catalogs.reload} />;
+  if (catalogs.error) return <LoadError title="Couldn't load the mod catalog settings" error={catalogs.error} onRetry={catalogs.reload} />;
+  return <Stack align="center"><Spinner label="Loading mod catalog settings" /></Stack>;
+}
+
+/**
+ * The credentials of the mod catalogs: the CurseForge API key (stored encrypted, checked against CurseForge on save).
+ * Without it CurseForge search and CurseForge profile downloads are unavailable; Modrinth and zip/mrpack imports work.
+ */
+function CatalogsCard(props: { dto: CatalogSettingsDto; onChanged: () => Promise<void> }) {
+  const { dto, onChanged } = props;
+  const { curseforge } = dto;
+  const notify = useNotify();
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState<"save" | "remove" | "test" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const change = (value: string) => {
+    setKey(value);
+    setTestResult(null);
+    setError(null);
+  };
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    const trimmed = key.trim();
+    if (!trimmed) {
+      setError("Enter the API key first.");
+      return;
+    }
+    setBusy("save");
+    setError(null);
+    try {
+      await SettingsApi.updateCatalogs({ curseforgeApiKey: trimmed });
+      setKey("");
+      // The save keeps a key CurseForge couldn't check (down, rate limited); a refused one never gets here.
+      const check = await SettingsApi.testCatalogs({}).catch(() => null);
+      setTestResult(check && !check.ok ? { ok: false, text: `Saved, but CurseForge couldn't be reached to check it. ${check.message}` } : null);
+      notify.ok("CurseForge key saved");
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async () => {
+    setBusy("remove");
+    setError(null);
+    try {
+      await SettingsApi.updateCatalogs({ curseforgeApiKey: null });
+      setKey("");
+      setTestResult(null);
+      notify.ok("CurseForge key removed");
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const test = async () => {
+    const trimmed = key.trim();
+    if (!trimmed && !(curseforge.hasApiKey && !curseforge.keyUnreadable)) {
+      setTestResult({ ok: false, text: "Enter a key to test." });
+      return;
+    }
+    setBusy("test");
+    setTestResult(null);
+    try {
+      const result = await SettingsApi.testCatalogs(trimmed ? { curseforgeApiKey: trimmed } : {});
+      setTestResult({ ok: result.ok, text: result.message });
+    } catch (err) {
+      setTestResult({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader
+        title="Mod catalogs"
+        description="Where the Mods tab searches for and downloads mods. Modrinth needs no setup."
+        actions={curseforge.hasApiKey && !curseforge.keyUnreadable ? <Badge tone="ok">CurseForge key stored</Badge> : <Badge tone="neutral">No CurseForge key</Badge>}
+      />
+      <form onSubmit={save} noValidate>
+        <CardBody>
+          <Stack gap="12">
+            <span className="io-text-muted">
+              CurseForge needs your own API key from{" "}
+              <a href="https://console.curseforge.com" target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: "var(--io-space-4)", whiteSpace: "nowrap", color: "var(--io-color-accent)", fontWeight: 600 }}>console.curseforge.com <Icon icon={ExternalLink} size="sm" /></a>.
+              Without one, CurseForge browsing and CurseForge profile downloads are unavailable; Modrinth and zip or mrpack imports still work.
+              The key stays on the panel, stored encrypted, and is checked against CurseForge when you save it.
+            </span>
+            {curseforge.keyUnreadable && (
+              <span role="alert" style={{ color: "var(--io-color-hue-text-warn)" }}>
+                The stored key can't be read any more (the panel's secret changed). Enter it again and save.
+              </span>
+            )}
+            <Input
+              label="CurseForge API key"
+              type="password"
+              autoComplete="new-password"
+              spellCheck={false}
+              placeholder={curseforge.hasApiKey && !curseforge.keyUnreadable ? "Stored — enter a new key to replace it" : undefined}
+              value={key}
+              onChange={(event) => change(event.target.value)}
+            />
+            {testResult && (
+              <span role={testResult.ok ? "status" : "alert"} style={{ color: `var(--io-color-hue-text-${testResult.ok ? "ok" : "bad"})` }}>
+                {testResult.text}
+              </span>
+            )}
+            <FormError>{error}</FormError>
+          </Stack>
+        </CardBody>
+        <CardFooter>
+          {curseforge.hasApiKey && <Button variant="danger" loading={busy === "remove"} disabled={busy !== null} onClick={remove}>Remove key</Button>}
+          <Button loading={busy === "test"} disabled={busy !== null} onClick={test}>Test</Button>
+          <Button type="submit" variant="primary" loading={busy === "save"} disabled={busy !== null || key.trim() === ""}>Save</Button>
+        </CardFooter>
+      </form>
+    </Card>
   );
 }
 

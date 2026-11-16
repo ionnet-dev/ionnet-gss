@@ -133,6 +133,12 @@ function load() {
     SOURCE_MAX_FILES: readInt("SOURCE_MAX_FILES", 5000, 1),
     /** Comma-separated https hosts `options_from` may fetch from. */
     OPTIONS_FETCH_HOSTS: readString("OPTIONS_FETCH_HOSTS", "piston-meta.mojang.com,launchermeta.mojang.com,api.papermc.io,maven.minecraftforge.net,meta.prismlauncher.org"),
+
+    // Mods (M9)
+    /** Comma-separated https hosts mod catalogs (`mods[].catalog`) may be searched and downloaded from. */
+    MOD_CATALOG_HOSTS: readString("MOD_CATALOG_HOSTS", "api.modrinth.com,cdn.modrinth.com,api.curseforge.com,edge.forgecdn.net,mediafilez.forgecdn.net"),
+    /** Largest modpack file (`.mrpack`, `.zip`, `manifest.json`) the Mods tab imports, in MB. */
+    MOD_PACK_MAX_MB: readInt("MOD_PACK_MAX_MB", 1024, 1),
     /** Minutes a fetched option list is cached. */
     OPTIONS_CACHE_MIN: readInt("OPTIONS_CACHE_MIN", 15, 1),
 

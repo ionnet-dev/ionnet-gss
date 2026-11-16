@@ -10,6 +10,8 @@ import {
   type ConfigMapping,
   type GameDefinition,
   type InstallStep,
+  MOD_CATALOG_PROVIDER_VALUES,
+  MOD_PACK_FORMAT_VALUES,
   PORT_PROTO_VALUES,
   type PortBinding,
   SETTING_TYPE_VALUES,
@@ -112,7 +114,7 @@ export namespace DefinitionEngine {
    * Keys of a definition whose strings may hold `{{…}}` templates.
    */
   const TEMPLATED_KEYS = ["image", "install", "configs", "hooks", "start", "ready", "stop", "console", "players", "backup", "services"] as const;
-  const DEFINITION_KEYS = ["id", "name", "extends", "image", "packages", "variables", "ports", "install_timeout", ...TEMPLATED_KEYS.filter((k) => k !== "image"), "settings"];
+  const DEFINITION_KEYS = ["id", "name", "extends", "image", "packages", "variables", "ports", "install_timeout", ...TEMPLATED_KEYS.filter((k) => k !== "image"), "settings", "game_version", "mods"];
   const VARIABLE_KEYS = ["key", "label", "description", "type", "options", "options_from", "pattern", "default", "unit", "min", "max", "reinstall", "admin_only", "bind", "generate", "when"];
   const PORT_KEYS = ["name", "proto", "default", "internal"];
   const INSTALL_KEYS = ["steamcmd", "download", "extract", "write", "hook"];
@@ -124,6 +126,21 @@ export namespace DefinitionEngine {
   const MAX_SETTINGS_FILES = 8;
   const MAX_SETTINGS_FIELDS = 400;
   const MAX_SETTING_KEY_CHARS = 128;
+  const GAME_VERSION_KEYS = ["value", "file"];
+  const MOD_FOLDER_KEYS = ["key", "label", "description", "folder", "disabled_folder", "match", "when", "catalogs", "packs"];
+  const MOD_CATALOG_KEYS = ["provider", "project_type", "loaders", "game_id"];
+  const MOD_PACK_KEYS = ["formats", "overrides"];
+  const MAX_MOD_CATALOGS = 4;
+  const MAX_PACK_OVERRIDES = 16;
+  const MOD_FOLDER_KEY = /^[a-z][a-z0-9_]*$/;
+  const MAX_MOD_FOLDERS = 8;
+  const MAX_MOD_PATTERN_CHARS = 64;
+  const MAX_MOD_PATTERNS = 16;
+
+  /**
+   * The loader names CurseForge's API knows (`modLoaderType`); a curseforge catalog's loaders must be among them.
+   */
+  export const CURSEFORGE_LOADERS: readonly string[] = ["forge", "neoforge", "fabric", "quilt"];
 
   //#region Parse and validate
   /**
@@ -167,6 +184,7 @@ export namespace DefinitionEngine {
     const portNames = new Set((def.ports ?? []).map((p) => p.name));
     checkVariableLinks(def.variables ?? [], path);
     checkSettingsLinks(def, path);
+    checkModLinks(def, path);
     for (const key of TEMPLATED_KEYS) {
       visitStrings(def[key], key, (text, where) => {
         for (const match of text.matchAll(PLACEHOLDER)) {
@@ -652,7 +670,155 @@ export namespace DefinitionEngine {
       }
     }
     if (raw.settings !== undefined) checkSettings(raw.settings, path);
+    if (raw.game_version !== undefined) checkGameVersion(raw.game_version, path);
+    if (raw.mods !== undefined) checkMods(raw.mods, path);
     return raw as unknown as GameDefinition;
+  }
+
+  /**
+   * Structure of `game_version` (definition.json GameVersionSpec): `value` a string, `file` a plain relative path.
+   * @throws Error naming the file and the field.
+   */
+  function checkGameVersion(raw: unknown, path: string): void {
+    if (!isRecord(raw)) throw new Error(`${path}: game_version must be a mapping with a value and/or a file, e.g. { value: "{{vars.version}}", file: gss-version }.`);
+    for (const key of Object.keys(raw)) {
+      if (!GAME_VERSION_KEYS.includes(key)) throw new Error(`${path}: game_version.${key} is not a known key. Known keys: ${GAME_VERSION_KEYS.join(", ")}.`);
+    }
+    if (raw.value !== undefined && typeof raw.value !== "string") throw new Error(`${path}: game_version.value must be a string.`);
+    if (raw.file !== undefined && (typeof raw.file !== "string" || !isSettingsPath(raw.file))) {
+      throw new Error(`${path}: game_version.file must be a relative path without "." or ".." segments (e.g. gss-version).`);
+    }
+  }
+
+  /**
+   * Structure of `mods` (definition.json ModFolder): known keys, unique keys, at most MAX_MOD_FOLDERS, folders that are
+   * plain relative paths outside `.gss` and not inside each other, single-segment `match` patterns, `when` shaped like a
+   * variable's, and a `catalog` with a known provider.
+   * @throws Error naming the file and the field.
+   */
+  function checkMods(raw: unknown, path: string): void {
+    const fail = (where: string, message: string): never => {
+      throw new Error(`${path}: ${where} ${message}`);
+    };
+    if (!Array.isArray(raw)) return fail("mods", "must be a list of folders, e.g. [{ key: mods, folder: mods, match: [\"*.jar\"] }].");
+    if (raw.length > MAX_MOD_FOLDERS) fail("mods", `lists ${raw.length} folders; at most ${MAX_MOD_FOLDERS} are allowed.`);
+    const keys = new Set<string>();
+    raw.forEach((item, i) => {
+      const where = `mods[${i}]`;
+      if (!isRecord(item)) return fail(where, "must be a mapping with a key, a folder and match patterns.");
+      for (const key of Object.keys(item)) {
+        if (!MOD_FOLDER_KEYS.includes(key)) fail(`${where}.${key}`, `is not a known key. Known keys: ${MOD_FOLDER_KEYS.join(", ")}.`);
+      }
+      if (typeof item.key !== "string" || !MOD_FOLDER_KEY.test(item.key)) fail(`${where}.key`, "must be lowercase letters, digits and underscores, starting with a letter (e.g. mods).");
+      const at = `${where} (${item.key})`;
+      if (keys.has(item.key as string)) fail(`${where}.key`, `"${item.key}" is used by another mod folder; keys must be unique.`);
+      keys.add(item.key as string);
+      for (const name of ["label", "description"] as const) {
+        if (item[name] !== undefined && typeof item[name] !== "string") fail(`${at} ${name}`, "must be a string.");
+      }
+      const folderProblem = (value: unknown): string | null => {
+        if (typeof value !== "string" || !isSettingsPath(value)) return "must be a relative path without \".\" or \"..\" segments (e.g. mods).";
+        if (value.split("/")[0] === ".gss") return "can't be in .gss, the agent's own folder.";
+        return null;
+      };
+      const folderError = folderProblem(item.folder);
+      if (folderError) fail(`${at} folder`, folderError);
+      if (item.disabled_folder !== undefined) {
+        const disabledError = folderProblem(item.disabled_folder);
+        if (disabledError) fail(`${at} disabled_folder`, disabledError);
+      }
+      const folder = item.folder as string;
+      const disabled = (item.disabled_folder as string | undefined) ?? `${folder}.disabled`;
+      if (disabled === folder) fail(`${at} disabled_folder`, "must differ from folder: disabled mods are moved out of it.");
+      if (disabled.startsWith(`${folder}/`)) fail(`${at} disabled_folder`, `(${disabled}) is inside folder (${folder}), where the game would still load it. Put it next to the folder instead, e.g. ${folder}.disabled.`);
+      if (folder.startsWith(`${disabled}/`)) fail(`${at} folder`, `(${folder}) is inside disabled_folder (${disabled}).`);
+
+      if (!Array.isArray(item.match) || item.match.length === 0) fail(`${at} match`, "needs at least one pattern, e.g. [\"*.jar\"] or [\"*/\", \"*.gma\"].");
+      if ((item.match as unknown[]).length > MAX_MOD_PATTERNS) fail(`${at} match`, `lists ${(item.match as unknown[]).length} patterns; at most ${MAX_MOD_PATTERNS} are allowed.`);
+      (item.match as unknown[]).forEach((pattern, p) => {
+        const problem = modPatternProblem(pattern);
+        if (problem) fail(`${at} match[${p}]`, problem);
+      });
+
+      if (item.when !== undefined) {
+        if (!isRecord(item.when) || Object.keys(item.when).length === 0) fail(`${at} when`, "must be a mapping of variable to the values it applies for, e.g. { flavour: [forge] }.");
+        for (const [other, values] of Object.entries(item.when as Record<string, unknown>)) {
+          if (!Array.isArray(values) || values.length === 0 || !values.every((value) => typeof value === "string")) {
+            fail(`${at} when.${other}`, "must be a list of values (text; booleans as \"true\" or \"false\").");
+          }
+        }
+      }
+
+      if (item.catalogs !== undefined) {
+        if (!Array.isArray(item.catalogs)) return fail(`${at} catalogs`, "must be a list, e.g. [{ provider: modrinth, project_type: mod, loaders: [\"{{vars.flavour}}\"] }].");
+        if (item.catalogs.length > MAX_MOD_CATALOGS) fail(`${at} catalogs`, `lists ${item.catalogs.length} catalogs; at most ${MAX_MOD_CATALOGS} are allowed.`);
+        const providers = new Set<unknown>();
+        (item.catalogs as unknown[]).forEach((catalog, c) => {
+          const where = `${at} catalogs[${c}]`;
+          if (!isRecord(catalog)) return fail(where, "must be a mapping with a provider and a project_type.");
+          for (const key of Object.keys(catalog)) {
+            if (!MOD_CATALOG_KEYS.includes(key)) fail(`${where}.${key}`, `is not a known key. Known keys: ${MOD_CATALOG_KEYS.join(", ")}.`);
+          }
+          if (!MOD_CATALOG_PROVIDER_VALUES.includes(catalog.provider as never)) fail(`${where}.provider`, `must be one of: ${MOD_CATALOG_PROVIDER_VALUES.join(", ")}.`);
+          if (providers.has(catalog.provider)) fail(`${where}.provider`, `"${catalog.provider}" is listed twice; each catalog may appear once per folder.`);
+          providers.add(catalog.provider);
+          if (typeof catalog.project_type !== "string" || catalog.project_type.trim() === "") fail(`${where}.project_type`, "must be the provider's kind of project (e.g. mod, plugin or mc-mods).");
+          if (catalog.loaders !== undefined) {
+            if (!Array.isArray(catalog.loaders)) fail(`${where}.loaders`, "must be a list of loader names, e.g. [paper] or [\"{{vars.flavour}}\"] (leave it out for any loader).");
+            (catalog.loaders as unknown[]).forEach((loader, l) => {
+              if (typeof loader !== "string" || loader.trim() === "") fail(`${where}.loaders[${l}]`, "must be a non-empty string.");
+              if (catalog.provider === "curseforge" && !(loader as string).includes("{{") && !CURSEFORGE_LOADERS.includes((loader as string).trim())) {
+                fail(`${where}.loaders[${l}]`, `("${loader}") isn't a CurseForge mod loader. Use ${CURSEFORGE_LOADERS.join(", ")}, or leave loaders out (plugins).`);
+              }
+            });
+          }
+          if (catalog.provider === "curseforge") {
+            if (!Number.isSafeInteger(catalog.game_id) || (catalog.game_id as number) <= 0) fail(`${where}.game_id`, "is required for curseforge: the CurseForge game id, a positive whole number (432 = Minecraft).");
+          }
+          else if (catalog.game_id !== undefined) {
+            fail(`${where}.game_id`, "is only for the curseforge provider.");
+          }
+        });
+      }
+
+      if (item.packs !== undefined) {
+        const packs = item.packs;
+        if (!isRecord(packs)) return fail(`${at} packs`, "must be a mapping with formats, e.g. { formats: [mrpack, curseforge, zip], overrides: [config] }.");
+        for (const key of Object.keys(packs)) {
+          if (!MOD_PACK_KEYS.includes(key)) fail(`${at} packs.${key}`, `is not a known key. Known keys: ${MOD_PACK_KEYS.join(", ")}.`);
+        }
+        if (!Array.isArray(packs.formats) || packs.formats.length === 0) fail(`${at} packs.formats`, `needs at least one format: ${MOD_PACK_FORMAT_VALUES.join(", ")}.`);
+        (packs.formats as unknown[]).forEach((format, f) => {
+          if (!MOD_PACK_FORMAT_VALUES.includes(format as never)) fail(`${at} packs.formats[${f}]`, `must be one of: ${MOD_PACK_FORMAT_VALUES.join(", ")}.`);
+          if ((packs.formats as unknown[]).indexOf(format) !== f) fail(`${at} packs.formats[${f}]`, `("${format}") is listed twice.`);
+        });
+        if (packs.overrides !== undefined) {
+          if (!Array.isArray(packs.overrides)) fail(`${at} packs.overrides`, "must be a list of folders, e.g. [config, defaultconfigs].");
+          if ((packs.overrides as unknown[]).length > MAX_PACK_OVERRIDES) fail(`${at} packs.overrides`, `lists ${(packs.overrides as unknown[]).length} folders; at most ${MAX_PACK_OVERRIDES} are allowed.`);
+          (packs.overrides as unknown[]).forEach((dir, d) => {
+            const problem = folderProblem(dir);
+            if (problem) fail(`${at} packs.overrides[${d}]`, problem);
+            if ((packs.overrides as unknown[]).indexOf(dir) !== d) fail(`${at} packs.overrides[${d}]`, `("${dir}") is listed twice.`);
+          });
+        }
+      }
+    });
+  }
+
+  /**
+   * Why a `match` pattern isn't one path segment of literal characters, `*` and `?` with an optional trailing `/`, or
+   * null when it is.
+   */
+  function modPatternProblem(pattern: unknown): string | null {
+    if (typeof pattern !== "string" || pattern === "") return "must be a non-empty string, e.g. \"*.jar\".";
+    if (pattern.length > MAX_MOD_PATTERN_CHARS) return `is longer than ${MAX_MOD_PATTERN_CHARS} characters.`;
+    const segment = pattern.endsWith("/") ? pattern.slice(0, -1) : pattern;
+    if (segment === "") return "needs a name before the trailing \"/\", e.g. \"*/\".";
+    if (segment.includes("/")) return `("${pattern}") must be one path segment: entries are matched by name inside the folder. Only a trailing "/" (folders only) is allowed.`;
+    // deno-lint-ignore no-control-regex
+    if (/[\\\u0000-\u001f\u007f]/.test(segment)) return "may not contain backslashes or control characters.";
+    if (segment === "." || segment === "..") return "can't be \".\" or \"..\".";
+    return null;
   }
 
   /**
@@ -834,12 +1000,59 @@ export namespace DefinitionEngine {
       }
     });
   }
+
+  /**
+   * What only a complete definition can check about `game_version` and `mods`: `game_version.value` and catalog
+   * `loaders` read declared non-secret variables (`{{vars.<key>}}`, no filter), `when` names declared non-secret
+   * variables, and no two mod folders share a folder or disabled folder.
+   * @throws Error naming the place.
+   */
+  function checkModLinks(def: GameDefinition, path: string): void {
+    const byKey = new Map((def.variables ?? []).map((v) => [v.key, v]));
+    const variable = (key: string, where: string): void => {
+      const decl = byKey.get(key);
+      if (!decl) throw new Error(`${path}: ${where} names the variable "${key}", which isn't declared.`);
+      if (decl.type === "secret") throw new Error(`${path}: ${where} can't use the secret "${key}".`);
+    };
+    const varsOnly = (text: string, where: string): void => {
+      for (const match of text.matchAll(PLACEHOLDER)) {
+        const { path: name, filter } = splitPlaceholder(match[1]);
+        if (filter !== null || !/^vars\.[a-z][a-z0-9_]*$/.test(name)) {
+          throw new Error(`${path}: ${where}: {{${match[1]}}} isn't allowed; use only {{vars.<key>}} placeholders without filters, e.g. {{vars.version}}.`);
+        }
+        variable(name.slice("vars.".length), where);
+      }
+    };
+    if (def.game_version?.value !== undefined) varsOnly(def.game_version.value, "game_version.value");
+    const owners = new Map<string, string>(); // Folder path → the mod folder (and role) that uses it.
+    (def.mods ?? []).forEach((folder, i) => {
+      const where = `mods[${i}] (${folder.key})`;
+      for (const other of Object.keys(folder.when ?? {})) variable(other, `${where} when`);
+      (folder.catalogs ?? []).forEach((catalog, c) => (catalog.loaders ?? []).forEach((loader, l) => varsOnly(loader, `${where} catalogs[${c}].loaders[${l}]`)));
+      for (const [role, dir] of [["folder", folder.folder], ["disabled_folder", folder.disabled_folder ?? `${folder.folder}.disabled`]] as const) {
+        const owner = owners.get(dir);
+        if (owner !== undefined) throw new Error(`${path}: ${where} ${role} (${dir}) is also the ${owner}. Each mod folder needs folders of its own.`);
+        owners.set(dir, `${role} of mods[${i}] (${folder.key})`);
+      }
+    });
+    // Pack overrides write arbitrary files: never into (or around) a folder whose entries are mods.
+    (def.mods ?? []).forEach((folder, i) => {
+      (folder.packs?.overrides ?? []).forEach((dir, d) => {
+        for (const [owned, role] of owners) {
+          if (owned === dir || owned.startsWith(`${dir}/`) || dir.startsWith(`${owned}/`)) {
+            throw new Error(`${path}: mods[${i}] (${folder.key}) packs.overrides[${d}] (${dir}) overlaps ${owned}, the ${role}. Pack mods land in the folder itself; list only other folders (e.g. config).`);
+          }
+        }
+      });
+    });
+  }
   //#endregion
 
   //#region Extends
   /**
-   * Merge `extends` chains: lists merge by `key` (variables) / `name` (ports) / `file` (configs) / position (install),
-   * scalars override, small mappings (`hooks`, `stop`, `players`, `backup`) merge key by key. The result has no
+   * Merge `extends` chains: lists merge by `key` (variables, mods) / `name` (ports) / `file` (configs) / position
+   * (install), scalars and whole blocks (`settings`, `game_version`) override, small mappings (`hooks`, `stop`,
+   * `players`, `backup`) merge key by key. The result has no
    * `extends` and is validated like a plain definition.
    * @throws Error on a missing parent or a cycle.
    */
@@ -874,6 +1087,7 @@ export namespace DefinitionEngine {
     if (parent.packages || child.packages) merged.packages = [...new Set([...(parent.packages ?? []), ...(child.packages ?? [])])];
     if (parent.variables || child.variables) merged.variables = mergeBy(parent.variables, child.variables, (v) => v.key);
     if (parent.ports || child.ports) merged.ports = mergeBy(parent.ports, child.ports, (p) => p.name);
+    if (parent.mods || child.mods) merged.mods = mergeBy(parent.mods, child.mods, (m) => m.key);
     if (parent.configs || child.configs) {
       merged.configs = mergeBy(parent.configs, child.configs, (c) => c.file, (p, c): ConfigMapping => {
         const config = { ...p, ...c };

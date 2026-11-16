@@ -80,9 +80,9 @@ export interface LiveEvents {
   //#endregion
 
   //#region M7
-  // Panel settings saved (`key`: "mail"). Audience: everyone signed in (the client refetches `/api/meta`; admins on
-  // the settings page refetch the settings). Carries no values.
-  "settings.updated": { key: "mail" };
+  // Panel settings saved (`key`: "mail", or "catalogs" for the mod catalog keys). Audience: everyone signed in (the
+  // client refetches `/api/meta`; admins on the settings page refetch that setting). Carries no values.
+  "settings.updated": { key: "mail" | "catalogs" };
   //#endregion
 }
 

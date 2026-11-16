@@ -143,6 +143,11 @@ export interface GameServerDetailResponse extends GameServerDto {
    * The definition has a `settings` block, so the Game settings tab (`/api/servers/:id/game-settings`) applies.
    */
   hasGameSettings: boolean;
+  /**
+   * At least one of the definition's `mods` folders applies to this server (`when`), so the Mods tab
+   * (`/api/servers/:id/mods`) applies.
+   */
+  hasMods: boolean;
 }
 
 /**

@@ -46,14 +46,18 @@ server/src/
   definitions/         DefinitionEngine (pure: parse, resolve extends, variables, limits, image, render, buildSpec),
                        DefinitionSync (load → validate → definitions rows), loaders/ (DefinitionLoader per Source.kind:
                        LocalLoader = games/; GitLoader = safe shallow git clone, M3), OptionsFetcher (M3:
-                       options_from lists, https allowlist + cache)
+                       options_from lists, https allowlist + cache); M8: GameSettings; M9: ModFolders (pure)
+  mods/                M9: ModCatalog (interface, CATALOGS, fetchAllowed), catalogs/ (Modrinth, CurseForge: one
+                       `ModCatalog` per provider), ModPack (pack parser: mrpack, CurseForge export, zip)
   jobs/                sourceSync.ts (M3: interval sync of git sources)
   hosts/               M6: AgentUpdater (agent build per host, manual + automatic update, status in memory)
   mail/                M7: Mailer (the SMTP relay from the `mail` setting; only nodemailer importer), templates (pure)
   servers/             GameServerService: every server operation (access, quota, ports, provision, lifecycle,
                        console, agent state → rows + live events, reconcile after hello); M4: ServerAccess (share-aware
                        levels), agentCall (agent codes → HTTP), FileService, BackupService, MetricsService + MetricRing;
-                       M5: ShareService
+                       M5: ShareService; M8: GameSettingsService, GameVersion; M9: ModService (Mods tab), ModPackService
+                       (pack import), ModStore (folders, manifest, lock, catalog contexts), ModDownload (fetch + hash
+                       check), ModCatalogKeys (operator keys from settings)
   transfers/           M4: TransferRelay (browser HTTP ⇄ agent chunks, windowed), DownloadTickets (single-use links)
   lib/                 HttpError, http (AppEnv, readBody, paramInt/Uuid, clientIp), RateLimiter, tokens, portPool, totp (M5),
                        agentBuilds (M6: the builds in AGENT_DIST_DIR), secretBox (M7: AES-GCM for secrets in settings)
@@ -124,6 +128,7 @@ README.md              M5
 | `server/src/controllers/*` | `models/index.ts`, lib, `AgentGateway`, `LiveGateway`, `DefinitionEngine`, `@shared` | `AgentConnection`, sockets, raw SQL |
 | `server/src/gateways/agent/*` | `models/index.ts`, lib, `LiveGateway`, `@shared` | controllers |
 | `server/src/definitions/*` | `@shared`, lib, `@std/yaml` | models, gateways (pure) |
+| `server/src/mods/*` | `Config`, `AppSystem`, lib, `@shared`, each other | models, gateways, controllers, `servers/` (credentials arrive in `ModCatalog.Context`) |
 | anything → hosts | `AgentGateway.request/isOnline/disconnect` | `AgentConnection` directly |
 | anything → browsers | `LiveGateway.push()` | the live sockets |
 | models from outside `models/` | `../models/index.ts` | `../models/User.ts` directly (init may not have run) |
@@ -1337,3 +1342,182 @@ names only (values can be passwords).
 
 - A settings format = a `SettingsFormat` in `GameSettings.FORMATS` (the sync check follows the registry). Next
   candidates: `yaml` (Paper's `config/paper-global.yml`, `bukkit.yml`, `spigot.yml`), `cfg` (Garry's Mod `server.cfg`).
+
+## M9: mods
+
+A server's **Mods** tab manages the folders a definition declares under `mods:` (Forge/NeoForge `mods/*.jar`, Paper
+`plugins/*.jar`, Garry's Mod `garrysmod/addons/*/` and `*.gma`): list, drag-and-drop upload (recognised by SHA-1),
+enable/disable, delete, install from catalogs (CurseForge, Modrinth) with required dependencies, and modpack import.
+**No agent or protocol change:** the panel works through the existing file API (`files.list/read/write/mkdir/
+rename/delete`) and the transfer relay; catalogs are asked by the panel, never by the host. CurseForge works only with
+the operator's own key (Settings → Mod catalogs); no proxy, no other app's key.
+
+### Contracts
+
+- **Schema.** `GameDefinition.mods: ModFolder[]` (`key` `^[a-z][a-z0-9_]*$` unique, `label`, `description`, `folder`,
+  `disabled_folder` (default `<folder>.disabled`), `match`, `when`, `catalogs: ModCatalogRef[]`, `packs:
+  ModPackSpec {formats, overrides}`), at most 8, merged by `key` in `extends` chains, never in the `ServerSpec`.
+  `ModCatalogRef {provider, project_type, loaders?, game_id?}`. `GameDefinition.game_version: GameVersionSpec {value,
+  file}` replaces `settings.version` / `version_file` (still read without `game_version`); a child's block replaces
+  the parent's.
+- **Sync checks** (`DefinitionEngine.checkMods`, `checkGameVersion`, `checkModLinks`): folders are relative paths
+  without `.`/`..` segments, not in `.gss`; `disabled_folder` neither equal to nor inside `folder` (or the reverse);
+  no two mod folders share a folder or disabled folder; `match` patterns are one segment of literal characters, `*`
+  and `?` with an optional trailing `/` (folders only), at most 64 characters; `when` names declared non-secret
+  variables; `game_version.value` and catalog `loaders` use only `{{vars.<non-secret key>}}` without filters.
+  Catalogs: at most 4, one per provider, `project_type` non-empty; `curseforge` needs a positive `game_id` (others
+  may not have one) and static loaders among `DefinitionEngine.CURSEFORGE_LOADERS` (forge, neoforge, fabric, quilt;
+  rendered ones are checked at runtime: another value makes the catalog unavailable). Packs: `formats` non-empty and
+  unique; at most 16 `overrides`, each a folder path like `folder`, unique, and not equal to, inside or around any
+  mod folder or disabled folder of the definition.
+- **What a mod is** (`definitions/ModFolders.ts`, pure): an entry of `folder` (enabled) or `disabledFolder`
+  (disabled) whose name matches `match` (a linear `*`/`?` matcher, case-sensitive; `x/` patterns match folders,
+  others everything else). Other entries are left alone and never listed. A folder applies while its `when` holds;
+  the tab shows (`GameServerDetailResponse.hasMods`) when at least one does.
+- **Catalog contexts** (`ModStore.catalogsOf`): per folder and provider, `ModCatalog.Context {projectType, loaders
+  (rendered; none declared = any), gameVersion, gameId, apiKey}`. `apiKey` comes from `ModCatalogKeys.apiKey`
+  (the `catalogs` setting, sealed with `secretBox` like the SMTP password). `ModCatalogDto.available` /
+  `unavailableReason`: no loader after rendering, a loader CurseForge doesn't know, or the catalog's own
+  `unavailable(ctx)` (CurseForge without a key), or a stored key that can't be decrypted ("an administrator must
+  enter it again"). Catalog routes and installs answer 409 with that reason. Saving a key tests it first: a refusal
+  (`isKeyRefusal`, CurseForge's 401/403) is a 400; CurseForge down or rate limiting stores it anyway (the Settings
+  page then says "Saved, but CurseForge couldn't be reached to check it").
+- **Game version** (`servers/GameVersion.ts`, shared with Game settings): the first line of `file` when it holds a
+  version (any read error falls back), else the rendered `value`; `latest` is unknown (null). Catalog search and
+  install answer 409 without one.
+- **Manifest** `gss-mods.json` at the data root (travels with backups like `gss-version`; the agent refuses uploads
+  into `.gss/`): `{ version: 1, folders: { <key>: { <entry name>: { provider, projectId, versionId, title,
+  versionNumber, iconUrl, pageUrl, installedAt, sha1, requiredBy } } } }`. `provider` null = an upload no catalog
+  recognised (ids and version null, `title` = the file name). Read field by field (`ModStore.readManifest`):
+  prototype-free maps, `sha1` `^[0-9a-f]{40}$`, a catalog entry needs both ids, links only https to
+  MOD_CATALOG_HOSTS or `modrinth.com` / `www.curseforge.com` / `media.forgecdn.net`, capped lengths. Written through
+  `files.write` with the `modifiedAt` check (re-read once on a 409). Missing, binary or corrupt = empty (logged) and
+  overwritten on the next write; entries whose mod is gone are dropped on every write (not for a truncated listing).
+  Dependency planning counts a project as installed when any entry of the folder (recognised uploads included) has it.
+- **Concurrency.** Mutations of one server's mods take turns in `ModStore.withLock` (in memory, its own, not the
+  server operation lock). Lists, catalog reads and the streaming part of uploads and pack previews don't hold it.
+- **Moves.** Enable/disable is `files.rename` without overwrite; every name is checked before the first move. A name
+  in both folders is a 409 ("in both … delete one of the two copies"); delete removes both copies (the audit's
+  `entries` counts them). Target folders are created level by level with `files.mkdir` (an existing one's 409 is
+  ignored).
+- **Upload.** `name` is one plain segment (`ModFolders.isFileName`) matching a file pattern (400). Conflicts are
+  checked first (the replaceable 409 says "already exists"; other 409s don't, the client offers to replace on
+  /exist/i). The body is streamed **outside the lock** to a hidden temporary name in the folder
+  (`.<name>.gss-upload-<random>`, or `.gss-upload-<random>`, or at the data root when the folder's patterns would
+  match those), hashed on the way (`ModDownload.verify`, which also gives up after 60 s without data). The folder's
+  usable catalogs with `identify` are asked for the SHA-1 (5 s each, best effort). Then, under the lock: conflicts
+  again, `files.rename` into place (overwrite as asked), a same-name disabled entry removed, the manifest entry
+  written (catalog info, or unknown with name and SHA-1). The temporary file is removed on any failure; leftovers
+  (`ModStore.UPLOAD_TEMP`) older than an hour are swept from both folders whenever a mutation takes the lock.
+- **Install.** Plan first, then download: the version (an explicit one must be compatible, 409), then required
+  dependencies breadth-first (a known project is settled as planned/installed before any lookup; a pinned version
+  when compatible, else the newest), skipping installed projects ("Already installed."), ignoring `optional` and
+  `embedded`, reporting installed or planned `incompatible` ones in `skipped`, cycle-safe. Caps (409 before anything
+  is downloaded): 30 mods, 50 dependencies per version, 100 catalog requests per plan. A required dependency without
+  a downloadable compatible version is a 409; so is a root whose author doesn't allow downloads (with its page).
+  Dependencies are installed first. Each file lands as `<folder>/<file.name>` (overwrite); the project's earlier
+  file is removed from either folder; a project whose earlier file was disabled is installed into the disabled
+  folder. The manifest is written after the loop, also when a later download failed. `update` groups the named
+  mods by their catalog and asks `updates(ctx, installed)` (keyed by version id).
+- **Download** (`servers/ModDownload.ts`): `fetch(url, { redirect: "manual" })` only when
+  `ModCatalog.fetchAllowed` (https, no credentials, port 443, host on MOD_CATALOG_HOSTS), at most 3 redirects each
+  re-checked, the catalog's `file.headers` (CurseForge's `x-api-key`, which its CDN requires) only while the host is
+  the original one or shares its last two labels (`edge.forgecdn.net` → `mediafilez.forgecdn.net`), dropped on any
+  other redirect; CurseForge caches key-free versions and attaches the current key when it returns them.
+  `Accept-Encoding: identity`, size ≤ UPLOAD_MAX_MB and equal to the catalog's (and Content-Length), 10 min
+  timeout, 60 s idle. The body goes through `ModDownload.verify`, which hashes SHA-1 and SHA-512 on the way and
+  **errors the stream at its end** on a size or hash mismatch (SHA-512 only when the catalog has it), a broken
+  connection or a stall. `TransferRelay.upload` reads the body to the end before `transfer.commit`, so an erroring
+  body closes the transfer (the agent drops its temporary file): nothing unverified is committed, nothing touches
+  the panel's disk. The verifier's own error replaces the relay's "upload stopped".
+- **Updates in the list.** Per usable catalog, `updates(ctx, installed)` for the folder's entries of that provider,
+  cached per (server, folder, provider, context without the key, version ids) for 10 min (a failure for 1 min) →
+  `ModDto.update`; failures go to `updatesError`, each prefixed with the catalog's label. A folder the agent can't
+  list (other than not found / offline) shows empty, logged, without failing the other folders.
+- **Pack import** (`servers/ModPackService.ts`, parser `mods/ModPack.ts`). Preview: the raw body (Content-Length ≤
+  MOD_PACK_MAX_MB) streamed to `<DATA_DIR>/mod-packs/<uuid>` (emptied at the first use after a start), `ModPack.parse`
+  with the folder's formats, then per mod: included files (name must fit the folder); mrpack `files[]` routed by path
+  (directly in `mods/` → the folder, needs a download on an allowed host; below a `packs.overrides` folder → written
+  there with its hashes; anything else → `overrides.skipped`; `side: client` → not selected / not written);
+  CurseForge entries through the folder's curseforge catalog (`versionsById`, `projects` for titles and pages; no
+  key, a missing file or a project that forbids distribution → `downloadable: false` with a reason and the
+  CurseForge page). Titles of mrpack mods come from `identify` where a catalog can. Warnings: the pack's warnings,
+  game version and loader mismatches (then every mod starts unselected with "Made for …; this server runs …",
+  still installable through `include`), how many mods need a manual download, CurseForge's client-only caveat,
+  files left out. Client-only: the pack's `env`, else the catalog's `Project.side` for mrpack files and included
+  jars (hashed at preview, recognised by SHA-1) → unselected "Client-only mod (Modrinth says it doesn't run on
+  servers)". A CurseForge file whose `projectId` isn't the manifest's counts as gone. At most 20 previews and 2 ×
+  MOD_PACK_MAX_MB of pack files wait over all users (503 "The panel is busy importing other packs"). The plan stays in memory under a random token (per user, 30 min, at most 3; the oldest goes). Apply (same
+  user, server and folder): under the lock, each selected entry (or `include`d, minus `skip`) written into place
+  (downloads hash-checked; included files CRC-checked by the parser and hashed here), the project's older file
+  removed, override files written (parents created, existing files replaced), manifest entries recorded (catalog
+  info; included files recognised by SHA-1 where possible, else unknown). One entry that fails, or an `include`d one
+  the panel can't get, goes to `skipped`; only `ModStore.isHostProblem` (host offline, server being created or
+  deleted, 503, 504) ends the run, after the manifest is written. The plan is marked busy before the first await, so
+  a second apply of the token is a 404, and a busy plan is never evicted or expired. The token and its file are removed after
+  apply (also after a failure) or at expiry.
+- **Rate limits** (per user and minute, `ModStore`): catalog searches and version lists 60, installs, updates, pack
+  previews and applies 10.
+
+### API routes (M9)
+
+| Method | Path | Auth | Body | Response |
+| --- | --- | --- | --- | --- |
+| GET | /api/servers/:id/mods | manage | | `ModsResponse`; 404 no folder applies; 409 host offline |
+| POST, PUT | /api/servers/:id/mods/:folder/upload?name=&overwrite=1 | manage | raw file (streamed) | 201 `UploadModResponse`; 400 name; 409 "already exists"; 411; 413 |
+| POST | /api/servers/:id/mods/:folder/state | manage | `SetModStateBody` | `OkResponse`; 400 not a mod; 409 in both folders |
+| POST | /api/servers/:id/mods/:folder/delete | manage | `DeleteModsBody` | `OkResponse`; 400 not a mod |
+| GET | /api/servers/:id/mods/:folder/catalog/:provider/search?query=&offset=&limit= | manage | | `ModSearchResponse`; 404 no such catalog; 409 unavailable / version unknown; 429; 502 |
+| GET | /api/servers/:id/mods/:folder/catalog/:provider/projects/:projectId/versions | manage | | `ModVersionDto[]` (plain array) |
+| POST | /api/servers/:id/mods/:folder/install | manage | `InstallModBody` | `ModInstallResponse`; 409 unavailable / incompatible / missing version / caps; 502 download |
+| POST | /api/servers/:id/mods/:folder/update | manage | `UpdateModsBody` | `ModInstallResponse` |
+| POST, PUT | /api/servers/:id/mods/:folder/packs?name= | manage | raw pack (streamed) | `ModPackPreviewDto`; 400 format; 404 no packs; 411; 413 |
+| POST | /api/servers/:id/mods/:folder/packs/:token/apply | manage | `ApplyModPackBody` | `ModInstallResponse`; 404 token unknown/expired |
+| GET | /api/settings/catalogs | admin | | `CatalogSettingsDto` |
+| PUT | /api/settings/catalogs | admin | `UpdateCatalogSettingsBody` | `CatalogSettingsDto`; 400 refused key (tested first) |
+| POST | /api/settings/catalogs/test | admin | `TestCatalogBody` | `TestCatalogResponse` (stored key when absent) |
+
+Raw bodies: `ModController.BODY_PATHS.UPLOAD` / `PACKS` + their branches in `App.ts` (no body limit; the sizes are
+checked against Content-Length and while streaming). PUT is accepted too, since `BaseApi.UPLOAD` sends PUT. Audit:
+`mods.uploaded`, `mods.state`, `mods.deleted`, `mods.installed`, `mods.pack_applied` (folder key, names or counts),
+`settings.catalogs` (`set`/`removed`, never the key); a key save pushes `settings.updated { key: "catalogs" }`.
+
+### Failure cases (M9)
+
+| Case | Result |
+| --- | --- |
+| Host offline / server creating or deleting | 409 from the file API, nothing changed |
+| Game version unknown (`latest`, no `gss-version` yet) | Search/versions/install 409 "Install or start the server once"; list shows `updatesError` per catalog |
+| CurseForge without a key, or a loader it doesn't know | `available: false` + reason; its routes 409; pack entries listed for manual download |
+| Catalog down or rate limited | 502 / 429 on search and install; the list still works with `updatesError` naming the catalog |
+| Download host not on MOD_CATALOG_HOSTS, a port, redirect off it, > 3 redirects | 502 naming the host, before any byte reaches the host |
+| Size or hash mismatch, connection cut, 60 s without data | 502 (uploads 400) naming the reason; transfer closed, not committed |
+| Upload interrupted | The temporary file is removed; nothing listed, the manifest untouched |
+| Failure after some mods of an install or pack landed | Those stay and are recorded in the manifest; the error is returned |
+| Dependency explosion (> 30 mods, > 50 deps of one version, > 100 lookups) | 409 before any download |
+| Manifest edited in the Files tab meanwhile | Re-read once and the change applied again |
+| Manifest corrupt, a folder, or with foreign links | Treated as empty / links dropped (logged); overwritten on the next write |
+| `mods` is a file, not a folder | That folder shows empty (logged); uploads into it fail with the agent's 400 |
+| Pack token expired, used, or another user's | 404 "Upload the pack again"; the file is gone |
+
+### Files (M9)
+
+`definitions/ModFolders.ts`, mods checks in `DefinitionEngine` (`checkMods`, `checkGameVersion`, `checkModLinks`,
+`mergeDefinitions`, `CURSEFORGE_LOADERS`), `servers/GameVersion.ts` (also used by `GameSettingsService`),
+`servers/ModService.ts`, `servers/ModPackService.ts`, `servers/ModStore.ts`, `servers/ModDownload.ts`,
+`servers/ModCatalogKeys.ts`, `controllers/ModController.ts`, catalog routes in `controllers/SettingsController.ts`,
+the `catalogs` key in `models/Setting.ts`, `mods/ModCatalog.ts`, `mods/catalogs/{Modrinth,CurseForge}.ts`,
+`mods/ModPack.ts`; `shared/api/mods.ts`, `shared/api/settings.ts`; `client/src/Api/ModApi.ts`,
+`client/src/components/ModManager/`; games: `minecraft-java` (`game_version`, `mods`, `plugins`), `garrys-mod`
+(`addons`).
+
+### Extension points (M9)
+
+- A catalog provider = a value in `ModCatalogProvider` (`definition.json`, `deno task protocol`), a `ModCatalog` in
+  `server/src/mods/catalogs/<Name>.ts` (only fetch through `ModCatalog.fetchAllowed`, throw `HttpError`
+  502/429/404/409 with readable messages, report `unavailable(ctx)`, return a SHA-1 for every installable file and
+  `headers` it needs) and its line in `ModCatalog.CATALOGS`; add its API and CDN hosts to the MOD_CATALOG_HOSTS
+  default, and a key in `Setting.StoredCatalogs` + `ModCatalogKeys.apiKey` when it needs one. Candidates: Hangar
+  (Paper), the Steam Workshop for Garry's Mod (steamcmd on the host would need an agent change).
+- A pack format = a value in `ModPackFormat` and a branch in `ModPack.parse`; `ModPackService` only sees `Parsed`.
+- A new kind of mod folder needs only game.yml: `folder`, `match`, `catalogs` and `packs` as the game allows.

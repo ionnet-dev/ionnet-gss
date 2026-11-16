@@ -45,6 +45,7 @@ import {
 } from "@shared/protocol/protocol.gen.ts";
 import { Config } from "../Config.ts";
 import { DefinitionEngine } from "../definitions/DefinitionEngine.ts";
+import { ModFolders } from "../definitions/ModFolders.ts";
 import { OptionsFetcher } from "../definitions/OptionsFetcher.ts";
 import { AgentGateway } from "../gateways/agent/AgentGateway.ts";
 import { LiveGateway } from "../gateways/live/LiveGateway.ts";
@@ -1264,6 +1265,7 @@ export namespace GameServerService {
       services: server.servicesStatus ?? [],
       canUpdateGame: canUpdateGame(server.definition!.document),
       hasGameSettings: GameSettingsService.hasSettings(server.definition!.document),
+      hasMods: ModFolders.applicable(server.definition!.document, server.variables ?? {}).length > 0,
       installed: server.installedAt !== null,
     };
   }

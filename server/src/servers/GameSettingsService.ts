@@ -21,6 +21,7 @@ import { GameSettings } from "../definitions/GameSettings.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import type { GameServer, User } from "../models/index.ts";
 import { FileService } from "./FileService.ts";
+import { GameVersion } from "./GameVersion.ts";
 import { ServerAccess } from "./ServerAccess.ts";
 
 export namespace GameSettingsService {
@@ -126,27 +127,7 @@ export namespace GameSettingsService {
     const settings = server.definition?.document.settings;
     if (settings === undefined || !hasSettings(server.definition!.document)) throw HttpError.notFound("This server's game has no game settings.");
     const values = server.variables ?? {};
-    return { server, settings, values, version: await versionOf(user, server, settings, values) };
-  }
-
-  /**
-   * The game version: the first line of `version_file` when it holds one, else the rendered `version`; null when
-   * neither gives a version (`latest`, a file that isn't there yet).
-   */
-  async function versionOf(user: User, server: GameServer, settings: NonNullable<GameDefinition["settings"]>, values: Context["values"]): Promise<string | null> {
-    if (settings.version_file !== undefined) {
-      // The version only picks fields: an unreadable file (binary, a folder, too large) falls back like a missing one.
-      const text = await readIfExists(user, server.id, settings.version_file).catch(() => null);
-      const line = text?.content.split(/\r?\n/, 1)[0].trim();
-      if (line !== undefined && GameSettings.isVersion(line)) return line;
-    }
-    if (settings.version === undefined) return null;
-    try {
-      const rendered = DefinitionEngine.render(settings.version, { vars: values, ports: {}, server: { id: server.id, name: server.name } }).trim();
-      return GameSettings.isVersion(rendered) ? rendered : null;
-    } catch {
-      return null;
-    }
+    return { server, settings, values, version: await GameVersion.of(user, server, server.definition!.document, values) };
   }
 
   /**

@@ -1,6 +1,6 @@
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { AlertDialog, Badge, Button, Card, CardBody, CardFooter, CardHeader, Dialog, Grid, IconTile, Menu, Spinner, Stack, Tabs } from "@ionnet/iontronic/react";
-import { Activity, Archive, ArrowLeft, CircleArrowUp, Download, Ellipsis, FolderOpen, Hammer, LogOut, Play, RotateCw, Settings, Share2, SlidersHorizontal, Square, SquareTerminal, TriangleAlert, Users, Zap } from "@ionnet/iontronic/icons";
+import { Activity, Archive, ArrowLeft, CircleArrowUp, Download, Ellipsis, FolderOpen, Hammer, LogOut, Play, Puzzle, RotateCw, Settings, Share2, SlidersHorizontal, Square, SquareTerminal, TriangleAlert, Users, Zap } from "@ionnet/iontronic/icons";
 import type { GameServerDetailResponse, ServerAccessLevel } from "@shared/api/servers.ts";
 import type { ServerState } from "@shared/protocol/protocol.gen.ts";
 import { ApiError } from "@/Api/BaseApi.ts";
@@ -11,6 +11,7 @@ import BackupList from "@/components/BackupList/BackupList.tsx";
 import Console from "@/components/Console/Console.tsx";
 import FileManager from "@/components/FileManager/FileManager.tsx";
 import MetricsPanel from "@/components/MetricsPanel/MetricsPanel.tsx";
+import ModManager from "@/components/ModManager/ModManager.tsx";
 import GameSettings from "@/components/GameSettings/GameSettings.tsx";
 import FormError from "@/components/FormError/FormError.tsx";
 import CopyButton from "@/components/CopyButton/CopyButton.tsx";
@@ -79,7 +80,8 @@ export default function ServerDetail(props: Props) {
   const owner = server !== null && hasAccess(server.access, "owner");
   const manage = server !== null && hasAccess(server.access, "manage");
   const gameSettings = manage && server !== null && server.hasGameSettings;
-  const allowedTabs = ["overview", "console", ...(gameSettings ? ["game-settings"] : []), ...(manage ? ["files", "backups", "settings"] : []), ...(owner ? ["sharing"] : [])];
+  const mods = manage && server !== null && server.hasMods;
+  const allowedTabs = ["overview", "console", ...(gameSettings ? ["game-settings"] : []), ...(mods ? ["mods"] : []), ...(manage ? ["files", "backups", "settings"] : []), ...(owner ? ["sharing"] : [])];
   const activeTab = allowedTabs.includes(tab) ? tab : "overview"; // A lowered share can hide the tab that was open.
 
   const back = <Button variant="ghost" size="sm" icon={ArrowLeft} onClick={() => navigate("/servers")}>Servers</Button>;
@@ -129,6 +131,7 @@ export default function ServerDetail(props: Props) {
           <Tabs.Tab value="overview" icon={Activity}>Overview</Tabs.Tab>
           <Tabs.Tab value="console" icon={SquareTerminal}>Console</Tabs.Tab>
           {gameSettings && <Tabs.Tab value="game-settings" icon={SlidersHorizontal}>Game settings</Tabs.Tab>}
+          {mods && <Tabs.Tab value="mods" icon={Puzzle}>Mods</Tabs.Tab>}
           {manage && <Tabs.Tab value="files" icon={FolderOpen}>Files</Tabs.Tab>}
           {manage && <Tabs.Tab value="backups" icon={Archive}>Backups</Tabs.Tab>}
           {manage && <Tabs.Tab value="settings" icon={Settings}>Settings</Tabs.Tab>}
@@ -151,6 +154,11 @@ export default function ServerDetail(props: Props) {
         {gameSettings && (
           <Tabs.Panel value="game-settings">
             <GameSettings server={server} />
+          </Tabs.Panel>
+        )}
+        {mods && (
+          <Tabs.Panel value="mods">
+            <ModManager server={server} />
           </Tabs.Panel>
         )}
         {manage && (

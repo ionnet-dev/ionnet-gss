@@ -9,6 +9,7 @@ import { EmailController } from "./EmailController.ts";
 import { FileController } from "./FileController.ts";
 import { GameSettingsController } from "./GameSettingsController.ts";
 import { MetricsController } from "./MetricsController.ts";
+import { ModController } from "./ModController.ts";
 import { QuotaController } from "./QuotaController.ts";
 import { ShareController } from "./ShareController.ts";
 import { TotpController } from "./TotpController.ts";
@@ -45,6 +46,7 @@ export namespace ApiController {
   router.route("/servers/:id/files", FileController.router); // M4
   router.route("/servers/:id/backups", BackupController.router); // M4
   router.route("/servers/:id/game-settings", GameSettingsController.router); // Game settings tab
+  router.route("/servers/:id/mods", ModController.router); // M9: Mods tab
   router.route("/servers/:id/metrics", MetricsController.router); // M4
   router.route("/servers/:id/shares", ShareController.router); // M5
   router.route("/downloads", DownloadController.router); // M4: public, the ticket is the auth
