@@ -114,7 +114,25 @@ Running the script again is safe. On an enrolled host it skips enrolling, replac
 curl -fsSL https://gss.example.com/api/agent/install.sh | sudo bash
 ```
 
-The script downloads the agent from the panel, so an agent upgrade is: upgrade the panel (its image carries the newer build), then run this on each host. Running game containers keep running while the agent restarts.
+The script downloads the agent from the panel, and the panel's image carries the newest agent build. Running game containers keep running while the agent restarts.
+
+## Agent updates from the panel
+
+The host page shows the agent's version and build (the first 12 characters of the binary's SHA-256) with a badge:
+
+| Badge | Meaning |
+| --- | --- |
+| **Up to date** | The host runs the build this panel serves. |
+| **Update available** | The panel serves a newer build, for example after the panel was upgraded. |
+| **Unknown** | The agent is older than panel updates (it doesn't report its build). Run the install command above on the host once; after that, updates work from the panel. |
+
+On the host page, **Agent → Update agent** replaces the agent with the panel's build. The agent downloads it from its own panel, checks the SHA-256, and waits until no install, start, stop, backup or file transfer is running. The card lists what it waits for. Then it replaces its binary and restarts in place, and the badge turns **Up to date** once it reconnects. Game servers keep running throughout. If anything fails, the old agent keeps running and the card says why. A common cause is an agent that doesn't run as root, so it can't replace its own binary; run the install command on the host in that case.
+
+**Update automatically** (off by default, per host) does the same without a click: whenever the agent connects with an older build (every agent reconnects when the panel restarts after an upgrade), and right away when you switch it on. If an automatic update fails, it isn't retried for the same build until you press **Update agent**, switch the setting off and on, or the panel serves a newer build.
+
+**Rollback.** The agent keeps its previous binary until the new one has stayed connected to the panel for a while. If the new build keeps failing before that (systemd restarts it, and the fourth start still hasn't connected), the agent puts the previous binary back and restarts into it. The card then says the build was rolled back. That build isn't installed again automatically, but **Update agent** still installs it on request, for when the failure had another cause, such as Docker being down. A build published with a fix has a new SHA-256, so automatic updates pick it up as usual.
+
+Every update is recorded in the audit log as `host.agent_update`, with the build and whether it was manual or automatic.
 
 ## Uninstall
 

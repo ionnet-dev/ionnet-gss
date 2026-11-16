@@ -17,22 +17,28 @@ type Collector interface {
 type EgressSource func() *protocol.EgressFacts
 
 // New returns the collector for this OS. dataRoot is the folder whose filesystem DiskFacts describes; egress may be
-// nil (facts then carry egress: null).
-func New(dataRoot string, dockerClient docker.Client, egress EgressSource) Collector {
-	return &collector{dataRoot: dataRoot, docker: dockerClient, egress: egress}
+// nil (facts then carry egress: null). agentBuild is the running binary's SHA-256, read once at start
+// (updater.ReadBuild); nil = agentBuild: null.
+func New(dataRoot string, dockerClient docker.Client, egress EgressSource, agentBuild *string) Collector {
+	return &collector{dataRoot: dataRoot, docker: dockerClient, egress: egress, agentBuild: agentBuild}
 }
 
 type collector struct {
-	dataRoot string
-	docker   docker.Client
-	egress   EgressSource
+	dataRoot   string
+	docker     docker.Client
+	egress     EgressSource
+	agentBuild *string
 }
 
 // Collect implements Collector; the OS-specific parts live in hostfacts_<os>.go.
 func (c *collector) Collect(ctx context.Context) (protocol.HostFacts, error) {
 	facts, err := collect(ctx, c.dataRoot, c.docker)
-	if err == nil && c.egress != nil {
+	if err != nil {
+		return facts, err
+	}
+	if c.egress != nil {
 		facts.Egress = c.egress()
 	}
-	return facts, err
+	facts.AgentBuild = c.agentBuild
+	return facts, nil
 }

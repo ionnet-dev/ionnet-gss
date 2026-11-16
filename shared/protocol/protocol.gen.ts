@@ -943,6 +943,10 @@ export interface HostFacts {
    * Host ports other software already holds, so the panel's allocator skips them (M3). null = not read (not Linux) or an agent older than this field; the panel stores a missing value as null.
    */
   boundPorts: BoundPorts | null;
+  /**
+   * SHA-256 (hex) of the running gss-agent binary, read once at start (M6). The panel compares it with the build it serves for `os.arch` to tell whether the agent is out of date. null = it could not be read; a missing value (an agent older than this field) is stored as null.
+   */
+  agentBuild: string | null;
 }
 
 export interface OsFacts {
@@ -1082,6 +1086,39 @@ export interface HelloResponse {
 export interface Heartbeat {
   at: string;
   facts: HostFacts;
+}
+
+export interface AgentUpdateRequest {
+  /**
+   * The build to install: the SHA-256 of `/api/agent/download/linux/<arch>` on the agent's own panel. The agent downloads only from its configured panel URL and refuses a file with any other digest.
+   */
+  sha256: string;
+  /**
+   * Install it even if this agent rolled that build back before (`.gss-agent-rejected`). The panel sets it for a manual update, never for an automatic one. Absent = false.
+   */
+  force?: boolean;
+}
+
+/**
+ * current: the agent already runs that build (nothing to do). downloading: fetching and verifying it. waiting: verified and staged next to the binary, waiting for `waitingFor` to finish. restarting: the binary was replaced and the agent restarts into it (it reconnects with the new `agentBuild`). failed: see `message`; the binary was not replaced.
+ */
+export type AgentUpdateState = "current" | "downloading" | "waiting" | "restarting" | "failed";
+export const AGENT_UPDATE_STATE_VALUES: readonly AgentUpdateState[] = ["current", "downloading", "waiting", "restarting", "failed"];
+
+export interface AgentUpdateStatus {
+  state: AgentUpdateState;
+  /**
+   * The build this status is about.
+   */
+  sha256: string;
+  /**
+   * One readable sentence for people (why it failed, what it waits for); may be empty.
+   */
+  message: string;
+  /**
+   * While `waiting`: what still runs, e.g. `install of server 3f2a…`, `backup of server 3f2a…`. Empty otherwise.
+   */
+  waitingFor: string[];
 }
 
 //#endregion
@@ -1554,6 +1591,10 @@ export interface AgentToPanelEvents {
    */
   "heartbeat": Heartbeat;
   /**
+   * Progress of the update `agent.update` started: every state change, and `waitingFor` whenever it changes. (M6)
+   */
+  "agent.updateStatus": AgentUpdateStatus;
+  /**
    * New console lines, batched (at most every 100 ms per server), at most `CONSOLE_BATCH_MAX_LINES` lines and `CONSOLE_BATCH_MAX_BYTES` of encoded lines per batch. (M2)
    */
   "server.console": ConsoleBatch;
@@ -1639,6 +1680,10 @@ export interface PanelToAgentRequests {
    * Abort or finish a transfer: close the file; an uncommitted upload's temporary file is removed. Unknown ids are not an error. (M4)
    */
   "transfer.close": { request: TransferRef; response: Empty };
+  /**
+   * Replace the agent with the panel's build `sha256` and restart into it. Answers at once (`current`, or `downloading`); progress follows as `agent.updateStatus` events. The agent waits for running operations (installs, starts, stops, backups, file transfers) to finish before it restarts; game containers keep running. A newer request replaces a pending one. Agents older than M6 answer `unsupported`. (M6)
+   */
+  "agent.update": { request: AgentUpdateRequest; response: AgentUpdateStatus };
   /**
    * Create or update a server from a resolved spec: data folder, image (pull or derived build), network, container. Idempotent for an unchanged `specHash`. (M2)
    */
@@ -1768,6 +1813,8 @@ export const MESSAGES: readonly MessageSpec[] = [
   { channel: "agent", type: "enrol", kind: "request", from: "agent", milestone: 1 },
   { channel: "agent", type: "hello", kind: "request", from: "agent", milestone: 1 },
   { channel: "agent", type: "heartbeat", kind: "event", from: "agent", milestone: 1 },
+  { channel: "agent", type: "agent.update", kind: "request", from: "panel", milestone: 6 },
+  { channel: "agent", type: "agent.updateStatus", kind: "event", from: "agent", milestone: 6 },
   { channel: "agent", type: "server.provision", kind: "request", from: "panel", milestone: 2 },
   { channel: "agent", type: "server.start", kind: "request", from: "panel", milestone: 2 },
   { channel: "agent", type: "server.restart", kind: "request", from: "panel", milestone: 2 },

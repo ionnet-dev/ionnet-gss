@@ -14,6 +14,7 @@ import (
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/docker"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/hostfacts"
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/panel"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/updater"
 )
 
 // EnrolTokenEnv is the environment variable `gss-agent enrol` reads the token from when neither --token nor
@@ -71,7 +72,8 @@ func Enrol(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	facts, err := hostfacts.New(defaults.DataRoot, dockerClient, nil).Collect(ctx)
+	self, _ := updater.ReadSelf() // no build fact when it can't be read
+	facts, err := hostfacts.New(defaults.DataRoot, dockerClient, nil, self.Build).Collect(ctx)
 	if err != nil {
 		return fmt.Errorf("collect host facts: %w", err)
 	}

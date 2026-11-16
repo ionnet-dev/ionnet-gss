@@ -2,20 +2,17 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import Path from "node:path";
 import { Config } from "../Config.ts";
+import { AGENT_PLATFORMS, AgentBuilds } from "../lib/agentBuilds.ts";
 import { type AppEnv, clientIp } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { isInsecurePanelUrl } from "../lib/panelUrl.ts";
+import { Host } from "../models/index.ts";
 import { RateLimiter } from "../lib/RateLimiter.ts";
 
 /**
  * Where the install script lives, relative to the repo root (the Docker image copies `scripts/`).
  */
 export const INSTALL_SCRIPT_PATH = "scripts/install-agent.sh";
-
-/**
- * Systems the panel serves agent builds for (`make dist` in agent/ writes `gss-agent-<os>-<arch>` + `.sha256`).
- */
-export const AGENT_PLATFORMS = { linux: ["amd64", "arm64"] } as const;
 
 const publicPerIp = new RateLimiter(Config.RATE_LIMIT_PUBLIC_PER_IP, Config.RATE_LIMIT_WINDOW_SEC, "requests from your address");
 
@@ -32,12 +29,11 @@ function bashQuoted(value: string): string {
 function resolveBuild(c: Context): { os: string; arch: string; file: string } {
   const os = c.req.param("os") ?? "";
   const arch = c.req.param("arch") ?? "";
-  const arches: readonly string[] | undefined = Object.hasOwn(AGENT_PLATFORMS, os) ? AGENT_PLATFORMS[os as keyof typeof AGENT_PLATFORMS] : undefined;
-  if (!arches?.includes(arch)) {
+  if (!AgentBuilds.isSupported(os, arch)) {
     const supported = Object.entries(AGENT_PLATFORMS).flatMap(([name, list]) => list.map((a) => `${name}/${a}`)).join(", ");
     throw HttpError.badRequest(`The panel has no agent for ${os}/${arch}. Supported: ${supported}.`);
   }
-  return { os, arch, file: Path.resolve(Config.AGENT_DIST_DIR, `gss-agent-${os}-${arch}`) };
+  return { os, arch, file: AgentBuilds.file(os, arch) };
 }
 
 function missingBuild(os: string, arch: string): HttpError {
@@ -45,27 +41,28 @@ function missingBuild(os: string, arch: string): HttpError {
 }
 
 /**
- * The first line of a small text file, or null when it doesn't exist.
+ * Whether the request comes from an enrolled agent (`Authorization: Bearer <host credential>` + `X-Gss-Host: <host id>`,
+ * which an agent sends when it downloads its own update). Those skip the per-IP limit, so many hosts behind one
+ * address can update together after a panel upgrade. Anything else, including a wrong credential, counts as anonymous.
  */
-async function readLine(path: string): Promise<string | null> {
-  try {
-    return (await Deno.readTextFile(path)).split("\n")[0].trim();
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return null;
-    throw error;
-  }
+async function isKnownAgent(c: Context): Promise<boolean> {
+  const hostId = c.req.header("X-Gss-Host");
+  const credential = c.req.header("Authorization")?.match(/^Bearer (\S+)$/i)?.[1];
+  if (!hostId || !credential) return false;
+  return await Host.authenticateAgent(hostId, credential) !== null;
 }
 
 /**
  * `/api/agent` (M5): public downloads for setting up a host. No auth (the enrol token is what grants access, and it
- * goes to `/ws/agent`, never here); rate-limited per IP with RATE_LIMIT_PUBLIC_PER_IP. Files are only ever opened
+ * goes to `/ws/agent`, never here); rate-limited per IP with RATE_LIMIT_PUBLIC_PER_IP, except requests that carry an
+ * enrolled host's credential (see `isKnownAgent`). Files are only ever opened
  * by fixed names built from `AGENT_PLATFORMS` and `Config.AGENT_DIST_DIR`, never from raw request input.
  */
 export namespace AgentController {
   export const router = new Hono<AppEnv>();
 
   router.use("*", async (c, next) => {
-    publicPerIp.hit(clientIp(c) ?? "unknown");
+    if (!await isKnownAgent(c)) publicPerIp.hit(clientIp(c) ?? "unknown");
     await next();
   });
 
@@ -112,7 +109,7 @@ export namespace AgentController {
       "Content-Length": `${size}`,
       "Content-Disposition": "attachment; filename=\"gss-agent\"",
     };
-    const version = await readLine(Path.resolve(Config.AGENT_DIST_DIR, "VERSION"));
+    const version = await AgentBuilds.readLine(Path.resolve(Config.AGENT_DIST_DIR, "VERSION"));
     if (version) headers["X-Gss-Version"] = version;
     return new Response(handle.readable, { status: 200, headers });
   });
@@ -121,10 +118,9 @@ export namespace AgentController {
    * GET /api/agent/download/:os/:arch/sha256 → the hex SHA-256 of that binary (`text/plain`), from its `.sha256` file.
    */
   router.get("/download/:os/:arch/sha256", async (c) => {
-    const { os, arch, file } = resolveBuild(c);
-    const digest = await readLine(`${file}.sha256`);
+    const { os, arch } = resolveBuild(c);
+    const digest = await AgentBuilds.readDigest(os, arch);
     if (digest === null) throw missingBuild(os, arch);
-    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error(`The checksum file for ${os}/${arch} in ${Config.AGENT_DIST_DIR} is not a SHA-256 digest. Run \`make dist\` in agent/ again.`);
     return c.body(`${digest}\n`, 200, { "Content-Type": "text/plain; charset=utf-8" });
   });
 }

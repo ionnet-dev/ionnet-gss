@@ -5,6 +5,8 @@ import { LIMITS } from "@shared/constants.ts";
 import type { HostDetailResponse, UpdateHostBody } from "@shared/api/hosts.ts";
 import type { EgressFacts } from "@shared/protocol/protocol.gen.ts";
 import { HostApi } from "@/Api/HostApi.ts";
+import AgentBuildBadge, { shortBuild } from "@/components/AgentBuild/AgentBuild.tsx";
+import AgentUpdate from "@/components/AgentUpdate/AgentUpdate.tsx";
 import { formatAgo, formatBytes, formatDateTime, formatUptime } from "@/components/Format/format.ts";
 import HostGrants from "@/components/HostGrants/HostGrants.tsx";
 import HostStatus from "@/components/HostStatus/HostStatus.tsx";
@@ -57,6 +59,7 @@ export default function HostDetail(props: Props) {
       />
       <Overview host={host} />
       {host.facts ? <System host={host} /> : <WaitingForFacts />}
+      {canManage && <AgentUpdate host={host} onChanged={resource.reload} />}
       {canManage && <Settings host={host} onChanged={resource.reload} />}
       {canManage && <HostGrants hostId={host.id} />}
     </Stack>
@@ -105,7 +108,17 @@ function Overview(props: { host: HostDetailResponse }) {
           <Fact label="Address">{host.address ?? host.facts?.hostname ?? "Not set"}</Fact>
           <Fact label="Servers">{host.serverCount}</Fact>
           <Fact label="Port pool"><span className="io-mono">{host.portPool || "None"}</span></Fact>
-          <Fact label="Agent">{host.agentVersion ? <span className="io-mono">{host.agentVersion}</span> : "Not connected yet"}</Fact>
+          <Fact label="Agent">
+            {host.agentVersion
+              ? (
+                <Stack direction="row" gap="8" align="center" wrap>
+                  <span className="io-mono">{host.agentVersion}</span>
+                  {host.agent.build && <span className="io-mono">{shortBuild(host.agent.build)}</span>}
+                  <AgentBuildBadge agent={host.agent} />
+                </Stack>
+              )
+              : "Not connected yet"}
+          </Fact>
           <Fact label="Enrolled">{formatDateTime(host.enrolledAt)}</Fact>
         </Grid>
       </CardBody>

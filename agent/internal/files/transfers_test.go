@@ -208,3 +208,45 @@ func TestIdleSweepAndLimit(t *testing.T) {
 	f.Close()
 	tr.CloseAll()
 }
+
+// TestCommitCountsUntilDone keeps a committing upload in OpenByServer until its commit returns (an agent update must
+// not restart under it).
+func TestCommitCountsUntilDone(t *testing.T) {
+	fs, _ := setup(t)
+	tr := NewTransfers()
+	id := uuid(9)
+	file, err := fs.CreateUpload(id, "commit.bin", 5, false)
+	must(t, err)
+	must(t, tr.OpenUpload(id, "srv", fs, file, "commit.bin", 5, false))
+	must(t, tr.Write(protocol.TransferWriteRequest{TransferID: id, Offset: 0, DataBase64: base64.StdEncoding.EncodeToString([]byte("hello"))}))
+	if server, ok := tr.ServerOf(id); !ok || server != "srv" {
+		t.Fatalf("ServerOf: %q, %v", server, ok)
+	}
+
+	// A chunk still being written holds the commit after it left the open table.
+	tr.open[id].io.RLock()
+	upload := tr.open[id]
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.Commit(id)
+		done <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		tr.mu.Lock()
+		_, stillOpen := tr.open[id]
+		tr.mu.Unlock()
+		if !stillOpen || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if counts := tr.OpenByServer(); counts["srv"] != 1 {
+		t.Fatalf("while committing: %v", counts)
+	}
+	upload.io.RUnlock()
+	must(t, <-done)
+	if counts := tr.OpenByServer(); len(counts) != 0 {
+		t.Fatalf("after the commit: %v", counts)
+	}
+}

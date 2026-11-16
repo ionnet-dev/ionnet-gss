@@ -5,6 +5,7 @@
  */
 import type { AgentToPanelEvents, AgentToPanelRequests } from "@shared/protocol/protocol.gen.ts";
 import type { AgentConnection } from "../AgentConnection.ts";
+import { handleAgentUpdateStatus } from "./agentUpdateStatus.ts";
 import { handleBackupFinished } from "./backupFinished.ts";
 import { handleBackupProgress } from "./backupProgress.ts";
 import { handleEnrol } from "./enrol.ts";
@@ -40,4 +41,5 @@ export const EVENT_HANDLERS: { [T in keyof AgentToPanelEvents]?: AgentEventHandl
   "server.player": handleServerPlayer,
   "backup.progress": handleBackupProgress,
   "backup.finished": handleBackupFinished,
+  "agent.updateStatus": handleAgentUpdateStatus,
 };

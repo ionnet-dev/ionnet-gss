@@ -20,7 +20,9 @@ import (
 type Transfers struct {
 	mu   sync.Mutex
 	open map[string]*transfer
-	now  func() time.Time
+	// committing counts uploads per server whose commit is still running (they already left open).
+	committing map[string]int
+	now        func() time.Time
 	// idle is TRANSFER_IDLE_SEC (shorter in tests); the sweep runs while any transfer is open.
 	idle     time.Duration
 	sweeping bool
@@ -53,7 +55,7 @@ type span struct{ from, to int64 }
 
 // NewTransfers returns an empty table; its idle sweep runs while transfers are open.
 func NewTransfers() *Transfers {
-	return &Transfers{open: map[string]*transfer{}, now: time.Now, idle: time.Duration(protocol.TransferIdleSec) * time.Second}
+	return &Transfers{open: map[string]*transfer{}, committing: map[string]int{}, now: time.Now, idle: time.Duration(protocol.TransferIdleSec) * time.Second}
 }
 
 // OpenDownload registers a download of an open file (from FS.OpenRead or Manager.BackupArchive). On an error the
@@ -202,6 +204,8 @@ func (t *Transfers) Commit(id string) (protocol.FileEntry, error) {
 	tr := t.open[id]
 	if tr != nil && tr.direction == protocol.TransferDirectionUpload {
 		delete(t.open, id)
+		t.committing[tr.serverID]++
+		defer t.committed(tr.serverID)
 	}
 	t.mu.Unlock()
 	if tr == nil {
@@ -243,6 +247,25 @@ func (t *Transfers) Commit(id string) (protocol.FileEntry, error) {
 	return entry, nil
 }
 
+// ServerOf returns the server id of an open transfer.
+func (t *Transfers) ServerOf(id string) (string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if tr := t.open[id]; tr != nil {
+		return tr.serverID, true
+	}
+	return "", false
+}
+
+// committed ends a commit's count in OpenByServer.
+func (t *Transfers) committed(serverID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.committing[serverID]--; t.committing[serverID] <= 0 {
+		delete(t.committing, serverID)
+	}
+}
+
 // Close answers `transfer.close`; unknown ids are fine.
 func (t *Transfers) Close(id string) {
 	if tr := t.take(id); tr != nil {
@@ -253,6 +276,21 @@ func (t *Transfers) Close(id string) {
 // CloseServer closes every transfer of one server (servers.TransferCloser).
 func (t *Transfers) CloseServer(serverID string) {
 	t.closeWhere(func(tr *transfer) bool { return tr.serverID == serverID })
+}
+
+// OpenByServer counts the open transfers per server id, uploads still being committed included (an agent update
+// waits for them).
+func (t *Transfers) OpenByServer() map[string]int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	counts := make(map[string]int, len(t.open)+len(t.committing))
+	for _, tr := range t.open {
+		counts[tr.serverID]++
+	}
+	for serverID, count := range t.committing {
+		counts[serverID] += count
+	}
+	return counts
 }
 
 // CloseAll closes every transfer (a new panel connection).

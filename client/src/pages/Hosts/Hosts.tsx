@@ -4,6 +4,7 @@ import { Plus, Server } from "@ionnet/iontronic/icons";
 import type { HostDto, EnrolTokenDto } from "@shared/api/hosts.ts";
 import type { HostFacts } from "@shared/protocol/protocol.gen.ts";
 import { HostApi } from "@/Api/HostApi.ts";
+import AgentBuildBadge from "@/components/AgentBuild/AgentBuild.tsx";
 import EnrolDialog from "@/components/EnrolDialog/EnrolDialog.tsx";
 import { formatAgo, formatBytes, formatUntil } from "@/components/Format/format.ts";
 import HostStatus from "@/components/HostStatus/HostStatus.tsx";
@@ -84,7 +85,7 @@ function HostItem(props: { host: HostRow }) {
       icon={Server}
       tone={host.disabled ? "warn" : host.online ? "ok" : "neutral"}
       title={host.name}
-      badges={<HostStatus host={host} />}
+      badges={<><HostStatus host={host} /><AgentBuildBadge agent={host.agent} onlyOutdated /></>}
       description={details}
       meta={host.serverCount === 1 ? "1 server" : `${host.serverCount} servers`}
       trailing={host.online ? "Now" : formatAgo(host.lastSeenAt)}

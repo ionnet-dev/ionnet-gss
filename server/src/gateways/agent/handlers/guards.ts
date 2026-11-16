@@ -112,6 +112,13 @@ export function requireFacts(value: unknown): HostFacts {
     boundPorts = { tcp: ports(raw.tcp, "tcp"), udp: ports(raw.udp, "udp") };
   }
 
+  // Agents older than build reporting send no `agentBuild`: stored as null (unknown).
+  let agentBuild: string | null = null;
+  if (facts.agentBuild !== undefined && facts.agentBuild !== null) {
+    if (typeof facts.agentBuild !== "string" || !/^[0-9a-f]{64}$/.test(facts.agentBuild)) throw new AgentRequestError("bad_request", "facts.agentBuild must be 64 lowercase hex characters (a SHA-256), or null.");
+    agentBuild = facts.agentBuild;
+  }
+
   const osFacts: OsFacts = {
     name: factString(os.name, "os.name"),
     id: factString(os.id, "os.id"),
@@ -147,5 +154,6 @@ export function requireFacts(value: unknown): HostFacts {
     docker,
     egress,
     boundPorts,
+    agentBuild,
   };
 }

@@ -5,6 +5,7 @@ import type { CreateHostGrantBody, HostDetailResponse, HostDto, HostGrantDto, Up
 import { LIMITS } from "@shared/constants.ts";
 import { CLOSE_REVOKED } from "@shared/protocol/protocol.gen.ts";
 import { AgentGateway } from "../gateways/agent/AgentGateway.ts";
+import { AgentUpdater } from "../hosts/AgentUpdater.ts";
 import { LiveGateway } from "../gateways/live/LiveGateway.ts";
 import { type AppEnv, clientIp, paramInt, paramUuid, readBody } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
@@ -53,7 +54,7 @@ async function serverCount(hostId: string): Promise<number> {
 
 async function detail(host: Host, user: User) {
   const canCreate = mayCreateOn(user, await HostGrant.isGranted(host.id, user.id));
-  return host.toDetailJSON(AgentGateway.isOnline(host.id), await serverCount(host.id), user.hasPermission("HOSTS_MANAGE"), canCreate);
+  return host.toDetailJSON(AgentGateway.isOnline(host.id), await serverCount(host.id), user.hasPermission("HOSTS_MANAGE"), await AgentUpdater.describe(host, user.hasPermission("HOSTS_MANAGE")), canCreate);
 }
 
 function pushHostUpdated(host: Host): void {
@@ -81,7 +82,7 @@ function parseLimit(value: unknown, label: string): number | null {
 
 /**
  * `/api/hosts`. HOSTS_MANAGE (edits) and SERVERS_MANAGE_ALL (read) see every host; HOSTS_VIEW and SERVERS_CREATE see
- * only the hosts they are granted. Online state comes from `AgentGateway.isOnline()`. Pushes `host.updated`. Audit: `host.updated`, `host.removed`.
+ * only the hosts they are granted. Online state comes from `AgentGateway.isOnline()`. Pushes `host.updated`. Audit: `host.updated`, `host.removed`, `host.agent_update` (M6).
  */
 export namespace HostController {
   export const router = new Hono<AppEnv>();
@@ -101,7 +102,12 @@ export namespace HostController {
     });
     const counts = await GameServer.countByHost(all ? undefined : hosts.map((host) => host.id));
     const granted = await HostGrant.hostIdsOf(user.id);
-    return c.json<HostDto[]>(hosts.map((host) => host.toClientJSON(AgentGateway.isOnline(host.id), counts.get(host.id) ?? 0, mayCreateOn(user, granted.has(host.id)))));
+    return c.json<HostDto[]>(await Promise.all(hosts.map(async (host) => host.toClientJSON(
+      AgentGateway.isOnline(host.id),
+      counts.get(host.id) ?? 0,
+      await AgentUpdater.describe(host, user.hasPermission("HOSTS_MANAGE")),
+      mayCreateOn(user, granted.has(host.id)),
+    ))));
   });
 
   /**
@@ -114,7 +120,8 @@ export namespace HostController {
 
   /**
    * PATCH /api/hosts/:id  UpdateHostBody → HostDetailResponse. HOSTS_MANAGE. 400 on a bad `portPool`
-   * (`parsePortPool`). Disabling closes the agent socket with CLOSE_REVOKED.
+   * (`parsePortPool`). Disabling closes the agent socket with CLOSE_REVOKED. Turning `autoUpdateAgent` on updates an
+   * online, out-of-date agent right away (M6).
    */
   router.patch("/:id", User.$middleware({ permissions: ["HOSTS_MANAGE"] }), async (c) => {
     const id = paramUuid(c, "id");
@@ -162,7 +169,17 @@ export namespace HostController {
       changes.push("capacity");
     }
 
+    if (body.autoUpdateAgent !== undefined) {
+      if (typeof body.autoUpdateAgent !== "boolean") throw HttpError.badRequest("\"autoUpdateAgent\" must be true or false.");
+      if (body.autoUpdateAgent !== host.autoUpdateAgent) changes.push("autoUpdateAgent");
+      host.autoUpdateAgent = body.autoUpdateAgent;
+    }
+
     await host.save();
+    if (changes.includes("autoUpdateAgent") && host.autoUpdateAgent) {
+      AgentUpdater.resetAutoFailure(host.id);
+      if (!host.disabled) await AgentUpdater.autoUpdate(host.id, actor.id, clientIp(c)); // Starts the update at once when the agent is online and out of date.
+    }
     if (changes.includes("disabled") && host.disabled) AgentGateway.disconnect(host.id, CLOSE_REVOKED, "This host was disabled in the panel.");
     if (changes.length) await AuditLog.record({ action: "host.updated", actorId: actor.id, hostId: host.id, ip: clientIp(c), details: { changes } });
     pushHostUpdated(host);
@@ -184,6 +201,19 @@ export namespace HostController {
     await AuditLog.record({ action: "host.removed", actorId: actor.id, hostId: id, ip: clientIp(c), details: { name: host.name } });
     pushHostUpdated(host);
     return c.json<OkResponse>({ ok: true });
+  });
+
+  /**
+   * POST /api/hosts/:id/agent/update → HostDetailResponse (M6). HOSTS_MANAGE. Asks the agent to update to the build the
+   * panel serves; progress arrives as `host.updated`. 409 when the host is offline, the panel has no build for its
+   * architecture, it is already up to date, or its agent is too old to update from the panel. Audit `host.agent_update`.
+   */
+  router.post("/:id/agent/update", User.$middleware({ permissions: ["HOSTS_MANAGE"] }), async (c) => {
+    const id = paramUuid(c, "id");
+    const actor = c.var.user;
+    const host = await findVisibleHost(actor, id);
+    await AgentUpdater.request(host, "manual", actor.id, clientIp(c));
+    return c.json<HostDetailResponse>(await detail(host, actor));
   });
 
   //#region Grants (M5)

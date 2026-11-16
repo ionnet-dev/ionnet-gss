@@ -28,6 +28,13 @@ export namespace HostApi {
     return BaseApi.PATCH(`/hosts/${id}`, body);
   }
 
+  /**
+   * Ask the host's agent to update to the build the panel serves (M6). Progress arrives as `host.updated`.
+   */
+  export function updateAgent(id: string): Promise<HostDetailResponse> {
+    return BaseApi.POST(`/hosts/${id}/agent/update`);
+  }
+
   export function remove(id: string): Promise<OkResponse> {
     return BaseApi.DELETE(`/hosts/${id}`);
   }

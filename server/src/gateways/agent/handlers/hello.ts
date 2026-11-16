@@ -15,6 +15,7 @@ import {
 } from "@shared/protocol/protocol.gen.ts";
 import { AppSystem } from "../../../AppSystem.ts";
 import { Config } from "../../../Config.ts";
+import { AgentUpdater } from "../../../hosts/AgentUpdater.ts";
 import { Host } from "../../../models/index.ts";
 import { BackupService } from "../../../servers/BackupService.ts";
 import { GameServerService } from "../../../servers/GameServerService.ts";
@@ -98,7 +99,8 @@ function parseOperation(value: unknown, serverId: string, bad: (what: string) =>
  * `hello`: check `protocolVersion`, `Host.authenticateAgent()` (unknown → `unauthorized` + CLOSE_UNAUTHORIZED, the
  * agent stops; disabled → `forbidden` + CLOSE_REVOKED, the agent retries slowly), store facts + versions, set `conn.hostId` and `phase = "ready"`, `AgentGateway.register(conn)`.
  * Answers `{ hostName, heartbeatSec: AGENT_HEARTBEAT_SEC, panelVersion }`. M2: reconcile `data.servers` with the
- * GameServer rows (state, specHash drift). M4: players seed `MetricsService`, operations reconcile `BackupService`.
+ * GameServer rows (state, specHash drift). M4: players seed `MetricsService`, operations reconcile `BackupService`. M6: `AgentUpdater` settles the earlier update, then updates
+ * the agent when the host opted in and runs an older build.
  */
 export async function handleHello(conn: AgentConnection, data: HelloRequest): Promise<HelloResponse> {
   const request = requireObject<Partial<HelloRequest>>(data, "hello");
@@ -133,15 +135,17 @@ export async function handleHello(conn: AgentConnection, data: HelloRequest): Pr
 
   host.protocolVersion = request.protocolVersion;
   const factsChanged = await host.recordFacts(facts);
+  const updateSettled = AgentUpdater.onHello(host);
 
   conn.markReady(host.id);
   conn.lastFactsPushAt = Date.now();
   AgentGateway.register(conn); // Pushes `host.status`; `host.updated` only when the shown facts changed.
-  if (factsChanged) void pushHostUpdated(host.id);
+  if (factsChanged || updateSettled) void pushHostUpdated(host.id);
   MetricsService.seedFromHello(host.id, servers);
   setTimeout(() => {
     GameServerService.reconcile(host.id, servers).catch((error) => console.error(`reconcile after hello of host ${host.id} failed`, error));
     BackupService.reconcile(host.id, servers).catch((error) => console.error(`backup reconcile after hello of host ${host.id} failed`, error));
+    void AgentUpdater.autoUpdate(host.id);
   }, RECONCILE_DELAY_MS);
   return { hostName: host.name, heartbeatSec: Config.AGENT_HEARTBEAT_SEC, panelVersion: AppSystem.version };
 }

@@ -681,6 +681,8 @@ type HostFacts struct {
 	Egress *EgressFacts `json:"egress"`
 	// BoundPorts host ports other software already holds, so the panel's allocator skips them (M3). null = not read (not Linux) or an agent older than this field; the panel stores a missing value as null.
 	BoundPorts *BoundPorts `json:"boundPorts"`
+	// AgentBuild SHA-256 (hex) of the running gss-agent binary, read once at start (M6). The panel compares it with the build it serves for os.arch to tell whether the agent is out of date. null = it could not be read; a missing value (an agent older than this field) is stored as null.
+	AgentBuild *string `json:"agentBuild"`
 }
 
 // OsFacts is defined in protocol/schema/host.json.
@@ -785,6 +787,37 @@ type HelloResponse struct {
 type Heartbeat struct {
 	At    time.Time `json:"at"`
 	Facts HostFacts `json:"facts"`
+}
+
+// AgentUpdateRequest is defined in protocol/schema/host.json.
+type AgentUpdateRequest struct {
+	// Sha256 the build to install: the SHA-256 of /api/agent/download/linux/<arch> on the agent's own panel. The agent downloads only from its configured panel URL and refuses a file with any other digest.
+	Sha256 string `json:"sha256"`
+	// Force install it even if this agent rolled that build back before (.gss-agent-rejected). The panel sets it for a manual update, never for an automatic one. Absent = false.
+	Force bool `json:"force,omitempty"`
+}
+
+// AgentUpdateState current: the agent already runs that build (nothing to do). downloading: fetching and verifying it. waiting: verified and staged next to the binary, waiting for waitingFor to finish. restarting: the binary was replaced and the agent restarts into it (it reconnects with the new agentBuild). failed: see message; the binary was not replaced.
+type AgentUpdateState string
+
+// AgentUpdateState values.
+const (
+	AgentUpdateStateCurrent     AgentUpdateState = "current"
+	AgentUpdateStateDownloading AgentUpdateState = "downloading"
+	AgentUpdateStateWaiting     AgentUpdateState = "waiting"
+	AgentUpdateStateRestarting  AgentUpdateState = "restarting"
+	AgentUpdateStateFailed      AgentUpdateState = "failed"
+)
+
+// AgentUpdateStatus is defined in protocol/schema/host.json.
+type AgentUpdateStatus struct {
+	State AgentUpdateState `json:"state"`
+	// Sha256 the build this status is about.
+	Sha256 string `json:"sha256"`
+	// Message one readable sentence for people (why it failed, what it waits for); may be empty.
+	Message string `json:"message"`
+	// WaitingFor while waiting: what still runs, e.g. install of server 3f2a…, backup of server 3f2a…. Empty otherwise.
+	WaitingFor []string `json:"waitingFor"`
 }
 
 // ServerState creating → installing → stopped ⇄ starting → running → stopping → stopped; failures: install_failed, crashed. deleting is the panel's own: a delete (or a rolled-back create) the agent has not confirmed yet; agents never report it.
@@ -1169,6 +1202,10 @@ const (
 	MsgHello = "hello"
 	// MsgHeartbeat: agent → panel, event Heartbeat (M1).
 	MsgHeartbeat = "heartbeat"
+	// MsgAgentUpdate: panel → agent, request AgentUpdateRequest, response AgentUpdateStatus (M6).
+	MsgAgentUpdate = "agent.update"
+	// MsgAgentUpdateStatus: agent → panel, event AgentUpdateStatus (M6).
+	MsgAgentUpdateStatus = "agent.updateStatus"
 	// MsgServerProvision: panel → agent, request ProvisionRequest, response ServerStatus (M2).
 	MsgServerProvision = "server.provision"
 	// MsgServerStart: panel → agent, request ServerRef, response ServerStatus (M2).
@@ -1250,6 +1287,8 @@ var Messages = []MessageSpec{
 	{Channel: "agent", Type: "enrol", Kind: MessageKindRequest, From: "agent", Milestone: 1},
 	{Channel: "agent", Type: "hello", Kind: MessageKindRequest, From: "agent", Milestone: 1},
 	{Channel: "agent", Type: "heartbeat", Kind: MessageKindEvent, From: "agent", Milestone: 1},
+	{Channel: "agent", Type: "agent.update", Kind: MessageKindRequest, From: "panel", Milestone: 6},
+	{Channel: "agent", Type: "agent.updateStatus", Kind: MessageKindEvent, From: "agent", Milestone: 6},
 	{Channel: "agent", Type: "server.provision", Kind: MessageKindRequest, From: "panel", Milestone: 2},
 	{Channel: "agent", Type: "server.start", Kind: MessageKindRequest, From: "panel", Milestone: 2},
 	{Channel: "agent", Type: "server.restart", Kind: MessageKindRequest, From: "panel", Milestone: 2},

@@ -8,7 +8,7 @@ import {
   type NonAttribute,
   type Sequelize,
 } from "sequelize";
-import type { HostDetailResponse, HostDto } from "@shared/api/hosts.ts";
+import type { HostAgentDto, HostDetailResponse, HostDto } from "@shared/api/hosts.ts";
 import type { HostFacts } from "@shared/protocol/protocol.gen.ts";
 import { TOKEN_PREFIX } from "@shared/constants.ts";
 import { Config } from "../Config.ts";
@@ -39,6 +39,7 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
   declare maxCpuMillis: number | null; // null = facts.cpu.threads × 1000.
   declare maxDiskMb: number | null; // null = facts.disk.totalBytes.
   declare disabled: CreationOptional<boolean>; // Disabled hosts are refused at hello (CLOSE_REVOKED).
+  declare autoUpdateAgent: CreationOptional<boolean>; // Update the agent when it connects with an older build (M6).
   declare enrolledById: ForeignKey<User["id"]> | null;
   declare lastSeenAt: Date | null;
   declare createdAt: CreationOptional<Date>; // = enrolled at
@@ -61,6 +62,7 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
       maxCpuMillis: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
       maxDiskMb: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
       disabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+      autoUpdateAgent: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       enrolledById: intFk(true),
       lastSeenAt: { type: DataTypes.DATE, allowNull: true },
       createdAt: DataTypes.DATE,
@@ -148,15 +150,17 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
       facts.docker,
       facts.egress?.filtering ?? null,
       facts.egress?.error ?? null,
+      facts.agentBuild,
     ]);
   }
 
   /**
    * @param online From `AgentGateway.isOnline(this.id)`.
    * @param serverCount Game servers on this host.
+   * @param agent From `AgentUpdater.describe(host)` (it needs the gateway and the build files, which models don't import).
    * @param canCreate The caller may create servers here (M5: SERVERS_CREATE and SERVERS_MANAGE_ALL or a grant).
    */
-  public toClientJSON(online: boolean, serverCount: number, canCreate = false): HostDto {
+  public toClientJSON(online: boolean, serverCount: number, agent: HostAgentDto, canCreate = false): HostDto {
     return {
       id: this.id,
       name: this.name,
@@ -171,15 +175,16 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
       serverCount,
       facts: this.facts,
       canCreate,
+      agent,
     };
   }
 
   /**
    * Needs `grants` (with `user`) loaded when `includeGrants`.
    */
-  public toDetailJSON(online: boolean, serverCount: number, includeGrants: boolean, canCreate = false): HostDetailResponse {
+  public toDetailJSON(online: boolean, serverCount: number, includeGrants: boolean, agent: HostAgentDto, canCreate = false): HostDetailResponse {
     return {
-      ...this.toClientJSON(online, serverCount, canCreate),
+      ...this.toClientJSON(online, serverCount, agent, canCreate),
       grants: includeGrants
         ? (this.grants ?? []).map((grant) => ({
           userId: grant.userId,

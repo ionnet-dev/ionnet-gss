@@ -2,7 +2,7 @@
  * `/api/hosts` and `/api/enrol-tokens`.
  */
 import type { IsoDate } from "./common.ts";
-import type { HostFacts } from "../protocol/protocol.gen.ts";
+import type { AgentUpdateStatus, HostFacts } from "../protocol/protocol.gen.ts";
 
 export interface HostDto {
   id: string; // UUID.
@@ -28,6 +28,32 @@ export interface HostDto {
    * page's host picker shows only these.
    */
   canCreate: boolean;
+  /**
+   * The agent's build, whether it is the one this panel serves, and the progress of an update (M6).
+   */
+  agent: HostAgentDto;
+}
+
+/**
+ * Agent version state of a host (M6). Builds are SHA-256 digests of the gss-agent binary.
+ */
+export interface HostAgentDto {
+  build: string | null; // The running binary. null = unknown (never connected, or an agent older than M6).
+  latestBuild: string | null; // What the panel serves for the host's arch. null = the panel has no build for it.
+  /**
+   * true = runs `latestBuild`; false = out of date; null = can't tell (`build` or `latestBuild` unknown).
+   */
+  upToDate: boolean | null;
+  /**
+   * Update the agent automatically when it connects with an older build (the panel was upgraded, or the setting was
+   * just turned on). Off by default.
+   */
+  autoUpdate: boolean;
+  /**
+   * The latest update's progress, kept in the panel's memory. null = none since the panel started, or it finished
+   * (the agent reconnected with the new build).
+   */
+  update: AgentUpdateStatus | null;
 }
 
 /**
@@ -49,6 +75,7 @@ export interface UpdateHostBody {
   disabled?: boolean;
   portPool?: string;
   capacity?: Partial<HostCapacityDto>;
+  autoUpdateAgent?: boolean; // M6
 }
 
 //#region Grants (M5)

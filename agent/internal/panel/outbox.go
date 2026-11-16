@@ -44,6 +44,8 @@ type Outbox struct {
 	nextID  uint64
 	dropped int
 	wake    chan struct{}
+	// progress is closed (and replaced) whenever events leave the queue; Flush waits on it.
+	progress chan struct{}
 }
 
 type outboxEvent struct {
@@ -63,7 +65,7 @@ func NewOutbox(limit, maxBytes int) *Outbox {
 	if maxBytes <= 0 {
 		maxBytes = DefaultOutboxBytes
 	}
-	return &Outbox{limit: limit, maxBytes: maxBytes, wake: make(chan struct{}, 1)}
+	return &Outbox{limit: limit, maxBytes: maxBytes, wake: make(chan struct{}, 1), progress: make(chan struct{})}
 }
 
 // Emit queues an event and never blocks. The data is encoded now, so its size counts against the byte budget.
@@ -101,6 +103,34 @@ func (o *Outbox) signal() {
 	}
 }
 
+// Flush waits until every event queued before the call was sent (or dropped), or ctx ends (its error). Events only
+// leave while a connection is attached, so a panel that stays away runs into ctx.
+func (o *Outbox) Flush(ctx context.Context) error {
+	o.mu.Lock()
+	target := o.nextID
+	o.mu.Unlock()
+	for {
+		o.mu.Lock()
+		pending := len(o.queue) > 0 && o.queue[0].id <= target
+		progress := o.progress
+		o.mu.Unlock()
+		if !pending {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-progress:
+		}
+	}
+}
+
+// progressedLocked wakes Flush callers. Caller holds o.mu.
+func (o *Outbox) progressedLocked() {
+	close(o.progress)
+	o.progress = make(chan struct{})
+}
+
 // Bytes is the encoded size of the events waiting to be sent.
 func (o *Outbox) Bytes() int {
 	o.mu.Lock()
@@ -133,6 +163,7 @@ func (o *Outbox) dropOldestLocked() bool {
 	}
 	o.bytes -= len(o.queue[index].data)
 	o.queue = append(o.queue[:index], o.queue[index+1:]...)
+	o.progressedLocked()
 	return true
 }
 
@@ -167,6 +198,7 @@ func (o *Outbox) detach(conn Conn) {
 	}
 	clear(o.queue[len(kept):])
 	o.queue = kept
+	o.progressedLocked()
 }
 
 // Run sends queued events until ctx ends. A failed send detaches the connection (the session reconnects); the
@@ -209,6 +241,7 @@ func (o *Outbox) Run(ctx context.Context) {
 				break
 			}
 		}
+		o.progressedLocked()
 		o.mu.Unlock()
 	}
 }

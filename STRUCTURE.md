@@ -46,12 +46,14 @@ server/src/
                        LocalLoader = games/; GitLoader = safe shallow git clone, M3), OptionsFetcher (M3:
                        options_from lists, https allowlist + cache)
   jobs/                sourceSync.ts (M3: interval sync of git sources)
+  hosts/               M6: AgentUpdater (agent build per host, manual + automatic update, status in memory)
   servers/             GameServerService: every server operation (access, quota, ports, provision, lifecycle,
                        console, agent state → rows + live events, reconcile after hello); M4: ServerAccess (share-aware
                        levels), agentCall (agent codes → HTTP), FileService, BackupService, MetricsService + MetricRing;
                        M5: ShareService
   transfers/           M4: TransferRelay (browser HTTP ⇄ agent chunks, windowed), DownloadTickets (single-use links)
-  lib/                 HttpError, http (AppEnv, readBody, paramInt/Uuid, clientIp), RateLimiter, tokens, portPool, totp (M5)
+  lib/                 HttpError, http (AppEnv, readBody, paramInt/Uuid, clientIp), RateLimiter, tokens, portPool, totp (M5),
+                       agentBuilds (M6: the builds in AGENT_DIST_DIR)
 client/                npm + Vite (Iontronic is a github: dep Deno can't install)
   vite.config.ts       :5200, HMR direct, aliases @/ @shared/, inline theme boot
   src/main.tsx         providers + auth bootstrap + <Router>
@@ -65,7 +67,8 @@ client/                npm + Vite (Iontronic is a github: dep Deno can't install
   src/live/            LiveSocket (the /ws/live client, on(event))
   src/components/      AppLayout (AppShell/Sidebar/TabBar), AuthLayout, … M4: FileManager (+ FileEditor), BackupList,
                        MetricsPanel (+ MetricChart), PlayerList; M5: QuotaUsage, QuotaDialog, ServerSharing,
-                       HostGrants, TwoFactorCard, TotpSetupDialog, QrCode
+                       HostGrants, TwoFactorCard, TotpSetupDialog, QrCode,
+                       M6: AgentBuild (badge), AgentUpdate (host page card)
   src/pages/<Name>/    Login, Setup, Register, Hosts, HostDetail, Users, Invites, Account, NotFound;
                        M2: Servers (also `/`), ServerCreate, ServerDetail; component Console; M3: Sources
 agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
@@ -83,6 +86,8 @@ agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
                        egress.go (bridge names, egress checks before a container or game starts); M4: files.go
                        (Manager.Files), backup.go (operations, restore swap), stats.go (stats loop)
   internal/images      Resolver: image ensure + derived `packages:` images, ionnet-gss-derived:<hash16> (M3)
+  internal/updater     M6: Updater (agent.update: download from the own panel, verify, stage, wait for idle, swap);
+                       the restart is agent.ErrRestart → cli re-exec (reexec_unix.go)
   internal/stacks      Stack: a server's service containers (Ensure/Start with health wait/Stop/Remove/Status) (M3)
   internal/egress      Firewall: the agent's nftables table `inet ionnet_gss` (ruleset.go: pure script builder;
                        firewall.go: desired state, incremental adds, rebuilds, nft helper container)
@@ -205,6 +210,7 @@ body over `BODY_LIMIT_KB` → 413.
 | GET | /api/hosts/:id | S | | `HostDetailResponse` |
 | PATCH·DELETE | /api/hosts/:id | P:HOSTS_MANAGE | `UpdateHostBody` | `HostDetailResponse` / `OkResponse`; 409 servers |
 | GET·PUT·DELETE | /api/hosts/:id/grants[/:userId] | P:HOSTS_MANAGE | | M5 |
+| POST | /api/hosts/:id/agent/update | P:HOSTS_MANAGE | | `HostDetailResponse` (M6); 409 offline, no build for the arch, already up to date, agent too old |
 | GET·POST | /api/enrol-tokens | P:HOSTS_MANAGE | `CreateEnrolTokenBody` | `EnrolTokenDto[]` / 201 `EnrolTokenCreatedResponse` |
 | DELETE | /api/enrol-tokens/:id | P:HOSTS_MANAGE | | `OkResponse`; 409 used |
 | GET | /ws/agent | first frame | protocol | protocol |
@@ -1037,3 +1043,36 @@ checks at create). Builders never stop the dev instance (:3200/:5200) or its age
 their own port, scratch DB (create `gss_e` like the others), agent config, data root and `egressTable`. Integration
 (main): a second (non-admin) user on this machine limited by quota, granted one host, a server shared with them at
 `operate`, 2FA on for both users, and a fresh host installed with the one-liner in a VM or systemd container.
+
+## M6: agent updates
+
+Hosts show which agent build they run and can update it from the panel. Contract: `protocol/schema/host.json`
+(`HostFacts.agentBuild`, request `agent.update`, event `agent.updateStatus`), `HostDto.agent` / `UpdateHostBody.autoUpdateAgent`.
+
+- **Builds.** `lib/agentBuilds.ts` (`AgentBuilds`) is the one reader of `AGENT_DIST_DIR` (`gss-agent-<os>-<arch>` +
+  `.sha256`), shared by `AgentController` and the updater. `latest(os, arch)` is cached for 5 s, so the host list
+  stays cheap, and answers null for no build or an unreadable checksum (logged). The arch is `facts.os.arch`, the
+  OS is always `linux`.
+- **`hosts/AgentUpdater.ts`** keeps the update status per host id in memory (gone after a panel restart; the next
+  hello compares builds anyway). `request(host, "manual" | "auto", actorId?)` asks the agent, audits
+  `host.agent_update` `{ build, reason }` and pushes `host.updated`; `onStatus` (handler `agentUpdateStatus.ts`)
+  stores events; `onHello` (called by `hello.ts` after the facts are stored) settles the earlier update: the requested
+  build clears it, another build after `restarting` marks it `failed`, a status still downloading or waiting is
+  dropped (the agent restarted and forgot it). `autoUpdate(host)` runs after the hello answer, like reconcile.
+  `describe(host)` fills `HostDto.agent`; models can't import gateways, so controllers pass it to
+  `Host.toClientJSON(online, count, agent, canCreate)`.
+- **Loop guard.** An automatic update that fails (the agent's `failed` status, a restart into another build, or an
+  error answering the request) is remembered as host id → target build. Automatic updates skip that build until the
+  panel serves another one, someone clicks Update, or the setting is switched on again.
+- **Races.** Status events travel on another queue than the answer to `agent.update`, so `request` applies the answer
+  only when no event for that build arrived meanwhile. The last requested build and reason are kept apart from the
+  shown status (a reconnect drops that), so a late event is still attributed to an automatic or manual update.
+- **Visibility.** `HostDto.agent.update` (running operations, agent messages) is sent only to HOSTS_MANAGE; the
+  builds and `upToDate` go to everyone who sees the host.
+- **Download limit.** Agents send `Authorization: Bearer <host credential>` and `X-Gss-Host` on their update download;
+  a valid pair skips the per-IP limit of `/api/agent` (a wrong one counts as anonymous).
+- **Agents older than M6** answer `unsupported`; the panel's 409 tells the admin to run the install command once.
+  Their `agentBuild` is stored as null, shown as "Unknown".
+- **Client.** `AgentBuild` (badge: Up to date / Update available / Unknown, also on the host list for outdated
+  hosts) and `AgentUpdate` (card on the host page for HOSTS_MANAGE: builds, progress line, Update button, automatic
+  switch, install hint for unknown builds). Both refetch on `host.updated`.

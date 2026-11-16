@@ -35,7 +35,7 @@ func (a *Agent) fileHandlers() map[string]panel.RequestHandler {
 				return protocol.FilesReadResponse{Entry: entry, Binary: binary, ContentBase64: base64.StdEncoding.EncodeToString(content)}, nil
 			})
 		}),
-		protocol.MsgFilesWrite: serve(fileTimeout, func(ctx context.Context, req protocol.FilesWriteRequest) (any, error) {
+		protocol.MsgFilesWrite: serve(fileTimeout, tracked(a.ops, "file save", func(req protocol.FilesWriteRequest) string { return req.ServerID }, func(ctx context.Context, req protocol.FilesWriteRequest) (any, error) {
 			if base64.StdEncoding.DecodedLen(len(req.ContentBase64)) > protocol.FileTextMaxBytes+2 {
 				return nil, &protocol.RemoteError{Code: protocol.ErrorCodeTooLarge, Message: fmt.Sprintf("The editor saves files of at most %d MB. Upload larger files instead.", protocol.FileTextMaxBytes>>20)}
 			}
@@ -52,33 +52,41 @@ func (a *Agent) fileHandlers() map[string]panel.RequestHandler {
 				expected = &at
 			}
 			return withFS(a, req.ServerID, func(fs *files.FS) (any, error) { return fs.WriteText(req.Path, content, expected) })
-		}),
-		protocol.MsgFilesMkdir: serve(fileTimeout, func(ctx context.Context, req protocol.FilesPathRequest) (any, error) {
+		})),
+		protocol.MsgFilesMkdir: serve(fileTimeout, tracked(a.ops, "folder creation", func(req protocol.FilesPathRequest) string { return req.ServerID }, func(ctx context.Context, req protocol.FilesPathRequest) (any, error) {
 			return withFS(a, req.ServerID, func(fs *files.FS) (any, error) { return fs.Mkdir(req.Path) })
-		}),
-		protocol.MsgFilesRename: serve(fileTimeout, func(ctx context.Context, req protocol.FilesRenameRequest) (any, error) {
+		})),
+		protocol.MsgFilesRename: serve(fileTimeout, tracked(a.ops, "file rename", func(req protocol.FilesRenameRequest) string { return req.ServerID }, func(ctx context.Context, req protocol.FilesRenameRequest) (any, error) {
 			return withFS(a, req.ServerID, func(fs *files.FS) (any, error) { return fs.Rename(req.From, req.To, req.Overwrite) })
-		}),
-		protocol.MsgFilesDelete: serve(fileTimeout, func(ctx context.Context, req protocol.FilesDeleteRequest) (any, error) {
+		})),
+		protocol.MsgFilesDelete: serve(fileTimeout, tracked(a.ops, "file deletion", func(req protocol.FilesDeleteRequest) string { return req.ServerID }, func(ctx context.Context, req protocol.FilesDeleteRequest) (any, error) {
 			return withFS(a, req.ServerID, func(fs *files.FS) (any, error) { return protocol.Empty{}, fs.Delete(req.Paths) })
-		}),
-		protocol.MsgTransferOpen: serve(fileTimeout, func(ctx context.Context, req protocol.TransferOpenRequest) (any, error) {
+		})),
+		protocol.MsgTransferOpen: serve(fileTimeout, tracked(a.ops, "file transfer", func(req protocol.TransferOpenRequest) string { return req.ServerID }, func(ctx context.Context, req protocol.TransferOpenRequest) (any, error) {
 			return a.openTransfer(req)
-		}),
+		})),
 		protocol.MsgTransferRead: serve(fileTimeout, func(ctx context.Context, req protocol.TransferReadRequest) (any, error) {
 			return a.Transfers.Read(req)
 		}),
 		protocol.MsgTransferWrite: serve(fileTimeout, func(ctx context.Context, req protocol.TransferWriteRequest) (any, error) {
 			return protocol.Empty{}, a.Transfers.Write(req)
 		}),
-		protocol.MsgTransferCommit: serve(fileTimeout, func(ctx context.Context, req protocol.TransferRef) (any, error) {
+		protocol.MsgTransferCommit: serve(fileTimeout, tracked(a.ops, "upload", a.transferServer, func(ctx context.Context, req protocol.TransferRef) (any, error) {
 			return a.Transfers.Commit(req.TransferID)
-		}),
+		})),
 		protocol.MsgTransferClose: serve(fileTimeout, func(ctx context.Context, req protocol.TransferRef) (any, error) {
 			a.Transfers.Close(req.TransferID)
 			return protocol.Empty{}, nil
 		}),
 	}
+}
+
+// transferServer names the server of an open transfer for an operation label ("unknown" once it is gone).
+func (a *Agent) transferServer(req protocol.TransferRef) string {
+	if serverID, ok := a.Transfers.ServerOf(req.TransferID); ok {
+		return serverID
+	}
+	return "unknown"
 }
 
 // withFS opens a server's data folder for one request and closes it afterwards.

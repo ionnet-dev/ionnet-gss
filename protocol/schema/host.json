@@ -18,6 +18,16 @@
       "channel": "agent", "type": "heartbeat", "kind": "event", "from": "agent", "milestone": 1,
       "data": "Heartbeat",
       "description": "Every `heartbeatSec` seconds after a successful hello."
+    },
+    {
+      "channel": "agent", "type": "agent.update", "kind": "request", "from": "panel", "milestone": 6,
+      "request": "AgentUpdateRequest", "response": "AgentUpdateStatus",
+      "description": "Replace the agent with the panel's build `sha256` and restart into it. Answers at once (`current`, or `downloading`); progress follows as `agent.updateStatus` events. The agent waits for running operations (installs, starts, stops, backups, file transfers) to finish before it restarts; game containers keep running. A newer request replaces a pending one. Agents older than M6 answer `unsupported`."
+    },
+    {
+      "channel": "agent", "type": "agent.updateStatus", "kind": "event", "from": "agent", "milestone": 6,
+      "data": "AgentUpdateStatus",
+      "description": "Progress of the update `agent.update` started: every state change, and `waitingFor` whenever it changes."
     }
   ],
   "$defs": {
@@ -34,9 +44,10 @@
         "disk": { "$ref": "#/$defs/DiskFacts" },
         "docker": { "oneOf": [{ "$ref": "#/$defs/DockerFacts" }, { "type": "null" }], "description": "null = Docker is not reachable on this host." },
         "egress": { "oneOf": [{ "$ref": "#/$defs/EgressFacts" }, { "type": "null" }], "description": "Egress filtering for game servers. null = not checked yet (the agent is still starting) or an agent older than this field; the panel stores a missing value as null." },
-        "boundPorts": { "oneOf": [{ "$ref": "#/$defs/BoundPorts" }, { "type": "null" }], "description": "Host ports other software already holds, so the panel's allocator skips them (M3). null = not read (not Linux) or an agent older than this field; the panel stores a missing value as null." }
+        "boundPorts": { "oneOf": [{ "$ref": "#/$defs/BoundPorts" }, { "type": "null" }], "description": "Host ports other software already holds, so the panel's allocator skips them (M3). null = not read (not Linux) or an agent older than this field; the panel stores a missing value as null." },
+        "agentBuild": { "oneOf": [{ "type": "string", "pattern": "^[0-9a-f]{64}$" }, { "type": "null" }], "description": "SHA-256 (hex) of the running gss-agent binary, read once at start (M6). The panel compares it with the build it serves for `os.arch` to tell whether the agent is out of date. null = it could not be read; a missing value (an agent older than this field) is stored as null." }
       },
-      "required": ["hostname", "agentVersion", "uptimeSec", "os", "cpu", "memory", "disk", "docker", "egress", "boundPorts"]
+      "required": ["hostname", "agentVersion", "uptimeSec", "os", "cpu", "memory", "disk", "docker", "egress", "boundPorts", "agentBuild"]
     },
     "OsFacts": {
       "type": "object",
@@ -153,6 +164,29 @@
         "facts": { "$ref": "#/$defs/HostFacts" }
       },
       "required": ["at", "facts"]
+    },
+    "AgentUpdateRequest": {
+      "type": "object",
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The build to install: the SHA-256 of `/api/agent/download/linux/<arch>` on the agent's own panel. The agent downloads only from its configured panel URL and refuses a file with any other digest." },
+        "force": { "type": "boolean", "description": "Install it even if this agent rolled that build back before (`.gss-agent-rejected`). The panel sets it for a manual update, never for an automatic one. Absent = false." }
+      },
+      "required": ["sha256"]
+    },
+    "AgentUpdateState": {
+      "type": "string",
+      "enum": ["current", "downloading", "waiting", "restarting", "failed"],
+      "description": "current: the agent already runs that build (nothing to do). downloading: fetching and verifying it. waiting: verified and staged next to the binary, waiting for `waitingFor` to finish. restarting: the binary was replaced and the agent restarts into it (it reconnects with the new `agentBuild`). failed: see `message`; the binary was not replaced."
+    },
+    "AgentUpdateStatus": {
+      "type": "object",
+      "properties": {
+        "state": { "$ref": "#/$defs/AgentUpdateState" },
+        "sha256": { "type": "string", "description": "The build this status is about." },
+        "message": { "type": "string", "description": "One readable sentence for people (why it failed, what it waits for); may be empty." },
+        "waitingFor": { "type": "array", "items": { "type": "string" }, "description": "While `waiting`: what still runs, e.g. `install of server 3f2a…`, `backup of server 3f2a…`. Empty otherwise." }
+      },
+      "required": ["state", "sha256", "message", "waitingFor"]
     }
   }
 }
