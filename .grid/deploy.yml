@@ -1,0 +1,5 @@
+# How Grid deploys Ionnet GSS (Grid's docs/deploys.md). Pushes to main redeploy gss.ionnet.dev on hostion.
+# Migrations run when the panel starts (AUTO_MIGRATE), so there is no `before` step.
+health:
+  url: http://127.0.0.1:3200/api/health
+  timeout: 300 # the first build compiles the web app and the agent
