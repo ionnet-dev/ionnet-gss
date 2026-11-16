@@ -1,8 +1,10 @@
 # Builds and publishes ghcr.io/ionnet-dev/ionnet-gss-base (linux/amd64): Debian with gss-init, compiled from agent/.
-# The game images (ionnet-gss-games) build on top of it; they rebuild every Monday, or run their workflow by hand
-# after a base change that should reach them sooner.
+# It is only rebuilt when its inputs changed (.github/scripts/image-inputs.sh): images/base/, the Go files gss-init is
+# built from (not the rest of the agent), go.mod/go.sum, or the exact golang/debian image behind a FROM line. The
+# image carries its inputs as labels, and the check compares against the published image's labels.
+# The game images (ionnet-gss-games) build on top of it; their daily check picks up a new base the same day.
 # Storage is kept small on purpose: no workflow artifacts, no build cache, no provenance/SBOM attestations, and the
-# package's untagged versions (the images `latest` pointed at before) are deleted after each run.
+# package's untagged versions (the images `latest` pointed at before) are deleted after each build.
 name: Base image
 
 on:
@@ -11,8 +13,16 @@ on:
     paths:
       - "agent/**"
       - "images/base/**"
+      - ".github/scripts/image-inputs.sh"
       - ".github/workflows/base-image.yml"
+  schedule:
+    - cron: "47 3 * * *" # Daily, before the game images' check: picks up republished golang/debian images.
   workflow_dispatch:
+    inputs:
+      force:
+        description: Build even when the inputs are unchanged
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,8 +32,50 @@ concurrency:
   group: base-image
   cancel-in-progress: false # Never stop halfway through publishing.
 
+env:
+  IMAGE: ghcr.io/ionnet-dev/ionnet-gss-base:latest
+
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      labels: ${{ steps.check.outputs.labels }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache: false # Nothing is kept between runs.
+      - id: check
+        name: Check whether the inputs changed
+        env:
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          set -euo pipefail
+          # The main module's Go files that gss-init is compiled from, as the Dockerfile builds it.
+          # shellcheck disable=SC2016 # The single quotes hold a Go template, not shell.
+          mapfile -t GO_FILES < <(cd agent && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go list -deps \
+            -f '{{if and .Module .Module.Main}}{{$dir := .Dir}}{{range .GoFiles}}{{$dir}}/{{.}}{{"\n"}}{{end}}{{range .EmbedFiles}}{{$dir}}/{{.}}{{"\n"}}{{end}}{{end}}' \
+            ./cmd/gss-init | sed -e "s|^$PWD/agent/|agent/|" -e '/^$/d')
+          echo "gss-init is built from ${#GO_FILES[@]} Go files."
+          FILES="$(.github/scripts/image-inputs.sh hash-files images/base/Dockerfile images/base/Dockerfile.dockerignore agent/go.mod agent/go.sum "${GO_FILES[@]}")"
+          OPTIONS=()
+          if [[ "${FORCE:-false}" == "true" ]]; then
+            OPTIONS+=(--force)
+          fi
+          RESULT="$(.github/scripts/image-inputs.sh check --image "$IMAGE" --dockerfile images/base/Dockerfile --files "$FILES" "${OPTIONS[@]}")"
+          echo "build=$(jq -r '.build' <<< "$RESULT")" >> "$GITHUB_OUTPUT"
+          {
+            echo "labels<<LABELS_END"
+            jq -r '.labels' <<< "$RESULT"
+            echo "LABELS_END"
+          } >> "$GITHUB_OUTPUT"
+          echo "\`$IMAGE\`: $(jq -r '.reason + (if .build then ", building" else ", skipped" end)' <<< "$RESULT")" >> "$GITHUB_STEP_SUMMARY"
+
   build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,18 +90,19 @@ jobs:
           context: .
           file: images/base/Dockerfile
           platforms: linux/amd64
-          tags: ghcr.io/ionnet-dev/ionnet-gss-base:latest
+          tags: ${{ env.IMAGE }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.description=Ionnet GSS base image: Debian with gss-init
-          pull: true # Always build on the newest Debian and Go images.
+            ${{ needs.check.outputs.labels }}
+          pull: true # Build on the golang/debian images the check just looked at.
           push: true
           provenance: false
           sbom: false
 
   cleanup:
-    needs: build
+    needs: build # Skipped with it when nothing was built.
     runs-on: ubuntu-latest
     steps:
       - name: Delete untagged versions of ionnet-gss-base

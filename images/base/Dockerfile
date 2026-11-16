@@ -8,7 +8,8 @@
 #   - /data (bind mount), /gss/spec (ro mount: spec.json + files/), /gss/run (rw mount: init.sock)
 # gss-init needs these capabilities when the agent drops the rest: CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL.
 # Build context is the repo root. Published as ghcr.io/ionnet-dev/ionnet-gss-base:latest by
-# .github/workflows/base-image.yml; `deno task images:build base` (images/build.sh) builds it locally.
+# .github/workflows/base-image.yml, only when its inputs changed (this folder, gss-init's Go files, the FROM images);
+# `deno task images:build base` (images/build.sh) builds it locally.
 
 FROM golang:1.27-trixie AS init
 WORKDIR /src

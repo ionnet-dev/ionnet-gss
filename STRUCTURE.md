@@ -309,7 +309,8 @@ gss-init ─state/console (NDJSON, /gss/run/init.sock)─► agent ─server.sta
   `ServerSpec.files`; template configs travel rendered in `ConfigMapping.content`.
 - **Images:** bare `ionnet-gss-*` in game.yml → `${IMAGE_REGISTRY}/ionnet-gss-*` (`:latest` when untagged).
   Base published from this repo, game images from the games repo (GHCR, linux/amd64, untagged versions deleted after
-  each run). Agents pull when an image is missing and again before every install (`images.Resolver.Refresh`); the
+  each build). Both rebuild only when their inputs changed (`.github/scripts/image-inputs.sh`, identical copy in the
+  games repo): files, build args and the digests of the FROM images, stored as `dev.ionnet.gss.inputs*` labels. Agents pull when an image is missing and again before every install (`images.Resolver.Refresh`); the
   container is recreated when its image ID differs from the tag's (`ContainerInfo.ImageID`).
 - **States:** gss-init owns `installing → stopped ⇄ starting → running → stopping`, `install_failed`, `crashed`; the
   panel row starts as `creating` and ends as `deleting` (below). A stop during `installing` cancels the install

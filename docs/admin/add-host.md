@@ -132,8 +132,10 @@ The game definitions refer to images such as `ionnet-gss-base` and `ionnet-gss-m
 
 | Image | Built from | Published by |
 | --- | --- | --- |
-| `ionnet-gss-base:latest` | `images/base/Dockerfile` in this repository (it compiles `gss-init` from `agent/`) | `.github/workflows/base-image.yml`, on every push that changes `agent/` or `images/base/` |
-| Game images, e.g. `ionnet-gss-minecraft-server:java21` | `<game>/image/` in [ionnet-gss-games](https://github.com/ionnet-dev/ionnet-gss-games) | that repository's `Images` workflow, on image changes and every Monday |
+| `ionnet-gss-base:latest` | `images/base/Dockerfile` in this repository (it compiles `gss-init` from `agent/`) | `.github/workflows/base-image.yml` |
+| Game images, e.g. `ionnet-gss-minecraft-server:java21` | `<game>/image/` in [ionnet-gss-games](https://github.com/ionnet-dev/ionnet-gss-games) | that repository's `Images` workflow |
+
+Both workflows rebuild an image only when what it is built from changed: its Dockerfile and files (for the base, the Go files `gss-init` is compiled from, not the rest of the agent), its build args, or the exact upstream image behind a `FROM` line (`debian:trixie-slim`, `eclipse-temurin:21-jre`, the base for the game images). They check on pushes, daily (the base at 03:47 UTC, the game images at 04:17 UTC, so a new base reaches the game images the same day) and on demand (**Run workflow**, with **force** to build anyway). Each image records its inputs as `dev.ionnet.gss.inputs*` labels, and the run summary says per image whether it was skipped or what changed.
 
 A host pulls an image the first time a server needs it, and again whenever a server installs or reinstalls, so a rebuilt image reaches a server at its next (re)install. Running servers keep their image until then. If the registry can't be reached, a host that already has the image uses its copy.
 
