@@ -131,13 +131,20 @@ func (m *manager) Provision(ctx context.Context, req protocol.ProvisionRequest) 
 
 	progress := m.consoleWriter(s)
 	defer progress.Close()
+	// Before an install (a new server or a reinstall), fetch the newest image for the tag, so published image updates
+	// reach servers when they install, and only then.
+	if req.Reinstall || !wasInstalled {
+		if err := m.opts.Images.Refresh(ctx, req.Spec.Image, progress); err != nil {
+			return protocol.ServerStatus{}, err
+		}
+	}
 	// The image to run: with `packages`, a derived image that changes when its base image does. A stopped server
 	// moves to it now; a running one keeps its container until it is stopped and provisioned again.
 	image, err := m.opts.Images.Ensure(ctx, req.Spec.Image, req.Spec.Packages, progress)
 	if err != nil {
 		return protocol.ServerStatus{}, err
 	}
-	if exists && !recreate && info.Image != image {
+	if exists && !recreate && (info.Image != image || m.imageMoved(ctx, image, info.ImageID)) {
 		if info.Running && isActive(current.State) {
 			slog.Info("the server's image changed; it moves to the new one when it is provisioned while stopped", "server", id, "image", image)
 		} else {
@@ -204,6 +211,16 @@ func (m *manager) Provision(ctx context.Context, req protocol.ProvisionRequest) 
 		slog.Warn("could not write the agent state file", "error", err)
 	}
 	return s.withServices(statusFrom(id, req.SpecHash, st)), nil
+}
+
+// imageMoved reports whether the tag image now points at a different image than the container runs (a newer one was
+// pulled under the same tag). Unknown (no ID, inspect failed) counts as unchanged.
+func (m *manager) imageMoved(ctx context.Context, image, runningID string) bool {
+	if runningID == "" {
+		return false
+	}
+	current, ok, err := m.opts.Docker.ImageInspect(ctx, image)
+	return err == nil && ok && current.ID != "" && current.ID != runningID
 }
 
 // ensureContainer makes the server's container exist for its current spec and run (gss-init idles while the game

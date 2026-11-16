@@ -93,9 +93,10 @@ agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
   internal/backups     M4: tar + zstd archives (Create/Extract, Matcher for `exclude`), pure
   internal/paths       host paths (Layout)
   packaging/           gss-agent.service
-images/                build.sh (deno task images:build; local tags only), base/ (Dockerfile builds gss-init from
-                       agent/; Dockerfile.dockerignore; has nftables for the agent's nft helper), minecraft-server/
-                       (ARG JAVA → :java8/17/21/25)
+images/                build.sh (deno task images:build [base|games [game]|all]; local tags only), base/ (Dockerfile
+                       builds gss-init from agent/; Dockerfile.dockerignore; has nftables for the agent's nft helper).
+                       Published by .github/workflows/base-image.yml. Game images live in the games repo
+                       (<game>/image/Dockerfile + image.yml), published by its Images workflow
 games/                 git submodule of ionnet-dev/ionnet-gss-games (public, the official source): the built-in
                        source of a panel run from source; the Docker image has none and seeds the repo as a git
                        source (`DefinitionSync.seedOfficial`, `OFFICIAL_SOURCE_URL`). README.md, minecraft-java/{game.yml, hooks/install.sh},
@@ -307,7 +308,9 @@ gss-init ─state/console (NDJSON, /gss/run/init.sock)─► agent ─server.sta
 - **Templates are rendered by the panel.** The agent and gss-init never see `{{…}}`. Hook files travel in
   `ServerSpec.files`; template configs travel rendered in `ConfigMapping.content`.
 - **Images:** bare `ionnet-gss-*` in game.yml → `${IMAGE_REGISTRY}/ionnet-gss-*` (`:latest` when untagged).
-  `images/build.sh` tags locally; agents pull only when an image is missing.
+  Base published from this repo, game images from the games repo (GHCR, linux/amd64, untagged versions deleted after
+  each run). Agents pull when an image is missing and again before every install (`images.Resolver.Refresh`); the
+  container is recreated when its image ID differs from the tag's (`ContainerInfo.ImageID`).
 - **States:** gss-init owns `installing → stopped ⇄ starting → running → stopping`, `install_failed`, `crashed`; the
   panel row starts as `creating` and ends as `deleting` (below). A stop during `installing` cancels the install
   (→ `install_failed`); an install running longer than `install_timeout` (default `INIT_INSTALL_TIMEOUT_SEC`, 2 h)

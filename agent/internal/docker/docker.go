@@ -39,6 +39,8 @@ type Client interface {
 	// ImageRemove removes an image without force: an image a container (running or not) uses is a conflict
 	// (IsConflict), a missing one is not an error (M3).
 	ImageRemove(ctx context.Context, ref string) error
+	// ImageTag points ref (`name:tag`) at the local image source (an ID or another reference).
+	ImageTag(ctx context.Context, source, ref string) error
 	// NetworkEnsure creates the per-server bridge network if missing (with labels and driver options, e.g.
 	// BridgeNameOption) and returns it. An existing network is returned as it is.
 	NetworkEnsure(ctx context.Context, name string, labels, options map[string]string) (NetworkInfo, error)
@@ -127,9 +129,12 @@ type Port struct {
 
 // ContainerInfo is the subset of inspect/list the agent uses.
 type ContainerInfo struct {
-	ID       string
-	Name     string
-	Image    string
+	ID    string
+	Name  string
+	Image string // The reference the container was created from (Config.Image), e.g. a tag.
+	// ImageID is the image the container actually runs (sha256:…); it differs from the tag's current image once a
+	// newer one was pulled under the same tag. Empty in lists.
+	ImageID  string
 	Labels   map[string]string
 	Running  bool
 	ExitCode int

@@ -1,0 +1,61 @@
+# Builds and publishes ghcr.io/ionnet-dev/ionnet-gss-base (linux/amd64): Debian with gss-init, compiled from agent/.
+# The game images (ionnet-gss-games) build on top of it; they rebuild every Monday, or run their workflow by hand
+# after a base change that should reach them sooner.
+# Storage is kept small on purpose: no workflow artifacts, no build cache, no provenance/SBOM attestations, and the
+# package's untagged versions (the images `latest` pointed at before) are deleted after each run.
+name: Base image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/**"
+      - "images/base/**"
+      - ".github/workflows/base-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: base-image
+  cancel-in-progress: false # Never stop halfway through publishing.
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/base/Dockerfile
+          platforms: linux/amd64
+          tags: ghcr.io/ionnet-dev/ionnet-gss-base:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=Ionnet GSS base image: Debian with gss-init
+          pull: true # Always build on the newest Debian and Go images.
+          push: true
+          provenance: false
+          sbom: false
+
+  cleanup:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete untagged versions of ionnet-gss-base
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ionnet-gss-base
+          package-type: container
+          delete-only-untagged-versions: "true"
+          min-versions-to-keep: 0

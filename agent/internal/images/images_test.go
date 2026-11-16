@@ -91,6 +91,9 @@ type fakeDocker struct {
 	gate    chan struct{}
 	removed []string
 	inUse   map[string]bool
+	pulls   int
+	pullTo  string // Image ID a pull leaves under the tag; "" = unchanged.
+	pullErr error
 }
 
 func (f *fakeDocker) ImageInspect(_ context.Context, ref string) (docker.ImageInfo, bool, error) {
@@ -138,6 +141,30 @@ func (f *fakeDocker) ImageRemove(_ context.Context, ref string) error {
 	}
 	delete(f.images, ref)
 	f.removed = append(f.removed, ref)
+	return nil
+}
+
+// ImagePull replaces ref with pullTo (a newer image under the same tag), or fails with pullErr.
+func (f *fakeDocker) ImagePull(_ context.Context, ref string, _ io.Writer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pulls++
+	if f.pullErr != nil {
+		if f.pullTo != "" {
+			f.images[ref] = docker.ImageInfo{ID: f.pullTo} // A pull that failed halfway, after moving the tag.
+		}
+		return f.pullErr
+	}
+	if f.pullTo != "" {
+		f.images[ref] = docker.ImageInfo{ID: f.pullTo}
+	}
+	return nil
+}
+
+func (f *fakeDocker) ImageTag(_ context.Context, source, ref string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.images[ref] = docker.ImageInfo{ID: source}
 	return nil
 }
 
@@ -210,5 +237,50 @@ func TestPrune(t *testing.T) {
 	}
 	if strings.Join(fake.removed, ",") != DerivedRepo+":old" {
 		t.Fatalf("removed %v; the in-use and the just built (%s) images must stay", fake.removed, fresh)
+	}
+}
+
+func TestRefresh(t *testing.T) {
+	cases := []struct {
+		name     string
+		present  bool
+		pullTo   string
+		pullErr  error
+		wantErr  bool
+		wantID   string
+		wantLine string
+	}{
+		{name: "newer image under the tag", present: true, pullTo: "sha256:new", wantID: "sha256:new", wantLine: "Pulled the newest base:1."},
+		{name: "already the newest", present: true, wantID: "sha256:base", wantLine: "base:1 is up to date."},
+		{name: "registry down, local copy used", present: true, pullErr: errors.New("connection refused"), wantID: "sha256:base", wantLine: "using the one on this host"},
+		{name: "registry down, nothing local", pullErr: errors.New("connection refused"), wantErr: true, wantLine: "Could not pull base:1"},
+		{name: "pull failed halfway, tag restored", present: true, pullTo: "sha256:broken", pullErr: errors.New("failed to unpack"), wantID: "sha256:base", wantLine: "using the one on this host"},
+		{name: "first pull", pullTo: "sha256:first", wantID: "sha256:first", wantLine: "Pulled the newest base:1."},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fake := newFake()
+			if !c.present {
+				delete(fake.images, "base:1")
+			}
+			fake.pullTo, fake.pullErr = c.pullTo, c.pullErr
+			var out bytes.Buffer
+			err := New(fake, nil).Refresh(context.Background(), "base:1", &out)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, want error %v", err, c.wantErr)
+			}
+			if fake.pulls != 1 {
+				t.Fatalf("pulls = %d, want 1 (always checks the registry)", fake.pulls)
+			}
+			if !strings.Contains(out.String(), c.wantLine) {
+				t.Fatalf("progress %q doesn't contain %q", out.String(), c.wantLine)
+			}
+			if c.wantID != "" && fake.images["base:1"].ID != c.wantID {
+				t.Fatalf("image ID = %s, want %s", fake.images["base:1"].ID, c.wantID)
+			}
+		})
+	}
+	if err := New(newFake(), nil).Refresh(context.Background(), "bad ref", nil); err == nil {
+		t.Fatal("a reference with a space must be refused")
 	}
 }

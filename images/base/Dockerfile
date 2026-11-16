@@ -7,7 +7,8 @@
 #   - user `gss` uid/gid 1000 (GAME_UID); the game and hooks run as it, gss-init itself runs as root
 #   - /data (bind mount), /gss/spec (ro mount: spec.json + files/), /gss/run (rw mount: init.sock)
 # gss-init needs these capabilities when the agent drops the rest: CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL.
-# Build context is the repo root: `deno task images:build` (images/build.sh). Nothing is pushed.
+# Build context is the repo root. Published as ghcr.io/ionnet-dev/ionnet-gss-base:latest by
+# .github/workflows/base-image.yml; `deno task images:build base` (images/build.sh) builds it locally.
 
 FROM golang:1.27-trixie AS init
 WORKDIR /src

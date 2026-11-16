@@ -128,21 +128,26 @@ Then remove the host in the panel (**Host page → Remove**). That is refused wh
 
 ## Game images
 
-The game definitions refer to images such as `ionnet-gss-base` and `ionnet-gss-minecraft-server`. Hosts pull an image only when it is missing, from `IMAGE_REGISTRY` (default `ghcr.io/ionnet-dev`). **Those images are not published yet.** They are built locally with:
+The game definitions refer to images such as `ionnet-gss-base` and `ionnet-gss-minecraft-server`, which hosts pull from `IMAGE_REGISTRY` (default `ghcr.io/ionnet-dev`). They are published there by CI, for linux/amd64:
+
+| Image | Built from | Published by |
+| --- | --- | --- |
+| `ionnet-gss-base:latest` | `images/base/Dockerfile` in this repository (it compiles `gss-init` from `agent/`) | `.github/workflows/base-image.yml`, on every push that changes `agent/` or `images/base/` |
+| Game images, e.g. `ionnet-gss-minecraft-server:java21` | `<game>/image/` in [ionnet-gss-games](https://github.com/ionnet-dev/ionnet-gss-games) | that repository's `Images` workflow, on image changes and every Monday |
+
+A host pulls an image the first time a server needs it, and again whenever a server installs or reinstalls, so a rebuilt image reaches a server at its next (re)install. Running servers keep their image until then. If the registry can't be reached, a host that already has the image uses its copy.
+
+The base image matters on every host even without a game that uses it directly, because the agent also uses it for the short-lived container that applies the firewall rules.
+
+To test an image change before publishing it, build it locally (needs a checkout of this repository with the `games` submodule):
 
 ```sh
-deno task images:build        # or: bash images/build.sh
+deno task images:build            # base and every game image; or: bash images/build.sh
+bash images/build.sh base         # only ionnet-gss-base
+bash images/build.sh games minecraft-java
 ```
 
-That builds `ionnet-gss-base:latest` and `ionnet-gss-minecraft-server:java8`, `:java17`, `:java21`, `:java25` under the `IMAGE_REGISTRY` prefix. The base image compiles `gss-init` from `agent/`, so the build needs a checkout of this repository.
-
-Until there is a registry, every host needs these images in its own Docker. Either run the build on the host (checkout plus Docker), or build once and copy:
-
-```sh
-docker save ghcr.io/ionnet-dev/ionnet-gss-base:latest ghcr.io/ionnet-dev/ionnet-gss-minecraft-server:java21 | ssh host docker load
-```
-
-(The `docker save` half was run and produced about 100 MB; the copy to another machine was not tried.) The base image matters on every host even without Minecraft, because the agent also uses it for the short-lived container that applies the firewall rules.
+Then load it on a test host (`docker save <image> | ssh host docker load`). The next install there pulls from the registry again, so a local-only image is replaced if the registry has the same tag.
 
 ## Ports and capacity
 

@@ -42,7 +42,7 @@ Writing games: the [ionnet-gss-games](https://github.com/ionnet-dev/ionnet-gss-g
 
 ## Current limits
 
-- The game images (`ionnet-gss-base`, `ionnet-gss-minecraft-server`) are only built locally so far with `deno task images:build`. They are not published to a registry yet, so a host needs them built on it, or loaded into its Docker, before the first server can start there. See [Add a host](docs/admin/add-host.md#game-images).
+- The game images are published for linux/amd64 only: `ionnet-gss-base` from this repository, the game images from [ionnet-gss-games](https://github.com/ionnet-dev/ionnet-gss-games). See [Add a host](docs/admin/add-host.md#game-images).
 - The install script was proven on Debian 12 and Arch Linux. Ubuntu is expected to work (it takes the Debian path) but was not tried.
 - Disk limits are soft: they are checked when a server starts and about once a minute while it runs, not enforced by the filesystem.
 

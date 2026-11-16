@@ -205,9 +205,10 @@ func (c *unixClient) ContainerWait(ctx context.Context, name string) (int, error
 
 func (c *unixClient) ContainerInspect(ctx context.Context, name string) (ContainerInfo, bool, error) {
 	var res struct {
-		ID     string `json:"Id"`
-		Name   string `json:"Name"`
-		Config struct {
+		ID      string `json:"Id"`
+		Name    string `json:"Name"`
+		ImageID string `json:"Image"`
+		Config  struct {
 			Image  string            `json:"Image"`
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
@@ -241,6 +242,7 @@ func (c *unixClient) ContainerInspect(ctx context.Context, name string) (Contain
 		ID:            res.ID,
 		Name:          strings.TrimPrefix(res.Name, "/"),
 		Image:         res.Config.Image,
+		ImageID:       res.ImageID,
 		Labels:        res.Config.Labels,
 		Running:       res.State.Running,
 		ExitCode:      res.State.ExitCode,

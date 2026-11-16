@@ -104,6 +104,17 @@ func (c *unixClient) ImageRemove(ctx context.Context, ref string) error {
 	return nil
 }
 
+func (c *unixClient) ImageTag(ctx context.Context, source, ref string) error {
+	name, tag := SplitImageRef(ref)
+	if tag == "" {
+		return fmt.Errorf("tag %s: %s is a digest, not a tag", source, ref)
+	}
+	if err := c.call(ctx, http.MethodPost, "/images/"+source+"/tag", url.Values{"repo": {name}, "tag": {tag}}, nil, nil); err != nil {
+		return fmt.Errorf("tag %s as %s: %w", source, ref, err)
+	}
+	return nil
+}
+
 func (c *unixClient) ImageBuild(ctx context.Context, tag, dockerfile string, labels map[string]string, network string, progress io.Writer) error {
 	var buildContext bytes.Buffer
 	archive := tar.NewWriter(&buildContext)

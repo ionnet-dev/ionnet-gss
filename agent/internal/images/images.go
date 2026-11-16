@@ -61,6 +61,10 @@ type Resolver interface {
 	//   USER <the base image's user>
 	// Concurrent calls for the same hash share one build. A failed build is not cached.
 	Ensure(ctx context.Context, image string, packages []string, progress io.Writer) (ref string, err error)
+	// Refresh pulls image even when it is on the host already, so a moved tag (java21, latest) brings the newer image
+	// before an install. When the pull fails, an image already on the host is used as it is (a warning goes to
+	// progress); without one the error is returned.
+	Refresh(ctx context.Context, image string, progress io.Writer) error
 	// Prune removes derived images no container uses any more (called after Delete).
 	Prune(ctx context.Context) error
 }
@@ -191,6 +195,47 @@ func (r *resolver) Ensure(ctx context.Context, image string, packages []string, 
 		}
 		// Built: the next round finds it (or, if it vanished meanwhile, builds again).
 	}
+}
+
+func (r *resolver) Refresh(ctx context.Context, image string, progress io.Writer) error {
+	if progress == nil {
+		progress = io.Discard
+	}
+	if image == "" || strings.ContainsAny(image, " \t\r\n") {
+		return fmt.Errorf("%q is not an image reference", image)
+	}
+	before, existed, err := r.docker.ImageInspect(ctx, image)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(progress, "Checking for a newer %s...\n", image)
+	if err := r.docker.ImagePull(ctx, image, nil); err != nil {
+		if existed {
+			// A pull that fails halfway can leave the tag on an image that never finished unpacking: point it back.
+			if now, ok, inspectErr := r.docker.ImageInspect(ctx, image); inspectErr != nil || !ok || now.ID != before.ID {
+				if tagErr := r.docker.ImageTag(ctx, before.ID, image); tagErr != nil {
+					fmt.Fprintf(progress, "Could not pull %s (%v), and the copy on this host couldn't be restored: %v\n", image, err, tagErr)
+					return fmt.Errorf("image %s could not be pulled, and the copy on this host couldn't be restored: %w", image, tagErr)
+				}
+			}
+			fmt.Fprintf(progress, "Could not check for a newer %s (%v); using the one on this host.\n", image, err)
+			slog.Warn("image refresh failed, using the local copy", "image", image, "error", err)
+			return nil
+		}
+		fmt.Fprintf(progress, "Could not pull %s: %v\n", image, err)
+		return fmt.Errorf("image %s is not on this host and could not be pulled (check the name and that the host can reach its registry): %w", image, err)
+	}
+	after, _, err := r.docker.ImageInspect(ctx, image)
+	if err != nil {
+		return err
+	}
+	if existed && after.ID == before.ID {
+		fmt.Fprintf(progress, "%s is up to date.\n", image)
+	} else {
+		fmt.Fprintf(progress, "Pulled the newest %s.\n", image)
+		slog.Info("pulled image", "image", image, "id", after.ID)
+	}
+	return nil
 }
 
 // ensureBase pulls the base image only when it is missing and returns its inspect.
