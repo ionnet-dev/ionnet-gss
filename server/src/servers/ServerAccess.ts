@@ -27,6 +27,38 @@ export namespace ServerAccess {
   const _sharedWith = new Map<string, Set<number>>();
 
   /**
+   * Revocation log for live subscribes: a logical clock and, per `serverId:userId` (or `serverId:*` for a deleted
+   * server), the clock value when access was last taken away. A subscribe that awaited its database check compares
+   * against it (`revokedSince`) right before it adds the topic, so a removal that ran in that gap isn't undone.
+   * Bounded: only removals made within one subscribe's await matter, so the oldest entries are dropped past the cap.
+   */
+  let _clock = 0;
+  const _revoked = new Map<string, number>();
+  const REVOKED_CAP = 1000;
+
+  function revoke(serverId: string, userId: number | "*"): void {
+    const key = `${serverId}:${userId}`;
+    _revoked.delete(key); // Re-insert so the Map stays ordered by time.
+    _revoked.set(key, ++_clock);
+    if (_revoked.size > REVOKED_CAP) _revoked.delete(_revoked.keys().next().value!);
+  }
+
+  /**
+   * The current value of the revocation clock. Read it before an `await` that decides access, then pass it to
+   * `revokedSince` after.
+   */
+  export function clock(): number {
+    return _clock;
+  }
+
+  /**
+   * Whether the user's access to the server (or the server itself) was removed after `since` (a `clock()` value).
+   */
+  export function revokedSince(serverId: string, userId: number, since: number): boolean {
+    return (_revoked.get(`${serverId}:${userId}`) ?? 0) > since || (_revoked.get(`${serverId}:*`) ?? 0) > since;
+  }
+
+  /**
    * What a user can list: everything (SERVERS_MANAGE_ALL), else their own servers plus `shared`.
    */
   export interface Scope {
@@ -38,7 +70,8 @@ export namespace ServerAccess {
    * Load the audience index from `server_shares`. Called once at startup, after the database is up.
    */
   export async function init(): Promise<void> {
-    // TODO(builder): M5 sharing. Fill `_sharedWith` from `ServerShare.allPairs()`.
+    _sharedWith.clear();
+    for (const [serverId, userId] of await ServerShare.allPairs()) rememberShare(serverId, userId);
   }
 
   /**
@@ -76,8 +109,12 @@ export namespace ServerAccess {
    * What `user` may list (`GameServerService.list`).
    */
   export async function scopeOf(user: User): Promise<Scope> {
-    // TODO(builder): M5 sharing. Load the user's shares into `shared`.
-    return { all: user.hasPermission("SERVERS_MANAGE_ALL"), shared: new Map() };
+    const all = user.hasPermission("SERVERS_MANAGE_ALL");
+    const shared = new Map<string, ServerShare.Role>();
+    if (all) return { all, shared };
+    const rows = await ServerShare.findAll({ where: { userId: user.id }, attributes: ["serverId", "role"] });
+    for (const row of rows) shared.set(row.serverId, row.role);
+    return { all, shared };
   }
 
   /**
@@ -100,14 +137,20 @@ export namespace ServerAccess {
    * Add a share to the audience index (after the row is stored).
    */
   export function rememberShare(serverId: string, userId: number): void {
-    // TODO(builder): M5 sharing
+    let users = _sharedWith.get(serverId);
+    if (!users) _sharedWith.set(serverId, users = new Set());
+    users.add(userId);
   }
 
   /**
    * Remove a share from the audience index (after the row is deleted).
    */
   export function forgetShare(serverId: string, userId: number): void {
-    // TODO(builder): M5 sharing
+    revoke(serverId, userId);
+    const users = _sharedWith.get(serverId);
+    if (!users) return;
+    users.delete(userId);
+    if (users.size === 0) _sharedWith.delete(serverId);
   }
 
   /**
@@ -115,8 +158,10 @@ export namespace ServerAccess {
    * @returns The user ids it was shared with (so the caller can drop their topics).
    */
   export function forgetServer(serverId: string): number[] {
-    // TODO(builder): M5 sharing
-    return [];
+    revoke(serverId, "*");
+    const users = _sharedWith.get(serverId);
+    _sharedWith.delete(serverId);
+    return users ? [...users] : [];
   }
 
   function notFound(): HttpError {

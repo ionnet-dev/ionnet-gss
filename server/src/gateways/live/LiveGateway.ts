@@ -8,6 +8,7 @@ import type { Permission } from "@shared/permissions.ts";
 import { Config } from "../../Config.ts";
 import { User } from "../../models/index.ts";
 import { GameServerService } from "../../servers/GameServerService.ts";
+import { ServerAccess } from "../../servers/ServerAccess.ts";
 
 const WS_OPEN = 1;
 const SWEEP_INTERVAL_MS = 60_000;
@@ -142,7 +143,11 @@ export class LiveGateway {
             LiveGateway.send(ws, { t: "error", message: `You can follow at most ${MAX_TOPICS} streams at once.`, topic });
             break;
           }
-          if (!await GameServerService.canAccess(client.userId, match[1].toLowerCase())) {
+          const checkedAt = ServerAccess.clock();
+          const serverId = match[1].toLowerCase();
+          // No await between the revocation check and `topics.add`: a share removed (or a server deleted) while the
+          // database check ran has already called `dropTopic`, which found nothing to drop.
+          if (!await GameServerService.canAccess(client.userId, serverId) || ServerAccess.revokedSince(serverId, client.userId, checkedAt)) {
             LiveGateway.send(ws, { t: "error", message: "There is no game server with that id that you may follow.", topic });
             break;
           }
@@ -196,17 +201,20 @@ export class LiveGateway {
   }
 
   /**
-   * Close a user's sockets, e.g. with LIVE_CLOSE.UNAUTHORIZED after a password change or LIVE_CLOSE.RECONNECT after a
-   * role change.
-   */
-  /**
    * Unsubscribe a user's sockets from a topic (M5: a removed share), telling each with `{ t: "error", topic }` so the
    * client stops expecting the stream.
    */
   public static dropTopic(userId: number, topic: LiveTopic): void {
-    // TODO(builder): M5 sharing
+    for (const client of LiveGateway._clients) {
+      if (client.userId !== userId || !client.topics.delete(topic)) continue;
+      LiveGateway.send(client.ws, { t: "error", message: "You no longer have access to this server.", topic });
+    }
   }
 
+  /**
+   * Close a user's sockets, e.g. with LIVE_CLOSE.UNAUTHORIZED after a password change or LIVE_CLOSE.RECONNECT after a
+   * role change.
+   */
   public static closeUser(userId: number, code: number, reason: string): void {
     for (const client of LiveGateway._clients) {
       if (client.userId !== userId) continue;

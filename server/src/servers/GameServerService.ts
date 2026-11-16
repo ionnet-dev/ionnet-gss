@@ -121,6 +121,10 @@ export namespace GameServerService {
    */
   const _agentSpecHash = new Map<string, string>();
   /**
+   * `_agentSpecHash` value for "the agent may have either spec": never equal to a row's hash.
+   */
+  const UNKNOWN_SPEC_HASH = "unknown";
+  /**
    * Per-server lock: the tail of each server's chain of mutating operations.
    */
   const _locks = new Map<string, Promise<void>>();
@@ -228,11 +232,13 @@ export namespace GameServerService {
     await checkDynamicOptions(decls, values, Object.keys(variables), user.isAdmin());
     const limits = DefinitionEngine.resolveLimits(decls, values, DEFAULT_LIMITS);
     const services = DefinitionEngine.serviceTotals(definition.document);
-    // TODO(builder): M5 quota. Move this check into the transaction below, before the host lock (order: user, host).
-    await Quota.assertFits(user.id, { servers: 1, memoryMb: limits.memoryMb + services.memoryMb, cpuMillis: limits.cpuMillis + services.cpuMillis, diskMb: limits.diskMb });
 
     const id = crypto.randomUUID();
-    const built = await sequelize.transaction(async (transaction) => {
+    const built = await Quota.transaction(async (transaction) => {
+      // Quota first (it locks the user's row), then the host: order user, host. READ COMMITTED (`Quota.transaction`),
+      // so the capacity and port reads after the host lock see what other users' creates committed meanwhile. The row
+      // inserted below is what the next create of this user sees once it gets the user lock.
+      await Quota.assertFits(user.id, { servers: 1, memoryMb: limits.memoryMb + services.memoryMb, cpuMillis: limits.cpuMillis + services.cpuMillis, diskMb: limits.diskMb }, transaction);
       const locked = await Host.findByPk(host.id, { transaction, lock: transaction.LOCK.UPDATE });
       if (!locked) throw HttpError.notFound("There is no host with that id.");
       await assertHostCapacity(locked, limits, null, definition.document, transaction);
@@ -320,17 +326,22 @@ export namespace GameServerService {
       cpuMillis: Math.max(0, limits.cpuMillis - server.cpuMillis),
       diskMb: Math.max(0, limits.diskMb - server.diskMb),
     };
-    if (grown.memoryMb || grown.cpuMillis || grown.diskMb) {
-      // TODO(builder): M5 quota. One transaction: lock user, then host; check both; write the new limits; provision
-      // after commit and write the old limits back if it fails. Pass `{ actorId: user.id }`.
-      await Quota.assertFits(server.ownerId, grown);
-      await assertHostCapacity(server.host!, limits, server.id, definition.document);
-    }
-
+    // Render first: nothing to take back when the values don't render.
     const built = await specFor(definition, { id: server.id, name, variables: values, limits, autostart, autoRestart, allowPrivateNetwork }, server.ports!);
-    if (built.specHash !== server.specHash || reinstall) {
-      const status = await provision(server.hostId, built.spec, built.specHash, reinstall);
-      await storeStatus(server.id, status);
+
+    // Growth: check the owner's quota (user lock) and the host (host lock) and write the new limits in one transaction,
+    // so a concurrent check for the same owner or host sees them; provision after commit, put the old ones back if it fails.
+    const reserved = grown.memoryMb > 0 || grown.cpuMillis > 0 || grown.diskMb > 0;
+    if (reserved) await reserveLimits(user, server, grown, limits, definition.document);
+    try {
+      if (built.specHash !== server.specHash || reinstall) {
+        const status = await provision(server.hostId, built.spec, built.specHash, reinstall);
+        await storeStatus(server.id, status);
+      }
+    } catch (error) {
+      forgetAgentSpecIfUnanswered(server.id, error);
+      if (reserved) await restoreLimits(server);
+      throw error;
     }
     await GameServer.update({
       name,
@@ -345,6 +356,41 @@ export namespace GameServerService {
     }, { where: { id: server.id } });
     pushUpdated(server.ownerId, server.id);
     return { server: await detail(user, server.id), reinstallPending: reinstall };
+  }
+
+  /**
+   * Check the owner's quota and the host's capacity for grown limits and write them, in one transaction (user lock,
+   * then host lock), so concurrent checks for the same owner or host see them. `restoreLimits` takes them back.
+   */
+  async function reserveLimits(user: User, server: GameServer, grown: Quota.Delta, limits: Limits, document: GameDefinition): Promise<void> {
+    await Quota.transaction(async (transaction) => {
+      await Quota.assertFits(server.ownerId, grown, transaction, { actorId: user.id });
+      const host = await Host.findByPk(server.hostId, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!host) throw HttpError.notFound("The server's host no longer exists.");
+      await assertHostCapacity(host, limits, server.id, document, transaction);
+      await GameServer.update({ memoryMb: limits.memoryMb, cpuMillis: limits.cpuMillis, diskMb: limits.diskMb }, { where: { id: server.id }, transaction });
+    });
+  }
+
+  /**
+   * Put the row's limits back to what `server` was loaded with, after a change that reserved bigger ones failed.
+   */
+  async function restoreLimits(server: GameServer): Promise<void> {
+    try {
+      await GameServer.update({ memoryMb: server.memoryMb, cpuMillis: server.cpuMillis, diskMb: server.diskMb }, { where: { id: server.id } });
+    } catch (error) {
+      console.error(`server ${server.id}: could not put the old limits back after a failed change`, error);
+    }
+  }
+
+  /**
+   * After a provision without an answer (504 timeout, 503 dropped connection) the agent may hold the new spec while
+   * the row keeps the old one. A dropped connection ends in a hello, whose `reconcileOne` provisions the row's spec
+   * for a stopped server; a timeout on a live connection doesn't, and `_agentSpecHash` would still name the old spec.
+   * Mark it unknown, so `startOnAgent` provisions the row's spec before the next start.
+   */
+  function forgetAgentSpecIfUnanswered(serverId: string, error: unknown): void {
+    if (error instanceof HttpError && (error.status === 503 || error.status === 504)) _agentSpecHash.set(serverId, UNKNOWN_SPEC_HASH);
   }
 
   export async function start(user: User, serverId: string): Promise<GameServerDto> {
@@ -453,11 +499,7 @@ export namespace GameServerService {
       cpuMillis: Math.max(0, limits.cpuMillis + after.cpuMillis - (server.cpuMillis + before.cpuMillis)),
       diskMb: Math.max(0, limits.diskMb - server.diskMb),
     };
-    if (grown.memoryMb || grown.cpuMillis || grown.diskMb) {
-      // TODO(builder): M5 quota. Same as updateLocked: check and write the limits under the user and host locks.
-      await Quota.assertFits(server.ownerId, grown);
-      await assertHostCapacity(server.host!, limits, server.id, target.document);
-    }
+    const reserved = grown.memoryMb > 0 || grown.cpuMillis > 0 || grown.diskMb > 0;
 
     // Did the install change? Compare what the agent would run: the rendered steps and the hook files they call.
     let oldPrint: string | null = null;
@@ -475,15 +517,34 @@ export namespace GameServerService {
     // port of it goes to another server.
     const changedPorts = portChanges(target.document, server.ports!);
     let created: PortAllocation[] = [];
-    if (changedPorts.add.length) {
-      created = await sequelize.transaction(async (transaction) => {
-        const host = await Host.findByPk(server.hostId, { transaction, lock: transaction.LOCK.UPDATE });
-        if (!host) throw HttpError.notFound("The server's host no longer exists.");
-        return await PortAllocation.allocate(host, server.id, changedPorts.add, transaction);
-      });
+    // Growth: like updateLocked, quota (user lock), then host capacity and new ports (host lock), and the new limits
+    // written, in one transaction. The row keeps the old definition until the agent has the new spec, so bigger stack
+    // services are held in `Quota` meanwhile, counted by quota usage and host capacity (released in the finally below,
+    // after the row shows them or the old limits are back).
+    const servicesGrown = { memoryMb: Math.max(0, after.memoryMb - before.memoryMb), cpuMillis: Math.max(0, after.cpuMillis - before.cpuMillis) };
+    if (reserved || changedPorts.add.length) {
+      try {
+        created = await Quota.transaction(async (transaction) => {
+          if (reserved) {
+            await Quota.assertFits(server.ownerId, grown, transaction, { actorId: user.id });
+            if (servicesGrown.memoryMb || servicesGrown.cpuMillis) Quota.hold(server.id, servicesGrown);
+          }
+          const host = await Host.findByPk(server.hostId, { transaction, lock: transaction.LOCK.UPDATE });
+          if (!host) throw HttpError.notFound("The server's host no longer exists.");
+          if (reserved) {
+            await assertHostCapacity(host, limits, server.id, target.document, transaction);
+            await GameServer.update({ memoryMb: limits.memoryMb, cpuMillis: limits.cpuMillis, diskMb: limits.diskMb }, { where: { id: server.id }, transaction });
+          }
+          return changedPorts.add.length ? await PortAllocation.allocate(host, server.id, changedPorts.add, transaction) : [];
+        });
+      } catch (error) {
+        Quota.release(server.id);
+        throw error;
+      }
     }
     const specValues: SpecValues = { id: server.id, name: server.name, variables: values, limits, autostart: server.autostart, autoRestart: server.autoRestart, allowPrivateNetwork: server.allowPrivateNetwork };
     let sent = false;
+    let committed = false; // The row has the new version.
     try {
       let built = await specFor(target, specValues, [...changedPorts.keep, ...created]);
       let status: ServerStatus;
@@ -509,10 +570,15 @@ export namespace GameServerService {
           specHash: built.specHash,
         }, { where: { id: server.id }, transaction });
       });
+      committed = true;
       await storeStatus(server.id, status);
     } catch (error) {
+      forgetAgentSpecIfUnanswered(server.id, error);
+      if (reserved && !committed) await restoreLimits(server);
       await rollbackUpgrade(server, sent);
       throw error;
+    } finally {
+      Quota.release(server.id);
     }
     pushUpdated(server.ownerId, server.id);
     return { server: await detail(user, server.id), reinstall };
@@ -1228,13 +1294,14 @@ export namespace GameServerService {
   async function assertHostCapacity(host: Host, limits: Limits, excludeId: string | null, document: GameDefinition, transaction?: Transaction): Promise<void> {
     const others = await GameServer.findAll({
       where: { hostId: host.id, ...(excludeId ? { id: { [Op.ne]: excludeId } } : {}) },
-      attributes: ["memoryMb", "cpuMillis", "diskMb"],
+      attributes: ["id", "memoryMb", "cpuMillis", "diskMb"],
       include: [{ association: "definition", attributes: ["id", "document"] }],
       transaction,
     });
+    // `Quota.heldFor`: bigger stack services of an upgrade in progress, whose row still names the old definition.
     const used = {
-      memoryMb: others.reduce((sum, row) => sum + row.memoryMb + DefinitionEngine.serviceTotals(row.definition!.document).memoryMb, 0),
-      cpuMillis: others.reduce((sum, row) => sum + row.cpuMillis + DefinitionEngine.serviceTotals(row.definition!.document).cpuMillis, 0),
+      memoryMb: others.reduce((sum, row) => sum + row.memoryMb + DefinitionEngine.serviceTotals(row.definition!.document).memoryMb + (Quota.heldFor(row.id)?.memoryMb ?? 0), 0),
+      cpuMillis: others.reduce((sum, row) => sum + row.cpuMillis + DefinitionEngine.serviceTotals(row.definition!.document).cpuMillis + (Quota.heldFor(row.id)?.cpuMillis ?? 0), 0),
       diskMb: others.reduce((sum, row) => sum + row.diskMb, 0),
     };
     const own = DefinitionEngine.serviceTotals(document);

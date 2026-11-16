@@ -153,9 +153,7 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
 
   /**
    * @param online From `AgentGateway.isOnline(this.id)`.
-   * @param serverCount Game servers on this host (0 in M1).
-   */
-  /**
+   * @param serverCount Game servers on this host.
    * @param canCreate The caller may create servers here (M5: SERVERS_CREATE and SERVERS_MANAGE_ALL or a grant).
    */
   public toClientJSON(online: boolean, serverCount: number, canCreate = false): HostDto {
@@ -172,16 +170,16 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
       capacity: { maxMemoryMb: this.maxMemoryMb, maxCpuMillis: this.maxCpuMillis, maxDiskMb: this.maxDiskMb },
       serverCount,
       facts: this.facts,
-      canCreate, // TODO(builder): M5 grants. Callers pass it (HostController list and detail).
+      canCreate,
     };
   }
 
   /**
    * Needs `grants` (with `user`) loaded when `includeGrants`.
    */
-  public toDetailJSON(online: boolean, serverCount: number, includeGrants: boolean): HostDetailResponse {
+  public toDetailJSON(online: boolean, serverCount: number, includeGrants: boolean, canCreate = false): HostDetailResponse {
     return {
-      ...this.toClientJSON(online, serverCount),
+      ...this.toClientJSON(online, serverCount, canCreate),
       grants: includeGrants
         ? (this.grants ?? []).map((grant) => ({
           userId: grant.userId,

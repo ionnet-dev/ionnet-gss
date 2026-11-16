@@ -8,7 +8,8 @@ import {
   type Sequelize,
   type Transaction,
 } from "sequelize";
-import { HttpError } from "../lib/HttpError.ts";
+import { LIMITS } from "@shared/constants.ts";
+import { sha256Hex } from "../lib/tokens.ts";
 import { ID, intFk } from "./columns.ts";
 import type { User } from "./User.ts";
 
@@ -40,7 +41,9 @@ export class RecoveryCode extends Model<InferAttributes<RecoveryCode>, InferCrea
    * (see `LIMITS.RECOVERY_CODE_PATTERN`).
    */
   public static normalize(code: string): string | null {
-    throw HttpError.notImplemented("RecoveryCode.normalize"); // TODO(builder): M5
+    const value = code.toLowerCase().replace(/\s/g, "");
+    if (!LIMITS.RECOVERY_CODE_PATTERN.test(value)) return null;
+    return value.replace(/-/g, "");
   }
 
   /**
@@ -48,7 +51,15 @@ export class RecoveryCode extends Model<InferAttributes<RecoveryCode>, InferCrea
    * @returns The plain codes, formatted `xxxxx-xxxxx`, to show once.
    */
   public static async issue(userId: number, transaction?: Transaction): Promise<string[]> {
-    throw HttpError.notImplemented("RecoveryCode.issue"); // TODO(builder): M5
+    const codes = Array.from({ length: LIMITS.RECOVERY_CODES }, () => RecoveryCode.generate());
+    const rows = await Promise.all(codes.map(async (code) => ({ userId, codeHash: await sha256Hex(RecoveryCode.normalize(code)!), usedAt: null })));
+    const replace = async (t: Transaction): Promise<void> => {
+      await RecoveryCode.removeAll(userId, t);
+      await RecoveryCode.bulkCreate(rows, { transaction: t });
+    };
+    if (transaction) await replace(transaction);
+    else await RecoveryCode.sequelize!.transaction(replace);
+    return codes;
   }
 
   /**
@@ -57,7 +68,20 @@ export class RecoveryCode extends Model<InferAttributes<RecoveryCode>, InferCrea
    * @returns Whether the code was valid and unused.
    */
   public static async consume(userId: number, code: string): Promise<boolean> {
-    throw HttpError.notImplemented("RecoveryCode.consume"); // TODO(builder): M5
+    const normalized = RecoveryCode.normalize(code);
+    if (normalized === null) return false;
+    const codeHash = await sha256Hex(normalized);
+    const [affected] = await RecoveryCode.update({ usedAt: new Date() }, { where: { userId, codeHash, usedAt: null } });
+    return affected === 1;
+  }
+
+  /**
+   * One random code, `xxxxx-xxxxx`. Each character is a random byte's low 5 bits (256 is a multiple of 32, so no bias).
+   */
+  private static generate(): string {
+    const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+    const chars = Array.from(crypto.getRandomValues(new Uint8Array(10)), (byte) => alphabet[byte & 31]).join("");
+    return `${chars.slice(0, 5)}-${chars.slice(5)}`;
   }
 
   /**

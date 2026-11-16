@@ -28,7 +28,7 @@ export default function EnrolDialog(props: EnrolDialogProps) {
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Content
         title="Enrol a host"
-        description="Add a machine that runs gss-agent. The command below works once and expires."
+        description="Add a machine that runs gss-agent. The token below works once and expires."
         size="lg"
       >
         <EnrolForm onClose={() => onOpenChange(false)} />
@@ -58,18 +58,32 @@ function EnrolForm(props: { onClose: () => void }) {
   };
 
   if (created) {
+    // The panel adds --insecure to the enrol command exactly when its address is plain http:// on another machine.
+    const insecure = created.command.includes(" --insecure");
     return (
       <>
         <Dialog.Body>
           <Stack gap="16">
+            {insecure && (
+              <span role="alert" style={{ color: "var(--io-color-hue-text-warn)" }}>
+                This panel is on plain http://, so the script and the agent download can be altered on the way. Only use it on a trusted network; use HTTPS for real hosts.
+              </span>
+            )}
             <Stack gap="8">
-              <span>On the machine, install <span className="io-mono">gss-agent</span> and make sure Docker is running. Then run:</span>
-              <CodeBlock code={created.command} language="bash" title="Enrol" wrap copyLabel="Copy enrol command" />
+              <span>On the machine (Arch Linux, or Debian/Ubuntu with systemd), run this as a user who can use <span className="io-mono">sudo</span>. It installs Docker if needed, downloads the agent from this panel, enrols the host and starts it:</span>
+              <CodeBlock code={created.installCommand} language="bash" title="Install and enrol" wrap copyLabel="Copy install command" />
+            </Stack>
+            <Stack gap="8">
+              <span>The script asks for this token (<span className="io-mono">Enrol token:</span>). Paste it there; it isn't shown or stored in the shell history.</span>
+              <CodeBlock code={created.token} language="text" title="Enrol token" wrap copyLabel="Copy enrol token" />
+            </Stack>
+            <Stack gap="8">
+              <span>Already have <span className="io-mono">gss-agent</span> on the machine? Enrol it by hand, paste the token when it waits for input, then start it with <span className="io-mono">sudo systemctl enable --now gss-agent</span>:</span>
+              <CodeBlock code={created.command} language="bash" title="Enrol only" wrap copyLabel="Copy enrol command" />
             </Stack>
             <span className="io-text-muted">
-              Expires {formatDateTime(created.enrolToken.expiresAt)}. Once it is enrolled, start the agent with{" "}
-              <span className="io-mono">sudo systemctl enable --now gss-agent</span>. The host shows up in the list as soon as it connects.
-              This command is not shown again.
+              Expires {formatDateTime(created.enrolToken.expiresAt)} and works once. The host shows up in the list as soon as it connects.
+              The token is not shown again.
             </span>
           </Stack>
         </Dialog.Body>

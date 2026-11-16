@@ -2,7 +2,7 @@
  * Who is signed in, and what they may do. Created once (`authController`); components read it with `useAuth()`.
  * Owns the session lifecycle: first-run check, login (+ TOTP step), register, sign-out, and the live socket.
  */
-import type { ChangePasswordBody, LoginBody, LoginResponse, RegisterBody, SetupBody } from "@shared/api/auth.ts";
+import type { ChangePasswordBody, LoginBody, LoginResponse, RecoveryCodesBody, RegisterBody, SetupBody, TotpDisableBody } from "@shared/api/auth.ts";
 import type { UserDto } from "@shared/api/users.ts";
 import type { Permission } from "@shared/permissions.ts";
 import { AuthApi } from "@/Api/AuthApi.ts";
@@ -109,14 +109,36 @@ export class AuthController extends Controller {
    * Change the password. The panel ends every other session and answers with a fresh one for this tab.
    */
   public async changePassword(body: ChangePasswordBody): Promise<void> {
-    this._expectUnauthorized = true;
-    try {
-      const response = await AuthApi.changePassword(body);
-      this.applySession(response.token, response.user);
-    } finally {
-      this._expectUnauthorized = false;
-    }
+    const response = await this._allowUnauthorized(() => AuthApi.changePassword(body));
+    this.applySession(response.token, response.user);
   }
+
+  //#region Two-factor (M5)
+  /**
+   * Turn two-factor on with a code for the pending secret (`AuthApi.setupTotp`).
+   * @returns The recovery codes, which the panel sends only this once.
+   */
+  public async confirmTotp(code: string): Promise<string[]> {
+    const response = await AuthApi.confirmTotp({ code });
+    this._setUser(response.user);
+    return response.recoveryCodes;
+  }
+
+  /**
+   * Turn two-factor off. A wrong password or code answers 401, which here doesn't sign out.
+   */
+  public async disableTotp(body: TotpDisableBody): Promise<void> {
+    this._setUser(await this._allowUnauthorized(() => AuthApi.disableTotp(body)));
+  }
+
+  /**
+   * Replace every recovery code. Same proof as `disableTotp()`.
+   * @returns The new codes, shown once.
+   */
+  public async regenerateRecoveryCodes(body: RecoveryCodesBody): Promise<string[]> {
+    return (await this._allowUnauthorized(() => AuthApi.regenerateRecoveryCodes(body))).recoveryCodes;
+  }
+  //#endregion
 
   /**
    * Store a fresh session the panel handed out outside the sign-in flow, e.g. `UpdateUserResponse.token` after the
@@ -144,6 +166,24 @@ export class AuthController extends Controller {
     BaseApi.clearSession();
     liveSocket.disconnect();
     this.user = null;
+    this.notify();
+  }
+
+  /**
+   * Run a request whose 401 means a wrong password or code, not an ended session.
+   */
+  private async _allowUnauthorized<T>(request: () => Promise<T>): Promise<T> {
+    this._expectUnauthorized = true;
+    try {
+      return await request();
+    } finally {
+      this._expectUnauthorized = false;
+    }
+  }
+
+  private _setUser(user: UserDto): void {
+    BaseApi.setUser(user);
+    this.user = user;
     this.notify();
   }
 

@@ -1,11 +1,12 @@
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { AlertDialog, Badge, Button, Card, CardBody, CardFooter, CardHeader, Dialog, Grid, IconTile, Menu, Spinner, Stack, Tabs } from "@ionnet/iontronic/react";
-import { Activity, Archive, ArrowLeft, CircleArrowUp, Download, Ellipsis, FolderOpen, Hammer, Play, RotateCw, Settings, Square, SquareTerminal, TriangleAlert, Zap } from "@ionnet/iontronic/icons";
-import type { GameServerDetailResponse } from "@shared/api/servers.ts";
+import { Activity, Archive, ArrowLeft, CircleArrowUp, Download, Ellipsis, FolderOpen, Hammer, LogOut, Play, RotateCw, Settings, Share2, Square, SquareTerminal, TriangleAlert, Users, Zap } from "@ionnet/iontronic/icons";
+import type { GameServerDetailResponse, ServerAccessLevel } from "@shared/api/servers.ts";
 import type { ServerState } from "@shared/protocol/protocol.gen.ts";
 import { ApiError } from "@/Api/BaseApi.ts";
 import { DefinitionApi } from "@/Api/DefinitionApi.ts";
 import { ServerApi } from "@/Api/ServerApi.ts";
+import { ShareApi } from "@/Api/ShareApi.ts";
 import BackupList from "@/components/BackupList/BackupList.tsx";
 import Console from "@/components/Console/Console.tsx";
 import FileManager from "@/components/FileManager/FileManager.tsx";
@@ -18,6 +19,7 @@ import { useNotify } from "@/components/Notify/useNotify.ts";
 import PageHeader from "@/components/PageHeader/PageHeader.tsx";
 import ServiceList from "@/components/ServiceList/ServiceList.tsx";
 import ServerSettings from "@/components/ServerSettings/ServerSettings.tsx";
+import ServerSharing from "@/components/ServerSharing/ServerSharing.tsx";
 import ServerStateBadge, { InstallProgressBar } from "@/components/ServerState/ServerState.tsx";
 import VariableForm, {
   errorFieldFor,
@@ -30,6 +32,7 @@ import VariableForm, {
   useVariableOptions,
   validate,
 } from "@/components/VariableForm/VariableForm.tsx";
+import { useAuth } from "@/hooks/useAuth.ts";
 import { navigate, type RouteMatch } from "@/router/Router.tsx";
 
 interface Props {
@@ -37,6 +40,16 @@ interface Props {
 }
 
 type ServerAction = "start" | "stop" | "kill" | "restart" | "reinstall" | "update";
+
+const ACCESS_RANK: Record<ServerAccessLevel, number> = { view: 1, operate: 2, manage: 3, owner: 4 };
+
+/**
+ * Whether the access level the panel reported for the caller covers `level` (the panel still enforces it; this only
+ * hides and disables what would answer 404).
+ */
+function hasAccess(held: ServerAccessLevel, level: ServerAccessLevel): boolean {
+  return ACCESS_RANK[held] >= ACCESS_RANK[level];
+}
 
 /**
  * `/servers/<uuid>`: one server with its live state, the actions its state allows, the console and the settings.
@@ -50,6 +63,21 @@ export default function ServerDetail(props: Props) {
   const [tab, setTab] = useState("overview");
   const server = resource.data ? ServerApi.applyState(resource.data, patches[serverId]) : null;
   const services = ServerApi.useServices(resource.data);
+  const notify = useNotify();
+  const hadServer = resource.data !== null;
+  const lostAccess = hadServer && resource.error instanceof ApiError && resource.error.status === 404;
+
+  // The server was deleted or its share removed: the refetch after `server.updated` answers 404, so go back to the list.
+  useEffect(() => {
+    if (!lostAccess) return;
+    notify.error(resource.error, "This server is no longer available to you");
+    navigate("/servers");
+  }, [lostAccess]);
+
+  const owner = server !== null && hasAccess(server.access, "owner");
+  const manage = server !== null && hasAccess(server.access, "manage");
+  const allowedTabs = ["overview", "console", ...(manage ? ["files", "backups", "settings"] : []), ...(owner ? ["sharing"] : [])];
+  const activeTab = allowedTabs.includes(tab) ? tab : "overview"; // A lowered share can hide the tab that was open.
 
   const back = <Button variant="ghost" size="sm" icon={ArrowLeft} onClick={() => navigate("/servers")}>Servers</Button>;
 
@@ -78,11 +106,12 @@ export default function ServerDetail(props: Props) {
             <ServerStateBadge state={server.state} progress={server.installProgress} />
             <span>{server.definition.name} on {server.host.name}</span>
             {!server.host.online && <Badge tone="warn" size="sm">Host offline</Badge>}
+            {server.access !== "owner" && <Badge tone="info" size="sm" icon={Share2}>Shared by {server.owner.username} · {server.access}</Badge>}
           </Stack>
         }
         actions={<Actions server={server} onChanged={resource.reload} />}
       />
-      {server.latestDefinition && <UpdateNotice server={server} onChanged={resource.reload} />}
+      {server.latestDefinition && hasAccess(server.access, "manage") && <UpdateNotice server={server} onChanged={resource.reload} />}
       <Status server={server} onChanged={resource.reload} />
       {services.length > 0 && (
         <Card>
@@ -92,13 +121,14 @@ export default function ServerDetail(props: Props) {
           </CardBody>
         </Card>
       )}
-      <Tabs.Root value={tab} onValueChange={(value) => setTab(String(value))}>
+      <Tabs.Root value={activeTab} onValueChange={(value) => setTab(String(value))}>
         <Tabs.List>
           <Tabs.Tab value="overview" icon={Activity}>Overview</Tabs.Tab>
           <Tabs.Tab value="console" icon={SquareTerminal}>Console</Tabs.Tab>
-          <Tabs.Tab value="files" icon={FolderOpen}>Files</Tabs.Tab>
-          <Tabs.Tab value="backups" icon={Archive}>Backups</Tabs.Tab>
-          <Tabs.Tab value="settings" icon={Settings}>Settings</Tabs.Tab>
+          {manage && <Tabs.Tab value="files" icon={FolderOpen}>Files</Tabs.Tab>}
+          {manage && <Tabs.Tab value="backups" icon={Archive}>Backups</Tabs.Tab>}
+          {manage && <Tabs.Tab value="settings" icon={Settings}>Settings</Tabs.Tab>}
+          {owner && <Tabs.Tab value="sharing" icon={Users}>Sharing</Tabs.Tab>}
         </Tabs.List>
         <Tabs.Panel value="overview">
           <MetricsPanel server={server} />
@@ -106,19 +136,34 @@ export default function ServerDetail(props: Props) {
         <Tabs.Panel value="console">
           <Card>
             <CardBody>
-              <Console serverId={server.id} canSend={server.state === "running"} />
+              <Console
+                serverId={server.id}
+                canSend={server.state === "running" && hasAccess(server.access, "operate")}
+                sendHint={hasAccess(server.access, "operate") ? undefined : "You can watch the console but not send commands"}
+              />
             </CardBody>
           </Card>
         </Tabs.Panel>
-        <Tabs.Panel value="files">
-          <FileManager server={server} />
-        </Tabs.Panel>
-        <Tabs.Panel value="backups">
-          <BackupList server={server} />
-        </Tabs.Panel>
-        <Tabs.Panel value="settings">
-          <ServerSettings server={server} onChanged={resource.reload} />
-        </Tabs.Panel>
+        {manage && (
+          <Tabs.Panel value="files">
+            <FileManager server={server} />
+          </Tabs.Panel>
+        )}
+        {manage && (
+          <Tabs.Panel value="backups">
+            <BackupList server={server} />
+          </Tabs.Panel>
+        )}
+        {manage && (
+          <Tabs.Panel value="settings">
+            <ServerSettings server={server} onChanged={resource.reload} />
+          </Tabs.Panel>
+        )}
+        {owner && (
+          <Tabs.Panel value="sharing">
+            <ServerSharing server={server} />
+          </Tabs.Panel>
+        )}
       </Tabs.Root>
     </Stack>
   );
@@ -134,15 +179,30 @@ function Actions(props: { server: GameServerDetailResponse; onChanged: () => Pro
   const [reinstallOpen, setReinstallOpen] = useState(false);
   const [killOpen, setKillOpen] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const auth = useAuth();
 
+  const operate = hasAccess(server.access, "operate");
+  const manage = hasAccess(server.access, "manage");
   const { state } = server;
   const online = server.host.online;
-  const canStart = online && (state === "stopped" || state === "crashed");
-  const canStop = state === "running" || state === "starting" || state === "installing"; // Stopping an install cancels it.
-  const canRestart = online && state === "running";
-  const canKill = state === "running" || state === "starting" || state === "stopping";
-  const canReinstall = online && (state === "stopped" || state === "crashed" || state === "install_failed");
-  const canUpdate = online && (state === "stopped" || state === "crashed" || (state === "install_failed" && server.installed));
+  const canStart = operate && online && (state === "stopped" || state === "crashed");
+  const canStop = operate && (state === "running" || state === "starting" || state === "installing"); // Stopping an install cancels it.
+  const canRestart = operate && online && state === "running";
+  const canKill = operate && (state === "running" || state === "starting" || state === "stopping");
+  const canReinstall = manage && online && (state === "stopped" || state === "crashed" || state === "install_failed");
+  const canUpdate = manage && online && (state === "stopped" || state === "crashed" || (state === "install_failed" && server.installed));
+
+  const leave = async () => {
+    if (!auth.user) return;
+    try {
+      await ShareApi.remove(server.id, auth.user.id);
+      notify.ok("You left the server", `${server.name} is no longer in your list.`);
+      navigate("/servers");
+    } catch (error) {
+      notify.error(error, "Couldn't leave the server");
+    }
+  };
 
   const run = async (action: ServerAction, doneTitle: string) => {
     setPending(action);
@@ -170,11 +230,21 @@ function Actions(props: { server: GameServerDetailResponse; onChanged: () => Pro
       <Menu.Root>
         <Menu.Trigger iconOnly icon={Ellipsis} variant="ghost" aria-label="More actions" />
         <Menu.Content align="end">
-          {server.canUpdateGame && <Menu.Item icon={Download} disabled={!canUpdate} onClick={() => setUpdateOpen(true)}>Update game</Menu.Item>}
+          {manage && server.canUpdateGame && <Menu.Item icon={Download} disabled={!canUpdate} onClick={() => setUpdateOpen(true)}>Update game</Menu.Item>}
           <Menu.Item icon={Zap} tone="bad" disabled={!canKill} onClick={() => setKillOpen(true)}>Kill</Menu.Item>
-          <Menu.Item icon={Hammer} disabled={!canReinstall} onClick={() => setReinstallOpen(true)}>Reinstall</Menu.Item>
+          {manage && <Menu.Item icon={Hammer} disabled={!canReinstall} onClick={() => setReinstallOpen(true)}>Reinstall</Menu.Item>}
+          {server.access !== "owner" && <Menu.Separator />}
+          {server.access !== "owner" && <Menu.Item icon={LogOut} onClick={() => setLeaveOpen(true)}>Leave server</Menu.Item>}
         </Menu.Content>
       </Menu.Root>
+      <AlertDialog.Root open={leaveOpen} onOpenChange={setLeaveOpen}>
+        <AlertDialog.Content title={`Leave ${server.name}?`} description={`You lose access to this server. ${server.owner.username} can share it with you again.`}>
+          <AlertDialog.Footer>
+            <AlertDialog.Close>Cancel</AlertDialog.Close>
+            <AlertDialog.Close variant="danger" onClick={leave}>Leave server</AlertDialog.Close>
+          </AlertDialog.Footer>
+        </AlertDialog.Content>
+      </AlertDialog.Root>
       <AlertDialog.Root open={killOpen} onOpenChange={setKillOpen}>
         <AlertDialog.Content title={`Kill ${server.name}?`} description="The game process is ended immediately, without saving. Use Stop unless the server isn't responding.">
           <AlertDialog.Footer>

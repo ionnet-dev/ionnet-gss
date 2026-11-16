@@ -103,7 +103,7 @@ export default function BackupList(props: BackupListProps) {
 
   let hint: string | null = null;
   if (offline) hint = `${server.host.name} is offline, so backups can't be created or restored right now.`;
-  else if (atLimit && limit?.max != null) hint = `The limit of ${limit.max} backups is reached. Delete an old backup to make a new one.`;
+  else if (atLimit && limit?.max != null) hint = `The limit of ${limit.max} backups across ${server.access === "owner" ? "your" : "the owner's"} servers is reached. Delete an old backup to make a new one.`;
 
   return (
     <Card className="backup-list">

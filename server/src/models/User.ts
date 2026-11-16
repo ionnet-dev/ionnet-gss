@@ -6,6 +6,7 @@ import {
   type InferCreationAttributes,
   Model,
   type NonAttribute,
+  Op,
   type Sequelize,
   type Transaction,
   UniqueConstraintError,
@@ -20,7 +21,9 @@ import { PERMISSION_KEYS, type Permission, ROLES } from "@shared/permissions.ts"
 import { Config } from "../Config.ts";
 import { type AppEnv, bearerToken } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
+import { verifyCode } from "../lib/totp.ts";
 import { ID, intFk } from "./columns.ts";
+import { RecoveryCode } from "./RecoveryCode.ts";
 import { Role } from "./Role.ts";
 import type { Quota } from "./Quota.ts";
 
@@ -294,7 +297,16 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
    * `totp` challenge, of an old `tokenVersion`, the user is disabled, or two-factor is off. Loads `roles`.
    */
   public static async findByChallenge(token: string): Promise<User | null> {
-    throw HttpError.notImplemented("User.findByChallenge"); // TODO(builder): M5
+    let payload: User.TokenPayload;
+    try {
+      payload = await verify(token, Config.JWT_SECRET, "HS256") as User.TokenPayload;
+    } catch {
+      return null;
+    }
+    if (payload.purpose !== "totp" || typeof payload.sub !== "number") return null;
+    const user = await User.findWithRoles({ id: payload.sub });
+    if (!user || user.disabled || user.tokenVersion !== payload.ver || !user.totpEnabled || !user.totpSecret) return null;
+    return user;
   }
 
   /**
@@ -303,7 +315,25 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
    * @returns Whether the code was valid and not used before.
    */
   public async consumeTotpCode(code: string): Promise<boolean> {
-    throw HttpError.notImplemented("User.consumeTotpCode"); // TODO(builder): M5
+    const secret = this.totpSecret;
+    if (!secret) return false;
+    const step = await verifyCode(secret, code, this.totpLastStep ?? null);
+    if (step === null) return false;
+    // The step only counts if no other request (or an earlier login) has used it or a later one, and the secret is
+    // still the one the code was checked against.
+    const [affected] = await User.update({ totpLastStep: step }, {
+      where: {
+        id: this.id,
+        totpSecret: secret,
+        [Op.or]: [{ totpLastStep: null }, { totpLastStep: { [Op.lt]: step } }],
+      },
+    });
+    if (affected !== 1) return false;
+    // Keep the instance in sync without marking the field dirty: a later `save()` must not write this value back over
+    // a newer step another request stored meanwhile.
+    this.setDataValue("totpLastStep", step);
+    this.changed("totpLastStep", false);
+    return true;
   }
 
   /**
@@ -312,7 +342,10 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
    * @returns `"totp"` / `"recovery_code"` for the method that matched, or null.
    */
   public async consumeSecondFactor(code: string): Promise<"totp" | "recovery_code" | null> {
-    throw HttpError.notImplemented("User.consumeSecondFactor"); // TODO(builder): M5
+    if (!this.totpEnabled || !this.totpSecret || typeof code !== "string") return null;
+    const value = code.replace(/\s/g, "");
+    if (new RegExp(`^\\d{${LIMITS.TOTP_DIGITS}}$`).test(value)) return await this.consumeTotpCode(value) ? "totp" : null;
+    return await RecoveryCode.consume(this.id, value) ? "recovery_code" : null;
   }
 
   /**
@@ -320,7 +353,15 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
    * disable and by the admin reset (which also bumps `tokenVersion`).
    */
   public async clearTotp(transaction?: Transaction): Promise<void> {
-    throw HttpError.notImplemented("User.clearTotp"); // TODO(builder): M5
+    const clear = async (t: Transaction): Promise<void> => {
+      this.totpSecret = null;
+      this.totpEnabled = false;
+      this.totpLastStep = null;
+      await this.save({ transaction: t });
+      await RecoveryCode.removeAll(this.id, t);
+    };
+    if (transaction) await clear(transaction);
+    else await User.sequelize!.transaction(clear);
   }
   //#endregion
 

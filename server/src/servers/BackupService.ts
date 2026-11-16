@@ -22,17 +22,15 @@
  * milliseconds): rows only move forward (`pending` → `running` → `done`/`failed`, by conditional updates), and a
  * finish that arrives first is remembered (`_finishedEarly`) so the late answer doesn't bring the operation back.
  *
- * Quota seam: `assertSlot` counts this server's non-failed backups against the owner's `maxBackups`
- * (DEFAULT_QUOTA_BACKUPS when null); admins pass. TODO(builder): M5 quota. Replace it with
- * `Quota.assertFits(server.ownerId, { backups: 1 }, t)` in the transaction that inserts the `pending` row, and make
- * `slot()` (BackupListResponse.limit) the owner's user-wide `{ max, used }`.
+ * Quota (M5): `Quota.assertFits(server.ownerId, { backups: 1 }, t)` in the transaction that inserts the `pending` row
+ * counts the owner's non-failed backups over all their servers against `maxBackups` (admins pass); `slot()`
+ * (BackupListResponse.limit) is that user-wide `{ max, used }`.
  */
 import { Op } from "sequelize";
 import type { BackupDto, BackupListResponse, BackupOperationDto, CreateBackupBody, RestoreBackupResponse } from "@shared/api/backups.ts";
 import type { DownloadTicketResponse } from "@shared/api/files.ts";
 import { LIMITS } from "@shared/constants.ts";
 import { BACKUP_EXTENSION, type BackupFinished, type BackupOperationStatus, type BackupProgress, type ServerStatus } from "@shared/protocol/protocol.gen.ts";
-import { Config } from "../Config.ts";
 import { LiveGateway } from "../gateways/live/LiveGateway.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { AuditLog, Backup, GameServer, Quota, User } from "../models/index.ts";
@@ -83,10 +81,14 @@ export namespace BackupService {
     if (server.state === "deleting") throw HttpError.conflict("The server is being deleted.");
     const name = parseName(body.name);
     return await starting(server.id, async () => {
-      await assertSlot(server);
-      const row = await Backup.create({ serverId: server.id, createdById: user.id, name, status: "pending", file: null, sizeBytes: null, error: null, startedAt: null, finishedAt: null });
-      row.file = `backups/${row.id}${BACKUP_EXTENSION}`;
-      await row.save();
+      // The quota check locks the owner's row first; the `pending` row inserted with it is what the next check sees.
+      const row = await Quota.transaction(async (transaction) => {
+        await Quota.assertFits(server.ownerId, { backups: 1 }, transaction, { actorId: user.id });
+        const created = await Backup.create({ serverId: server.id, createdById: user.id, name, status: "pending", file: null, sizeBytes: null, error: null, startedAt: null, finishedAt: null }, { transaction });
+        created.file = `backups/${created.id}${BACKUP_EXTENSION}`;
+        await created.save({ transaction });
+        return created;
+      });
       let status: BackupOperationStatus;
       try {
         status = await callAgent(server.hostId, "backup.create", { serverId: server.id, backupId: row.id });
@@ -252,18 +254,6 @@ export namespace BackupService {
   }
 
   /**
-   * Refuse a new backup when the server already holds the owner's `maxBackups` (non-failed rows). The M5 seam.
-   * @throws HttpError 409 "This server already has 5 backups, the most your quota allows. Delete an old one first."
-   */
-  export async function assertSlot(server: GameServer): Promise<{ max: number | null; used: number }> {
-    const limit = await slot(server);
-    if (limit.max !== null && limit.used >= limit.max) {
-      throw HttpError.conflict(`This server already has ${limit.used} backups, the most your quota allows (${limit.max}). Delete an old one first.`);
-    }
-    return limit;
-  }
-
-  /**
    * The client shape of a row (createdBy included when loaded).
    */
   export function toDto(backup: Backup): BackupDto {
@@ -282,15 +272,12 @@ export namespace BackupService {
   }
 
   /**
-   * The owner's limit and this server's count of non-failed backups. An admin owner has no limit (`max` null).
+   * The owner's backup limit and their non-failed backups over all their servers. An admin owner has no limit (`max`
+   * null).
    */
   async function slot(server: GameServer): Promise<{ max: number | null; used: number }> {
-    const used = await Backup.count({ where: { serverId: server.id, status: { [Op.ne]: "failed" } } });
-    const owner = await User.findWithRoles({ id: server.ownerId });
-    if (owner?.isAdmin()) return { max: null, used };
-    const quota = await Quota.findOne({ where: { userId: server.ownerId }, attributes: ["maxBackups"] });
-    const max = quota?.maxBackups ?? Config.DEFAULT_QUOTA_BACKUPS;
-    return { max, used };
+    const quota = await Quota.getEffective(server.ownerId);
+    return { max: quota.exempt ? null : quota.limits.maxBackups, used: quota.used.backups };
   }
 
   async function findRow(server: GameServer, backupId: number): Promise<Backup> {

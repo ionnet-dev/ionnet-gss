@@ -6,6 +6,7 @@ import type { HostDetailResponse, UpdateHostBody } from "@shared/api/hosts.ts";
 import type { EgressFacts } from "@shared/protocol/protocol.gen.ts";
 import { HostApi } from "@/Api/HostApi.ts";
 import { formatAgo, formatBytes, formatDateTime, formatUptime } from "@/components/Format/format.ts";
+import HostGrants from "@/components/HostGrants/HostGrants.tsx";
 import HostStatus from "@/components/HostStatus/HostStatus.tsx";
 import LoadError from "@/components/LoadError/LoadError.tsx";
 import { useNotify } from "@/components/Notify/useNotify.ts";
@@ -19,7 +20,7 @@ interface Props {
 
 /**
  * `/hosts/<uuid>`: facts of one host with live status. Admins can rename it, change its address, port pool and
- * capacity, disable it, or remove it.
+ * capacity, disable it, remove it, or choose who may create servers on it.
  */
 export default function HostDetail(props: Props) {
   const { match } = props;
@@ -57,6 +58,7 @@ export default function HostDetail(props: Props) {
       <Overview host={host} />
       {host.facts ? <System host={host} /> : <WaitingForFacts />}
       {canManage && <Settings host={host} onChanged={resource.reload} />}
+      {canManage && <HostGrants hostId={host.id} />}
     </Stack>
   );
 }

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { UniqueConstraintError } from "sequelize";
 import type { OkResponse } from "@shared/api/common.ts";
 import type { CreateHostGrantBody, HostDetailResponse, HostDto, HostGrantDto, UpdateHostBody } from "@shared/api/hosts.ts";
 import { LIMITS } from "@shared/constants.ts";
@@ -8,17 +9,41 @@ import { LiveGateway } from "../gateways/live/LiveGateway.ts";
 import { type AppEnv, clientIp, paramInt, paramUuid, readBody } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { parsePortPool } from "../lib/portPool.ts";
-import { AuditLog, GameServer, Host, User } from "../models/index.ts";
+import { AuditLog, GameServer, Host, HostGrant, User } from "../models/index.ts";
 
 const GRANTS_INCLUDE = { association: "grants", include: [{ association: "user" }], required: false };
 
 /**
- * Hosts the caller may see: every host with HOSTS_MANAGE, otherwise the granted ones with HOSTS_VIEW (none in M1).
+ * Whether the caller sees every host (HOSTS_MANAGE or SERVERS_MANAGE_ALL) instead of only the granted ones.
+ */
+function seesAllHosts(user: User): boolean {
+  return user.hasPermission("HOSTS_MANAGE") || user.hasPermission("SERVERS_MANAGE_ALL");
+}
+
+/**
+ * Whether the caller may see hosts at all: everything above, or HOSTS_VIEW / SERVERS_CREATE for the granted ones.
+ */
+function mayListHosts(user: User): boolean {
+  return seesAllHosts(user) || user.hasPermission("HOSTS_VIEW") || user.hasPermission("SERVERS_CREATE");
+}
+
+/**
+ * `HostDto.canCreate`: SERVERS_CREATE and (SERVERS_MANAGE_ALL or a grant on the host).
+ */
+function mayCreateOn(user: User, granted: boolean): boolean {
+  return user.hasPermission("SERVERS_CREATE") && (user.hasPermission("SERVERS_MANAGE_ALL") || granted);
+}
+
+/**
+ * Hosts the caller may see: every host with HOSTS_MANAGE or SERVERS_MANAGE_ALL, otherwise the granted ones with
+ * HOSTS_VIEW or SERVERS_CREATE.
  */
 async function findVisibleHost(user: User, id: string): Promise<Host> {
   const manage = user.hasPermission("HOSTS_MANAGE");
-  const host = await Host.findByPk(id, { include: [manage ? GRANTS_INCLUDE : { association: "grants", where: { userId: user.id }, required: true }] });
-  if (!host || (!manage && !user.hasPermission("HOSTS_VIEW"))) throw HttpError.notFound("There is no host with that id.");
+  if (!mayListHosts(user)) throw HttpError.notFound("There is no host with that id.");
+  const include = manage ? [GRANTS_INCLUDE] : seesAllHosts(user) ? [] : [{ association: "grants", where: { userId: user.id }, required: true }];
+  const host = await Host.findByPk(id, { include });
+  if (!host) throw HttpError.notFound("There is no host with that id.");
   return host;
 }
 
@@ -27,11 +52,20 @@ async function serverCount(hostId: string): Promise<number> {
 }
 
 async function detail(host: Host, user: User) {
-  return host.toDetailJSON(AgentGateway.isOnline(host.id), await serverCount(host.id), user.hasPermission("HOSTS_MANAGE"));
+  const canCreate = mayCreateOn(user, await HostGrant.isGranted(host.id, user.id));
+  return host.toDetailJSON(AgentGateway.isOnline(host.id), await serverCount(host.id), user.hasPermission("HOSTS_MANAGE"), canCreate);
 }
 
 function pushHostUpdated(host: Host): void {
   LiveGateway.push("host.updated", { hostId: host.id }, { permission: "HOSTS_MANAGE", userIds: (host.grants ?? []).map((grant) => grant.userId) });
+}
+
+/**
+ * `host.updated` to HOSTS_MANAGE, everyone granted the host, and `extraUserIds` (a user whose grant was just removed).
+ */
+async function pushGrantsChanged(hostId: string, extraUserIds: number[] = []): Promise<void> {
+  const userIds = [...await HostGrant.userIdsOf(hostId), ...extraUserIds];
+  LiveGateway.push("host.updated", { hostId }, { permission: "HOSTS_MANAGE", userIds });
 }
 
 /**
@@ -46,8 +80,8 @@ function parseLimit(value: unknown, label: string): number | null {
 }
 
 /**
- * `/api/hosts`. HOSTS_MANAGE sees and edits every host; HOSTS_VIEW sees only granted hosts (M5; none in M1).
- * Online state comes from `AgentGateway.isOnline()`. Pushes `host.updated`. Audit: `host.updated`, `host.removed`.
+ * `/api/hosts`. HOSTS_MANAGE (edits) and SERVERS_MANAGE_ALL (read) see every host; HOSTS_VIEW and SERVERS_CREATE see
+ * only the hosts they are granted. Online state comes from `AgentGateway.isOnline()`. Pushes `host.updated`. Audit: `host.updated`, `host.removed`.
  */
 export namespace HostController {
   export const router = new Hono<AppEnv>();
@@ -59,14 +93,15 @@ export namespace HostController {
    */
   router.get("/", async (c) => {
     const user = c.var.user;
-    const manage = user.hasPermission("HOSTS_MANAGE");
-    if (!manage && !user.hasPermission("HOSTS_VIEW")) return c.json<HostDto[]>([]);
+    if (!mayListHosts(user)) return c.json<HostDto[]>([]);
+    const all = seesAllHosts(user);
     const hosts = await Host.findAll({
-      include: manage ? [] : [{ association: "grants", where: { userId: user.id }, required: true }],
+      include: all ? [] : [{ association: "grants", where: { userId: user.id }, required: true }],
       order: [["name", "ASC"]],
     });
-    const counts = await GameServer.countByHost(manage ? undefined : hosts.map((host) => host.id));
-    return c.json<HostDto[]>(hosts.map((host) => host.toClientJSON(AgentGateway.isOnline(host.id), counts.get(host.id) ?? 0)));
+    const counts = await GameServer.countByHost(all ? undefined : hosts.map((host) => host.id));
+    const granted = await HostGrant.hostIdsOf(user.id);
+    return c.json<HostDto[]>(hosts.map((host) => host.toClientJSON(AgentGateway.isOnline(host.id), counts.get(host.id) ?? 0, mayCreateOn(user, granted.has(host.id)))));
   });
 
   /**
@@ -157,7 +192,10 @@ export namespace HostController {
    */
   router.get("/:id/grants", User.$middleware({ permissions: ["HOSTS_MANAGE"] }), async (c) => {
     const id = paramUuid(c, "id");
-    throw HttpError.notImplemented("GET /api/hosts/:id/grants"); // TODO(builder): M5
+    await findVisibleHost(c.var.user, id);
+    const grants = await HostGrant.findAll({ where: { hostId: id }, include: [{ association: "user" }] });
+    grants.sort((a, b) => (a.user?.username ?? "").localeCompare(b.user?.username ?? ""));
+    return c.json<HostGrantDto[]>(grants.map((grant) => grant.toClientJSON()));
   });
 
   /**
@@ -167,7 +205,23 @@ export namespace HostController {
   router.post("/:id/grants", User.$middleware({ permissions: ["HOSTS_MANAGE"] }), async (c) => {
     const id = paramUuid(c, "id");
     const body = await readBody<CreateHostGrantBody>(c);
-    throw HttpError.notImplemented("POST /api/hosts/:id/grants"); // TODO(builder): M5
+    const actor = c.var.user;
+    const host = await findVisibleHost(actor, id);
+    const username = typeof body.username === "string" ? body.username.trim() : "";
+    if (username === "") throw HttpError.badRequest("Enter the username of the person to give access to.");
+    const target = await User.findOne({ where: { username } });
+    if (!target) throw HttpError.notFound(`There is no user named "${username}".`);
+    let grant: HostGrant;
+    try {
+      grant = await HostGrant.create({ hostId: host.id, userId: target.id, createdById: actor.id });
+    } catch (error) {
+      if (error instanceof UniqueConstraintError) throw HttpError.conflict(`${target.username} already has access to this host.`);
+      throw error;
+    }
+    grant.user = target;
+    await AuditLog.record({ action: "host.granted", actorId: actor.id, hostId: host.id, ip: clientIp(c), details: { userId: target.id, username: target.username } });
+    await pushGrantsChanged(host.id);
+    return c.json<HostGrantDto>(grant.toClientJSON(), 201);
   });
 
   /**
@@ -177,7 +231,14 @@ export namespace HostController {
   router.delete("/:id/grants/:userId", User.$middleware({ permissions: ["HOSTS_MANAGE"] }), async (c) => {
     const id = paramUuid(c, "id");
     const userId = paramInt(c, "userId");
-    throw HttpError.notImplemented("DELETE /api/hosts/:id/grants/:userId"); // TODO(builder): M5
+    const actor = c.var.user;
+    const host = await findVisibleHost(actor, id);
+    const grant = await HostGrant.findOne({ where: { hostId: host.id, userId }, include: [{ association: "user" }] });
+    if (!grant) throw HttpError.notFound("That user has no access to this host.");
+    await grant.destroy();
+    await AuditLog.record({ action: "host.revoked", actorId: actor.id, hostId: host.id, ip: clientIp(c), details: { userId, username: grant.user?.username ?? null } });
+    await pushGrantsChanged(host.id, [userId]);
+    return c.json<OkResponse>({ ok: true });
   });
   //#endregion
 }

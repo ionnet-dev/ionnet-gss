@@ -3,7 +3,7 @@ import {
   AlertDialog, Avatar, Badge, Button, Card, CardBody, Checkbox, Dialog, EmptyState, Input, List, ListItem, Menu, Spinner,
   Stack, Switch,
 } from "@ionnet/iontronic/react";
-import { Ellipsis, KeyRound, Pencil, Trash2, UserPlus, Users as UsersIcon } from "@ionnet/iontronic/icons";
+import { Ellipsis, Gauge, KeyRound, Pencil, ShieldOff, Trash2, UserPlus, Users as UsersIcon } from "@ionnet/iontronic/icons";
 import { LIMITS, passwordProblem } from "@shared/constants.ts";
 import { ROLES } from "@shared/permissions.ts";
 import type { RoleDto, UserDto } from "@shared/api/users.ts";
@@ -11,6 +11,7 @@ import { UserApi } from "@/Api/UserApi.ts";
 import FormError from "@/components/FormError/FormError.tsx";
 import { formatAgo } from "@/components/Format/format.ts";
 import LoadError from "@/components/LoadError/LoadError.tsx";
+import QuotaDialog from "@/components/QuotaDialog/QuotaDialog.tsx";
 import { useNotify } from "@/components/Notify/useNotify.ts";
 import PageHeader from "@/components/PageHeader/PageHeader.tsx";
 import { useAuth } from "@/hooks/useAuth.ts";
@@ -22,11 +23,12 @@ interface Props {
 
 type Dialogs =
   | { kind: "create" }
-  | { kind: "edit" | "password" | "delete"; user: UserDto };
+  | { kind: "edit" | "password" | "delete" | "quota" | "totp"; user: UserDto };
 
 /**
- * `/users` (USERS_MANAGE): accounts, roles, passwords. The panel refuses to remove or demote the last admin; its
- * message shows as a toast.
+ * `/users` (USERS_MANAGE): accounts, roles, passwords, quotas and two-factor resets. The panel refuses to remove or
+ * demote the last admin; its message shows as a toast. Non-admins don't get the quota action for themselves or for
+ * administrators (the panel answers 403).
  */
 export default function Users(props: Props) {
   const auth = useAuth();
@@ -35,6 +37,19 @@ export default function Users(props: Props) {
   const notify = useNotify();
   const [dialog, setDialog] = useState<Dialogs | null>(null);
   const close = () => setDialog(null);
+  const actorIsAdmin = auth.user?.roles.includes(ROLES.ADMIN) ?? false;
+  const mayEditQuota = (user: UserDto) => actorIsAdmin || (user.id !== auth.user?.id && !user.roles.includes(ROLES.ADMIN));
+
+  const resetTotp = async (user: UserDto) => {
+    try {
+      await UserApi.resetTotp(user.id);
+      notify.ok(`Two-factor sign-in turned off for ${user.username}`, "Their sessions were signed out.");
+      if (user.id === auth.user?.id) auth.signOut();
+      else await users.reload();
+    } catch (error) {
+      notify.error(error, `Couldn't reset two-factor sign-in for ${user.username}`);
+    }
+  };
 
   const remove = async (user: UserDto) => {
     try {
@@ -82,6 +97,8 @@ export default function Users(props: Props) {
                       <Menu.Content align="end">
                         <Menu.Item icon={Pencil} onClick={() => setDialog({ kind: "edit", user })}>Edit</Menu.Item>
                         <Menu.Item icon={KeyRound} onClick={() => setDialog({ kind: "password", user })}>Reset password</Menu.Item>
+                        {mayEditQuota(user) && <Menu.Item icon={Gauge} onClick={() => setDialog({ kind: "quota", user })}>Quota</Menu.Item>}
+                        {user.totpEnabled && <Menu.Item icon={ShieldOff} onClick={() => setDialog({ kind: "totp", user })}>Reset two-factor</Menu.Item>}
                         <Menu.Separator />
                         <Menu.Item tone="bad" icon={Trash2} onClick={() => setDialog({ kind: "delete", user })}>Delete</Menu.Item>
                       </Menu.Content>
@@ -97,6 +114,19 @@ export default function Users(props: Props) {
       {dialog?.kind === "create" && <CreateUserDialog roles={roles.data ?? []} onClose={close} onDone={users.reload} />}
       {dialog?.kind === "edit" && <EditUserDialog user={dialog.user} roles={roles.data ?? []} onClose={close} onDone={users.reload} />}
       {dialog?.kind === "password" && <PasswordDialog user={dialog.user} onClose={close} />}
+      {dialog?.kind === "quota" && <QuotaDialog user={dialog.user} open onOpenChange={(open) => !open && close()} />}
+
+      <AlertDialog.Root open={dialog?.kind === "totp"} onOpenChange={(open) => !open && close()}>
+        <AlertDialog.Content
+          title={`Reset two-factor for ${dialog?.kind === "totp" ? dialog.user.username : ""}?`}
+          description="Their authenticator and recovery codes stop working and they are signed out everywhere. They sign in with their password alone until they turn two-factor on again."
+        >
+          <AlertDialog.Footer>
+            <AlertDialog.Close>Cancel</AlertDialog.Close>
+            <AlertDialog.Close variant="danger" onClick={() => dialog?.kind === "totp" && resetTotp(dialog.user)}>Reset two-factor</AlertDialog.Close>
+          </AlertDialog.Footer>
+        </AlertDialog.Content>
+      </AlertDialog.Root>
 
       <AlertDialog.Root open={dialog?.kind === "delete"} onOpenChange={(open) => !open && close()}>
         <AlertDialog.Content

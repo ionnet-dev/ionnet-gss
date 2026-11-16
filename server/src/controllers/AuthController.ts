@@ -109,15 +109,44 @@ export namespace AuthController {
   });
 
   /**
-   * POST /api/auth/login/totp  TotpLoginBody → LoginSuccess. Public, rate-limited per IP; wrong codes count in
-   * `loginFailuresPerUser` (key `totp:<userId>`). 401 "The code is wrong or was already used." on a bad challenge,
-   * code or replay. `User.findByChallenge` + `User.consumeSecondFactor`. M5. The self-service TOTP routes are in
+   * POST /api/auth/login/totp  TotpLoginBody → LoginSuccess. Public, rate-limited per IP; every code attempt counts in
+   * `loginFailuresPerUser` (key `totp:<userId>`, see `hitSecondFactor`). 401 "Your sign-in timed out…" for a bad or
+   * expired challenge, 401 "The code is wrong or was already used." for a wrong code, a replayed time step or a used
+   * recovery code. `User.findByChallenge` + `User.consumeSecondFactor`. M5. The self-service TOTP routes are in
    * `TotpController` (`/api/auth/totp`).
    */
   router.post("/login/totp", async (c) => {
+    loginPerIp.hit(ipKey(c));
     const body = await readBody<TotpLoginBody>(c);
-    throw HttpError.notImplemented("POST /api/auth/login/totp"); // TODO(builder): M5
+    const user = await User.findByChallenge(asString(body.challengeToken));
+    if (!user) throw HttpError.unauthorized("Your sign-in timed out or is no longer valid. Enter your password again.");
+    hitSecondFactor(user.id);
+    const method = await user.consumeSecondFactor(asString(body.code));
+    if (!method) {
+      await AuditLog.record({ action: "user.login_failed", actorId: user.id, ip: clientIp(c), details: { username: user.username, stage: "totp" } });
+      throw HttpError.unauthorized("The code is wrong or was already used.");
+    }
+    resetSecondFactor(user.id);
+    await AuditLog.record({ action: "user.login", actorId: user.id, ip: clientIp(c), details: { method } });
+    return c.json<LoginSuccess>(await startSession(user));
   });
+
+  /**
+   * Count one second-factor attempt (login step two, disabling 2FA, new recovery codes) in the per-user failure
+   * limiter, key `totp:<userId>` (usernames can't contain `:`). Counted before the code is checked, so parallel
+   * guesses can't all slip past the limit; a success calls `resetSecondFactor`.
+   * @throws HttpError 429 + Retry-After when the user is at `RATE_LIMIT_LOGIN_FAILURES_PER_USER`.
+   */
+  export function hitSecondFactor(userId: number): void {
+    loginFailuresPerUser.hit(`totp:${userId}`);
+  }
+
+  /**
+   * Forget the user's second-factor attempts after a correct code.
+   */
+  export function resetSecondFactor(userId: number): void {
+    loginFailuresPerUser.reset(`totp:${userId}`);
+  }
 
   /**
    * GET /api/auth/invite/:code → InvitePreviewResponse. Public; never 404s (an unknown code is `valid: false`).

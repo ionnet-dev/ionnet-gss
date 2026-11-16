@@ -9,7 +9,6 @@ import {
   type Sequelize,
 } from "sequelize";
 import type { ServerShareDto } from "@shared/api/servers.ts";
-import { HttpError } from "../lib/HttpError.ts";
 import { ID, intFk, uuidFk } from "./columns.ts";
 import type { GameServer } from "./GameServer.ts";
 import type { User } from "./User.ts";
@@ -54,7 +53,8 @@ export class ServerShare extends Model<InferAttributes<ServerShare>, InferCreati
    * The shares of a server with `user` loaded, by username.
    */
   public static async listForServer(serverId: string): Promise<ServerShare[]> {
-    throw HttpError.notImplemented("ServerShare.listForServer"); // TODO(builder): M5
+    const rows = await ServerShare.findAll({ where: { serverId }, include: [{ association: "user" }] });
+    return rows.sort((a, b) => (a.user?.username ?? "").localeCompare(b.user?.username ?? ""));
   }
 
   /**
@@ -69,7 +69,13 @@ export class ServerShare extends Model<InferAttributes<ServerShare>, InferCreati
    * Needs `user` loaded.
    */
   public toClientJSON(): ServerShareDto {
-    throw HttpError.notImplemented("ServerShare.toClientJSON"); // TODO(builder): M5
+    return {
+      userId: this.userId,
+      username: this.user?.username ?? "",
+      displayName: this.user?.displayName ?? null,
+      role: this.role,
+      createdAt: this.createdAt.toISOString(),
+    };
   }
 }
 

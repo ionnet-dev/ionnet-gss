@@ -874,8 +874,9 @@ this machine, a 1 GiB upload and download through the UI, charts and players liv
     `…/sha256`: the hex digest from the `.sha256` sidecar, `text/plain`. Unknown os/arch 400; not built 404 "The
     panel has no agent build for linux/arm64. Run `make dist` in agent/ (the Docker image includes it)."
   - `EnrolTokenCreatedResponse.installCommand` = `curl -fsSL <PUBLIC_URL>/api/agent/install.sh | sudo
-    GSS_ENROL_TOKEN=<token> bash` (the token stays out of the script's argv; `command` stays for hosts that already
-    have the binary). The enrol dialog shows the install one-liner first, the manual `command` below it.
+    bash`; neither it nor `command` (`… enrol --token-stdin`) contains the token. The script prompts `Enrol token:`
+    on `/dev/tty` (`read -rs`), or takes `GSS_ENROL_TOKEN` from the environment; neither → exit 2. A token in sudo's
+    argv would be readable in `ps` for the whole install (`command` stays for hosts that already have the binary). The enrol dialog shows the install one-liner first, the manual `command` below it.
   - Script: `install` (default) | `uninstall` | `help` | `version`; flags `--panel <url>`, `--insecure`,
     `--no-start`, `--dry-run` (prints each step instead of changing the system), `-y/--yes`. Steps: root check;
     `/etc/arch-release` → pacman, `/etc/debian_version` → apt, else exit 3; systemd present; Docker (`docker` /
@@ -979,6 +980,16 @@ New in M5:
   is in `server.stats.diskBytes` if a hard check is wanted later.
 - The usage sum loads the owner's servers with their definition documents on every check; fine for a handful of
   servers per user, cache the service totals on the row if that grows.
+- The second-factor lockout (`totp:<userId>`, 10 failures per 15 minutes) is a fixed in-memory window: it resets
+  on a panel restart and doesn't grow, so someone who already has the password gets about 960 guesses a day. Make
+  it grow across windows or store it in the DB, and notify the user on repeated `stage: "totp"` failures.
+- The agent download's checksum comes from the same origin as the binary: it catches truncation, not tampering.
+  Over plain http the install is only safe on a trusted network (the dialog and script say so); signed releases
+  would close it.
+- Wrong codes at `/auth/totp/confirm` aren't rate-limited (the caller is signed in and made the secret), and a
+  challenge token can be reused within its 5 minutes (each use needs a fresh code and counts toward the lockout).
+- Console input validates its body before the access check, so a user without access gets 400 instead of 404 on
+  a bad body (leaks nothing: any id answers 400).
 
 ## M5 work split
 

@@ -5,6 +5,9 @@ import { passwordProblem } from "@shared/constants.ts";
 import FormError from "@/components/FormError/FormError.tsx";
 import { useNotify } from "@/components/Notify/useNotify.ts";
 import PageHeader from "@/components/PageHeader/PageHeader.tsx";
+import QuotaUsage from "@/components/QuotaUsage/QuotaUsage.tsx";
+import TwoFactorCard from "@/components/TwoFactorCard/TwoFactorCard.tsx";
+import { QuotaApi } from "@/Api/QuotaApi.ts";
 import { useAuth } from "@/hooks/useAuth.ts";
 import { navigate, type RouteMatch } from "@/router/Router.tsx";
 
@@ -18,6 +21,7 @@ interface Props {
 export default function Account(props: Props) {
   const auth = useAuth();
   const theme = useTheme();
+  const quota = QuotaApi.useMine();
 
   return (
     <Stack gap="16">
@@ -43,6 +47,8 @@ export default function Account(props: Props) {
         />
       </Card>
       <PasswordForm />
+      <TwoFactorCard />
+      {quota.data && <QuotaUsage quota={quota.data} />}
       <Card>
         <CardHeader title="Theme" description="Follows your system unless you pick one." />
         <CardBody>

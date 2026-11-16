@@ -38,7 +38,7 @@ export interface BackupListResponse {
   operation: BackupOperationDto | null;
   /**
    * How many backups the owner's quota allows for this server and how many count against it (every status but
-   * `failed`). M4 counts per server; the user-wide quota is M5. `max` is null for an admin owner, who has no limit.
+   * `failed`). Counts across all of the owner's servers. `max` is null for an admin owner, who has no limit.
    */
   limit: { max: number | null; used: number }; // max null = unlimited (an admin owner).
 }

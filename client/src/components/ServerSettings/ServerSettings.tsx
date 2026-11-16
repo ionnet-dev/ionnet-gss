@@ -53,7 +53,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
   return (
     <Stack gap="16">
       <SettingsForm server={server} editable={editable} onChanged={onChanged} />
-      <DeleteCard server={server} />
+      {server.access === "owner" && <DeleteCard server={server} />}
     </Stack>
   );
 }

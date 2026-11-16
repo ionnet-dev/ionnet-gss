@@ -1,4 +1,4 @@
-import { Button, Card, CardBody, EmptyState, List, ListItem, Spinner, Stack } from "@ionnet/iontronic/react";
+import { Badge, Button, Card, CardBody, EmptyState, List, ListItem, Spinner, Stack } from "@ionnet/iontronic/react";
 import { Gamepad2, Plus } from "@ionnet/iontronic/icons";
 import type { GameServerDto } from "@shared/api/servers.ts";
 import { ServerApi } from "@/Api/ServerApi.ts";
@@ -66,7 +66,7 @@ function ServerItem(props: { server: GameServerDto; showOwner: boolean }) {
   const { server, showOwner } = props;
   const tone = server.state === "running" ? "ok" : server.state === "crashed" || server.state === "install_failed" ? "bad" : server.state === "stopped" ? "neutral" : "info";
   const details = [server.definition.name, server.host.name + (server.host.online ? "" : " (offline)")];
-  if (showOwner) details.push(`by ${server.owner.username}`);
+  if (showOwner && server.access === "owner") details.push(`by ${server.owner.username}`);
   const progress = server.state === "installing" ? describeProgress(server.installProgress) : null;
   return (
     <ListItem
@@ -74,7 +74,12 @@ function ServerItem(props: { server: GameServerDto; showOwner: boolean }) {
       icon={Gamepad2}
       tone={tone}
       title={server.name}
-      badges={<ServerStateBadge state={server.state} progress={server.installProgress} />}
+      badges={
+        <>
+          <ServerStateBadge state={server.state} progress={server.installProgress} />
+          {server.access !== "owner" && <Badge tone="info" size="sm">Shared by {server.owner.username}</Badge>}
+        </>
+      }
       description={progress ? `Installing · step ${progress}` : details.join(" · ")}
       meta={progress ? details.join(" · ") : undefined}
       trailing={server.address ? <span className="io-mono">{server.address}</span> : undefined}

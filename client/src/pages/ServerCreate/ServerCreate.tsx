@@ -40,8 +40,10 @@ export default function ServerCreate(_props: Props) {
   const [hostId, setHostId] = useState<string | null>(null);
   const [definitionId, setDefinitionId] = useState<number | null>(null);
 
-  const usable = useMemo(() => (hosts.data ?? []).filter((host) => host.online && !host.disabled), [hosts.data]);
-  const unavailable = (hosts.data?.length ?? 0) - usable.length;
+  // Only hosts the user may create on (a grant, or SERVERS_MANAGE_ALL) are offered.
+  const allowed = useMemo(() => (hosts.data ?? []).filter((host) => host.canCreate), [hosts.data]);
+  const usable = useMemo(() => allowed.filter((host) => host.online && !host.disabled), [allowed]);
+  const unavailable = allowed.length - usable.length;
   const host = usable.find((candidate) => candidate.id === hostId) ?? null;
   const definition = definitions.data?.find((candidate) => candidate.id === definitionId) ?? null;
   const notify = useNotify();
@@ -78,7 +80,7 @@ export default function ServerCreate(_props: Props) {
           <EmptyState
             icon={Server}
             title="No host is available"
-            description={hosts.data.length === 0
+            description={allowed.length === 0
               ? "There's no host you can use yet. An admin needs to enrol one and give you access to it."
               : "Every host you can use is offline or disabled right now. Try again when one is back."}
           />

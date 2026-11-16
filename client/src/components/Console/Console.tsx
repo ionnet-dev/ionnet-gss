@@ -15,6 +15,10 @@ export interface ConsoleProps {
    * Show the input line (running or starting).
    */
   canSend: boolean;
+  /**
+   * Placeholder for the disabled input when the reason isn't "the server isn't running" (e.g. a view-only share).
+   */
+  sendHint?: string;
 }
 
 const MAX_LINES = 2000;
@@ -34,7 +38,7 @@ interface Entry {
  * user scrolled up, and sends input with ↑/↓ history.
  */
 export default function Console(props: ConsoleProps) {
-  const { serverId, canSend } = props;
+  const { serverId, canSend, sendHint } = props;
   const entries = useConsoleStream(serverId);
   const socket = useController(liveSocket);
   const { lines, subscribed, refusal, more, loadingOlder, loadOlder } = entries;
@@ -96,7 +100,7 @@ export default function Console(props: ConsoleProps) {
           </Button>
         )}
       </div>
-      <CommandInput serverId={serverId} canSend={canSend} onSent={jumpToLatest} />
+      <CommandInput serverId={serverId} canSend={canSend} hint={sendHint} onSent={jumpToLatest} />
     </div>
   );
 }
@@ -122,8 +126,8 @@ const LineRow = memo(function LineRow(props: { entry: Entry }) {
   );
 });
 
-function CommandInput(props: { serverId: string; canSend: boolean; onSent: () => void }) {
-  const { serverId, canSend, onSent } = props;
+function CommandInput(props: { serverId: string; canSend: boolean; hint?: string; onSent: () => void }) {
+  const { serverId, canSend, hint, onSent } = props;
   const notify = useNotify();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -170,7 +174,7 @@ function CommandInput(props: { serverId: string; canSend: boolean; onSent: () =>
       <Input
         mono
         aria-label="Console command"
-        placeholder={canSend ? "Type a command and press Enter" : "Start the server to send commands"}
+        placeholder={canSend ? "Type a command and press Enter" : hint ?? "Start the server to send commands"}
         value={text}
         disabled={!canSend}
         autoComplete="off"

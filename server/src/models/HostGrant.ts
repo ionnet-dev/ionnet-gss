@@ -50,6 +50,22 @@ export class HostGrant extends Model<InferAttributes<HostGrant>, InferCreationAt
   }
 
   /**
+   * The hosts `userId` is granted, as a set of host ids.
+   */
+  public static async hostIdsOf(userId: number): Promise<Set<string>> {
+    const rows = await HostGrant.findAll({ where: { userId }, attributes: ["hostId"] });
+    return new Set(rows.map((row) => row.hostId));
+  }
+
+  /**
+   * The ids of every user granted `hostId`.
+   */
+  public static async userIdsOf(hostId: string): Promise<number[]> {
+    const rows = await HostGrant.findAll({ where: { hostId }, attributes: ["userId"] });
+    return rows.map((row) => row.userId);
+  }
+
+  /**
    * Needs `user` loaded.
    */
   public toClientJSON(): HostGrantDto {

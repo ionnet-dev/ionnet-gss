@@ -15,7 +15,7 @@ import { ROLES } from "@shared/permissions.ts";
 import { LiveGateway } from "../gateways/live/LiveGateway.ts";
 import { type AppEnv, clientIp, paramInt, readBody } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
-import { AuditLog, GameServer, User } from "../models/index.ts";
+import { AuditLog, GameServer, Quota, User } from "../models/index.ts";
 
 async function findUser(id: number, transaction?: Transaction): Promise<User> {
   const user = await User.findWithRoles({ id }, transaction);
@@ -196,7 +196,7 @@ export namespace UserController {
    */
   router.get("/:id/quota", async (c) => {
     const id = paramInt(c, "id");
-    throw HttpError.notImplemented("GET /api/users/:id/quota"); // TODO(builder): M5
+    return c.json<EffectiveQuotaDto>(await Quota.getEffective(id));
   });
 
   /**
@@ -206,7 +206,15 @@ export namespace UserController {
   router.put("/:id/quota", async (c) => {
     const id = paramInt(c, "id");
     const body = await readBody<UpdateQuotaBody>(c);
-    throw HttpError.notImplemented("PUT /api/users/:id/quota"); // TODO(builder): M5
+    const actor = c.var.user;
+    const user = await findUser(id);
+    assertMayManage(actor, user);
+    if (id === actor.id && !actor.isAdmin()) throw HttpError.forbidden("You can't change your own quota. Ask an administrator.");
+    const before = (await Quota.findOne({ where: { userId: id } }))?.toClientJSON() ?? null;
+    const row = await Quota.setOverrides(id, body);
+    await AuditLog.record({ action: "user.quota_changed", actorId: actor.id, ip: clientIp(c), details: { userId: id, before, after: row.toClientJSON() } });
+    LiveGateway.push("quota.updated", { userId: id }, { permission: "USERS_MANAGE", userIds: [id] });
+    return c.json<EffectiveQuotaDto>(await Quota.getEffective(id));
   });
   //#endregion
 }
