@@ -1,6 +1,6 @@
 import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, CardBody, CardFooter, CardHeader, EmptyState, Grid, Icon, Input, Spinner, Stack, Switch } from "@ionnet/iontronic/react";
-import { ArrowLeft, Check, Database, Gamepad2, Server } from "@ionnet/iontronic/icons";
+import { ArrowLeft, Check, Database, Gamepad2, Search, Server } from "@ionnet/iontronic/icons";
 import type { DefinitionDto } from "@shared/api/definitions.ts";
 import { LIMITS } from "@shared/constants.ts";
 import type { HostDto } from "@shared/api/hosts.ts";
@@ -29,6 +29,11 @@ import { navigate, type RouteMatch } from "@/router/Router.tsx";
 interface Props {
   match: RouteMatch;
 }
+
+/**
+ * Most games the picker shows at once; searching finds the rest.
+ */
+const GAME_LIST_LIMIT = 5;
 
 /**
  * `/servers/new` (SERVERS_CREATE): pick an online host, pick a game, then fill in the form generated from the game's
@@ -104,13 +109,14 @@ export default function ServerCreate(_props: Props) {
           {definitions.data === null && definitions.error && <LoadError title="Couldn't load the games" error={definitions.error} onRetry={definitions.reload} />}
           {definitions.data?.length === 0 && <EmptyState icon={Gamepad2} title="No games available" description="An admin needs to add a game definition first." />}
           {definitions.data && definitions.data.length > 0 && (
-            <Grid minChildWidth="16rem" gap="12" role="radiogroup" aria-label="Game">
-              {definitions.data.map((candidate) => (
-                <ChoiceCard key={candidate.id} selected={candidate.id === definitionId} onSelect={() => { picked.current = candidate; setDefinitionId(candidate.id); }} title={gameTitle(candidate)} icon={Gamepad2}>
-                  {gameFacts(candidate)}
-                </ChoiceCard>
-              ))}
-            </Grid>
+            <GamePicker
+              definitions={definitions.data}
+              selectedId={definitionId}
+              onSelect={(candidate) => {
+                picked.current = candidate;
+                setDefinitionId(candidate.id);
+              }}
+            />
           )}
         </Step>
       )}
@@ -128,6 +134,69 @@ function hostFacts(host: HostDto): string {
   }
   parts.push(host.serverCount === 1 ? "1 server" : `${host.serverCount} servers`);
   return parts.join(" · ");
+}
+
+interface GamePickerProps {
+  definitions: DefinitionDto[];
+  selectedId: number | null;
+  onSelect: (definition: DefinitionDto) => void;
+}
+
+/**
+ * The games to choose from, with a search field: at most `GAME_LIST_LIMIT` cards at a time, so a source with many
+ * games stays usable. Every word typed must appear in the game's name, id or source. The picked game stays visible
+ * while it matches, in the last slot if it would otherwise be cut off.
+ */
+function GamePicker(props: GamePickerProps) {
+  const { definitions, selectedId, onSelect } = props;
+  const [query, setQuery] = useState("");
+  const matching = useMemo(() => {
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return definitions;
+    return definitions.filter((candidate) => {
+      const text = `${candidate.name} ${candidate.gameId} ${candidate.source}`.toLowerCase();
+      return words.every((word) => text.includes(word));
+    });
+  }, [definitions, query]);
+  const shown = useMemo(() => {
+    const first = matching.slice(0, GAME_LIST_LIMIT);
+    const selected = matching.find((candidate) => candidate.id === selectedId);
+    if (!selected || first.includes(selected)) return first;
+    return [...first.slice(0, GAME_LIST_LIMIT - 1), selected];
+  }, [matching, selectedId]);
+
+  return (
+    <Stack gap="12">
+      <Input
+        aria-label="Search games"
+        leading={<Icon icon={Search} />}
+        placeholder={`Search ${definitions.length === 1 ? "1 game" : `${definitions.length} games`} by name or source`}
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setQuery("");
+          // Enter picks the only match.
+          if (event.key === "Enter" && matching.length === 1) onSelect(matching[0]);
+        }}
+        autoComplete="off"
+      />
+      {shown.length > 0 && (
+        <Grid minChildWidth="16rem" gap="12" role="radiogroup" aria-label="Game">
+          {shown.map((candidate) => (
+            <ChoiceCard key={candidate.id} selected={candidate.id === selectedId} onSelect={() => onSelect(candidate)} title={gameTitle(candidate)} icon={Gamepad2}>
+              {gameFacts(candidate)}
+            </ChoiceCard>
+          ))}
+        </Grid>
+      )}
+      {matching.length === 0 && <span className="io-text-muted">No game matches "{query.trim()}".</span>}
+      {matching.length > shown.length && (
+        <span className="io-text-muted">
+          Showing {shown.length} of {matching.length} {query.trim() === "" ? "games" : "matches"}. Search to narrow the list.
+        </span>
+      )}
+    </Stack>
+  );
 }
 
 function gameTitle(definition: DefinitionDto): ReactNode {
