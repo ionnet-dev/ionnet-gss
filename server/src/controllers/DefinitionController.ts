@@ -35,7 +35,9 @@ export namespace DefinitionController {
 
   /**
    * GET /api/definitions/:id/options/:key → VariableOptionsResponse (M3). 404 unknown variable, 400 when it has no
-   * `options_from`; `admin_only` variables 404 for non-admins. A failed fetch's cause is shown to admins only.
+   * `options_from`; `admin_only` variables 404 for non-admins. A failed fetch's cause is shown to admins only.  
+   * A list that names other variables takes their current values from the query (`?version=1.21.4`); a missing one
+   * uses its default, and one its variable wouldn't accept is a 400.
    */
   router.get("/:id/options/:key", async (c) => {
     const id = paramInt(c, "id");
@@ -43,7 +45,11 @@ export namespace DefinitionController {
     if (!definition) throw HttpError.notFound("There is no game definition with that id.");
     const decl = (definition.document.variables ?? []).find((variable) => variable.key === c.req.param("key"));
     if (!decl || (decl.admin_only && !c.var.user.isAdmin())) throw HttpError.notFound("This game has no such variable.");
-    const result = await OptionsFetcher.getOptions(decl);
+    const decls = definition.document.variables ?? [];
+    // A non-admin can't see admin-only settings, so can't probe their lists through a dependent one: their defaults apply.
+    const query = c.req.query();
+    const given = c.var.user.isAdmin() ? query : Object.fromEntries(Object.entries(query).filter(([key]) => !decls.find((other) => other.key === key)?.admin_only));
+    const result = await OptionsFetcher.getOptions(decl, await OptionsFetcher.dependencyValues(decl, decls, given));
     // The fetch error can name internal details (redirect targets, TLS and DNS errors): only admins see it.
     if (result.error !== null && !c.var.user.isAdmin()) result.error = OptionsFetcher.GENERIC_ERROR;
     return c.json<VariableOptionsResponse>(result);

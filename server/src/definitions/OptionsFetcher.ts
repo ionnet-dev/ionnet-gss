@@ -1,13 +1,18 @@
 /**
  * `options_from` lists (M3): fetched by the panel only, never by hosts or hooks. https only, host on
  * OPTIONS_FETCH_HOSTS (redirects followed only to allowed hosts, at most 3), 10 s timeout, ≤ 2 MiB JSON body,
- * results cached in memory for OPTIONS_CACHE_MIN per URL+selector (failures cached 1 min, so a dead upstream isn't
- * hammered; a refresh that fails keeps serving the last good list). Selection per `OptionsSource`: items → where →
+ * responses cached in memory for OPTIONS_CACHE_MIN per URL and lists per URL+selector (failures cached 1 min, so a
+ * dead upstream isn't hammered; a refresh that fails keeps serving the last good list). Both caches are capped. Selection per `OptionsSource`: items → where →
  * value → include → reverse → limit; values are strings of ≤ 128 characters without control characters (others
- * dropped). Static `options` are prepended and duplicates removed.
+ * dropped). Static `options` are prepended and duplicates removed.  
+ * A source may name other variables (`{{vars.<key>}}` in `url` after the host, `where` values and `include`): it is
+ * rendered with their current values first (`render`), which must be valid values of those variables
+ * (`dependencyValues`), so a caller can't make the panel fetch or cache arbitrary combinations. Only a templated `url`
+ * fetches per value; `where` and `include` select from the one cached response.
  */
 import type { VariableOptionsResponse } from "@shared/api/definitions.ts";
 import type { OptionsSource, VariableDecl } from "@shared/protocol/protocol.gen.ts";
+import { OPTIONS_PLACEHOLDER, optionsDependencies, whenHolds } from "@shared/variables.ts";
 import { Config } from "../Config.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { Patterns } from "./patterns.ts";
@@ -25,6 +30,19 @@ export namespace OptionsFetcher {
   const MAX_VALUE_LENGTH = 128;
   const FAILURE_CACHE_MS = 60_000;
   const PATH_PATTERN = /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/;
+  const TEMPLATE = OPTIONS_PLACEHOLDER;
+  /**
+   * Most rendered lists kept; the oldest go first once expired ones are dropped.
+   */
+  const MAX_CACHED_LISTS = 500;
+  /**
+   * Most upstream responses kept (each up to MAX_BODY_BYTES).
+   */
+  const MAX_CACHED_BODIES = 32;
+  /**
+   * Longest value of a variable a source depends on.
+   */
+  export const MAX_DEPENDENCY_LENGTH = 128;
 
   interface Entry {
     values: string[] | null; // The last good list.
@@ -33,8 +51,18 @@ export namespace OptionsFetcher {
     expires: number;
   }
 
+  interface Body {
+    body: unknown; // Parsed JSON; undefined when the fetch failed.
+    fetchedAt: Date | null;
+    error: string | null;
+    expires: number;
+  }
+
   const _cache = new Map<string, Entry>();
   const _inFlight = new Map<string, Promise<Entry>>();
+  const _bodies = new Map<string, Body>();
+  const _bodiesInFlight = new Map<string, Promise<Body>>();
+  let _generation = 0; // Bumped by clearCache: a fetch started before it doesn't store its result.
 
   /**
    * The https hosts `options_from` may fetch from (lowercase).
@@ -54,8 +82,16 @@ export namespace OptionsFetcher {
       if (!["url", "items", "value", "where", "include", "reverse", "limit"].includes(key)) return `has the unknown key "${key}". Known keys: url, items, value, where, include, reverse, limit.`;
     }
     if (typeof source.url !== "string") return "needs a url (https).";
-    const urlProblem = checkUrl(source.url);
+    const templateProblem = [source.url, source.include, ...(isPlainObject(source.where) ? Object.values(source.where) : [])]
+      .filter((text): text is string => typeof text === "string")
+      .map((text) => text.replace(TEMPLATE, "").includes("{{") ? "can only use {{vars.<key>}} placeholders, without filters." : null)
+      .find((found) => found !== null);
+    if (templateProblem) return templateProblem;
+    // The host must not depend on a variable: render with two different values and compare.
+    const [urlA, urlB] = ["a", "b"].map((sample) => (source.url as string).replace(TEMPLATE, sample));
+    const urlProblem = checkUrl(urlA);
     if (urlProblem) return `url ${urlProblem}`;
+    if (new URL(urlA).host !== new URL(urlB).host) return "url can only use {{vars.<key>}} after the host.";
     for (const key of ["items", "value"] as const) {
       const path = source[key];
       if (path === undefined) continue;
@@ -69,7 +105,7 @@ export namespace OptionsFetcher {
     }
     if (source.include !== undefined) {
       if (typeof source.include !== "string") return "include must be a regular expression string.";
-      const found = Patterns.problem(source.include);
+      const found = Patterns.problem(source.include.replace(TEMPLATE, "x"));
       if (found) return `include ${found}`;
     }
     if (source.reverse !== undefined && typeof source.reverse !== "boolean") return "reverse must be true or false.";
@@ -99,12 +135,80 @@ export namespace OptionsFetcher {
   }
 
   /**
-   * The current list for a select with `options_from`. Never throws for upstream problems (they go in `error`).
+   * The variables an `options_from` source names, in order of first use.
+   */
+  export function dependencies(source: OptionsSource | undefined): string[] {
+    return optionsDependencies(source);
+  }
+
+  /**
+   * The values `decl`'s source depends on, as text: from `given` (submitted or stored values, or the options request's
+   * query), else the dependency's default, else empty. Each must be a value its own variable accepts: one of its
+   * static options, in its own fetched list (checked the same way, so with its own dependencies), matching its
+   * `pattern`, or a number or boolean of that type; a plain string without a pattern only gets the length and
+   * character checks. `.` and `..` are refused so a value can't step out of a templated URL path.
+   * @throws HttpError 400 naming the dependency.
+   */
+  export async function dependencyValues(decl: VariableDecl, decls: VariableDecl[], given: Record<string, unknown>): Promise<Record<string, string>> {
+    const values: Record<string, string> = {};
+    for (const key of dependencies(decl.options_from)) {
+      const other = decls.find((candidate) => candidate.key === key);
+      const raw = given[key] ?? other?.default;
+      const value = typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean" ? String(raw) : "";
+      if (value !== "" && !(other && await isValidDependency(other, value, decls, given))) {
+        throw HttpError.badRequest(`"${other?.label ?? key}" (${key}) isn't one of its choices, so the choices of "${decl.label ?? decl.key}" can't be loaded for it.`);
+      }
+      values[key] = value;
+    }
+    return values;
+  }
+
+  async function isValidDependency(decl: VariableDecl, value: string, decls: VariableDecl[], given: Record<string, unknown>): Promise<boolean> {
+    // deno-lint-ignore no-control-regex
+    if (value.length > MAX_DEPENDENCY_LENGTH || /[\u0000-\u001f\u007f]/.test(value) || value === "." || value === "..") return false;
+    if (decl.options?.includes(value)) return true;
+    switch (decl.type) {
+      case "number": {
+        const number = value.trim() === "" ? NaN : Number(value);
+        return Number.isFinite(number) && (decl.min === undefined || number >= decl.min) && (decl.max === undefined || number <= decl.max);
+      }
+      case "boolean":
+        return value === "true" || value === "false";
+      case "secret":
+        return false; // Validation refuses secret dependencies; never send one to another site.
+      case "select":
+        if (decl.options_from) return await isAllowed(decl, value, await dependencyValues(decl, decls, given));
+        return false; // A static select's value must be one of its options.
+      default:
+        return decl.pattern === undefined || Patterns.matchesWhole(decl.pattern, value);
+    }
+  }
+
+  /**
+   * `source` with its `{{vars.<key>}}` placeholders filled from `values`: URL-encoded in `url`, as is in `where`,
+   * regex-escaped in `include` (matched literally). A missing value renders as empty text.
+   */
+  export function render(source: OptionsSource, values: Record<string, string>): OptionsSource {
+    const fill = (text: string, encode: (value: string) => string) => text.replace(TEMPLATE, (_, key: string) => encode(values[key] ?? ""));
+    const rendered: OptionsSource = { ...source, url: fill(source.url, encodeURIComponent) };
+    if (source.where) rendered.where = Object.fromEntries(Object.entries(source.where).map(([path, value]) => [path, fill(value, (text) => text)]));
+    if (source.include !== undefined) rendered.include = fill(source.include, escapeRegExp);
+    return rendered;
+  }
+
+  /**
+   * The current list for a select with `options_from`, rendered with `values` (see `dependencyValues`) when the source
+   * names other variables. Never throws for upstream problems (they go in `error`).
    * @throws HttpError 400 when the variable has no `options_from`.
    */
-  export async function getOptions(decl: VariableDecl): Promise<VariableOptionsResponse> {
-    const source = decl.options_from;
-    if (!source) throw HttpError.badRequest(`The variable "${decl.key}" doesn't load its options from a URL.`);
+  export async function getOptions(decl: VariableDecl, values: Record<string, string> = {}): Promise<VariableOptionsResponse> {
+    if (!decl.options_from) throw HttpError.badRequest(`The variable "${decl.key}" doesn't load its options from a URL.`);
+    const source = render(decl.options_from, values);
+    if (source.include !== undefined) {
+      // A long dependency value can push the rendered pattern past the length limit.
+      const found = Patterns.problem(source.include);
+      if (found) return { options: decl.options ?? [], fetchedAt: null, error: `The rendered include pattern ${found}`, pattern: decl.pattern ?? null };
+    }
     const entry = await load(source);
     const options = [...new Set([...(decl.options ?? []), ...(entry.values ?? [])])];
     return {
@@ -119,12 +223,46 @@ export namespace OptionsFetcher {
    * Whether `value` is acceptable for the select: in the (cached or freshly fetched) list, or, when the list can't be
    * fetched, matching `decl.pattern`. Used by the server service after `DefinitionEngine.resolveVariables`.
    */
-  export async function isAllowed(decl: VariableDecl, value: string): Promise<boolean> {
+  export async function isAllowed(decl: VariableDecl, value: string, values: Record<string, string> = {}): Promise<boolean> {
     if (decl.options?.includes(value)) return true;
     if (!decl.options_from) return decl.options === undefined;
-    const result = await getOptions(decl);
+    const result = await getOptions(decl, values);
     if (result.error === null) return result.options.includes(value);
     return decl.pattern !== undefined && Patterns.matchesWhole(decl.pattern, value);
+  }
+
+  /**
+   * Checked-in `select` values that come from a fetched list. Only the keys the caller sent (and lists that depend on,
+   * or are shown because of, one of them) are looked at, so a stored value that has since left the list doesn't block
+   * unrelated changes. A variable hidden by its `when` isn't checked against its list (its dependencies may not fit
+   * it), but a value sent for it must still be its default, one of its static options or match its `pattern`.
+   * Used by `GameServerService` after `DefinitionEngine.resolveVariables` on create, settings and upgrade.
+   * @throws HttpError 400 naming the variable.
+   */
+  export async function checkValues(decls: VariableDecl[] | undefined, values: Record<string, unknown>, keys: string[], detailed: boolean): Promise<void> {
+    for (const decl of decls ?? []) {
+      if (!decl.options_from) continue;
+      const value = values[decl.key];
+      const label = `"${decl.label ?? decl.key}" (${decl.key})`;
+      if (!whenHolds(decl.when, values)) {
+        if (!keys.includes(decl.key) || typeof value !== "string" || value === decl.default || decl.options?.includes(value)) continue;
+        if (decl.pattern !== undefined && Patterns.matchesWhole(decl.pattern, value)) continue;
+        const accepted = [decl.options?.length ? `one of: ${decl.options.join(", ")}` : "", decl.pattern !== undefined ? `a value matching ${decl.pattern}` : ""].filter(Boolean).join(", or ");
+        throw HttpError.badRequest(`${label} isn't used with these settings, so it can only be ${accepted || "left at its default"}.`);
+      }
+      // A static option ("latest", "recommended") needs no list, so its dependencies don't matter.
+      if (typeof value === "string" && decl.options?.includes(value)) continue;
+      const dependencies = optionsDependencies(decl.options_from);
+      const triggers = [decl.key, ...dependencies, ...Object.keys(decl.when ?? {})];
+      if (!triggers.some((key) => keys.includes(key))) continue;
+      const context = await dependencyValues(decl, decls ?? [], values);
+      if (typeof value !== "string" || await isAllowed(decl, value, context)) continue;
+      const list = await getOptions(decl, context);
+      const cause = list.error === null ? "" : detailed ? `the list couldn't be loaded: ${list.error}` : "the list couldn't be loaded right now";
+      const hint = cause !== "" && decl.pattern !== undefined ? ` (${cause}; it must match ${decl.pattern})` : cause !== "" ? ` (${cause})` : "";
+      const after = dependencies.length > 0 ? ` for the chosen ${dependencies.map((key) => decls?.find((other) => other.key === key)?.label ?? key).join(" and ")}` : "";
+      throw HttpError.badRequest(`${label} must be one of the offered values${after}${hint}.`);
+    }
   }
 
   /**
@@ -153,10 +291,23 @@ export namespace OptionsFetcher {
   }
 
   /**
-   * Forget every cached list (the allowlist or a definition changed).
+   * Forget every cached list and response (the allowlist or a definition changed).
    */
   export function clearCache(): void {
+    _generation++;
     _cache.clear();
+    _bodies.clear();
+    _inFlight.clear();
+    _bodiesInFlight.clear();
+  }
+
+  function escapeRegExp(text: string): string {
+    // Only the characters `u`-mode allows (and needs) to be escaped.
+    return text.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&");
+  }
+
+  function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
   function pathValue(root: unknown, path: string): unknown {
@@ -178,19 +329,64 @@ export namespace OptionsFetcher {
     if (cached && cached.expires > Date.now()) return cached;
     let pending = _inFlight.get(key);
     if (!pending) {
-      pending = refresh(source, cached).then((entry) => {
-        _cache.set(key, entry);
+      const generation = _generation;
+      const started: Promise<Entry> = refresh(source, cached).then((entry) => {
+        if (generation === _generation) remember(_cache, key, entry, MAX_CACHED_LISTS);
         return entry;
-      }).finally(() => _inFlight.delete(key));
+      }).finally(() => {
+        if (_inFlight.get(key) === started) _inFlight.delete(key);
+      });
+      pending = started;
       _inFlight.set(key, pending);
     }
     return await pending;
   }
 
+  /**
+   * The parsed response at `url`, shared by every list cut from it.
+   */
+  async function loadBody(url: string): Promise<Body> {
+    const cached = _bodies.get(url);
+    if (cached && cached.expires > Date.now()) return cached;
+    let pending = _bodiesInFlight.get(url);
+    if (!pending) {
+      const generation = _generation;
+      const started: Promise<Body> = fetchJson(url).then(
+        (body): Body => ({ body, fetchedAt: new Date(), error: null, expires: Date.now() + Config.OPTIONS_CACHE_MIN * 60_000 }),
+        (error: Error): Body => ({ body: undefined, fetchedAt: null, error: error.message, expires: Date.now() + FAILURE_CACHE_MS }),
+      ).then((entry) => {
+        if (generation === _generation) remember(_bodies, url, entry, MAX_CACHED_BODIES);
+        return entry;
+      }).finally(() => {
+        if (_bodiesInFlight.get(url) === started) _bodiesInFlight.delete(url);
+      });
+      pending = started;
+      _bodiesInFlight.set(url, pending);
+    }
+    return await pending;
+  }
+
+  /**
+   * Store `value` under `key`, first dropping expired entries and then the oldest when the map is full.
+   */
+  function remember<T extends { expires: number }>(map: Map<string, T>, key: string, value: T, max: number): void {
+    map.delete(key); // Re-inserting moves it to the newest end.
+    if (map.size >= max) {
+      const now = Date.now();
+      for (const [old, entry] of map) if (entry.expires <= now) map.delete(old);
+      for (const old of map.keys()) {
+        if (map.size < max) break;
+        map.delete(old);
+      }
+    }
+    map.set(key, value);
+  }
+
   async function refresh(source: OptionsSource, previous: Entry | undefined): Promise<Entry> {
     try {
-      const body = await fetchJson(source.url);
-      return { values: select(body, source), fetchedAt: new Date(), error: null, expires: Date.now() + Config.OPTIONS_CACHE_MIN * 60_000 };
+      const response = await loadBody(source.url);
+      if (response.error !== null) throw new Error(response.error);
+      return { values: select(response.body, source), fetchedAt: response.fetchedAt, error: null, expires: response.expires };
     } catch (error) {
       const message = (error as Error).message;
       if (previous?.values) return { ...previous, expires: Date.now() + FAILURE_CACHE_MS }; // Keep serving the last good list.

@@ -62,11 +62,11 @@ function SettingsForm(props: { server: GameServerDetailResponse; editable: boole
   const { server, editable, onChanged } = props;
   const notify = useNotify();
   const declared = useMemo(() => fromServer(server.variables), [server.variables]);
-  const variables = useVariableOptions(server.definition.id, declared);
   const initial = useMemo(() => initialValues(declared), [declared]);
+  const [values, setValues] = useState<FormValues>(initial);
+  const variables = useVariableOptions(server.definition.id, declared, values);
 
   const [name, setName] = useState(server.name);
-  const [values, setValues] = useState<FormValues>(initial);
   const [autostart, setAutostart] = useState(server.autostart);
   const [autoRestart, setAutoRestart] = useState(server.autoRestart);
   const [allowPrivateNetwork, setAllowPrivateNetwork] = useState(server.allowPrivateNetwork);

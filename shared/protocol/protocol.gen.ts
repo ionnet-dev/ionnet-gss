@@ -469,14 +469,18 @@ export interface VariableDecl {
    * `secret` only: generate this many characters once at create; never shown.
    */
   generate?: number;
+  /**
+   * Only applies while each named variable has one of the listed values, e.g. `{ flavour: [forge] }` (booleans as `"true"`/`"false"`). The form hides it otherwise, and a hidden select isn't checked against its `options_from` list. Absent = always applies.
+   */
+  when?: Record<string, string[]>;
 }
 
 /**
- * A dynamic `select` list fetched by the panel (never by a host or a hook): GET `url` (https, host on OPTIONS_FETCH_HOSTS, ≤ 2 MiB JSON, 10 s, cached OPTIONS_CACHE_MIN), take the array at `items`, keep entries whose fields equal `where`, map each to `value`, keep those matching `include`, optionally reverse, cut to `limit`. Static `options` are listed first (e.g. `latest`). If the fetch fails, a submitted value is accepted when it matches the variable's `pattern`.
+ * A dynamic `select` list fetched by the panel (never by a host or a hook): GET `url` (https, host on OPTIONS_FETCH_HOSTS, ≤ 2 MiB JSON, 10 s, cached OPTIONS_CACHE_MIN), take the array at `items`, keep entries whose fields equal `where`, map each to `value`, keep those matching `include`, optionally reverse, cut to `limit`. Static `options` are listed first (e.g. `latest`). If the fetch fails, a submitted value is accepted when it matches the variable's `pattern`. `url` (after the host), `where` values and `include` may name other variables as `{{vars.<key>}}` (no filters): the list then depends on their current values, which the form sends along and refetches with when they change; a value is URL-encoded in `url` and matched literally in `include`.
  */
 export interface OptionsSource {
   /**
-   * https URL; no templates.
+   * https URL; `{{vars.<key>}}` only after the host.
    */
   url: string;
   /**
@@ -488,11 +492,11 @@ export interface OptionsSource {
    */
   value?: string;
   /**
-   * Item field (dotted path) → required string value, e.g. `{ type: release }`.
+   * Item field (dotted path) → required string value, e.g. `{ type: release }` or `{ requires.0.equals: '{{vars.version}}' }`.
    */
   where?: Record<string, string>;
   /**
-   * RE2 the value must match.
+   * RE2 the value must match (anywhere); `{{vars.<key>}}` inserts that value as literal text.
    */
   include?: string;
   /**

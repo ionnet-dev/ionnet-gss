@@ -309,19 +309,21 @@ type VariableDecl struct {
 	Bind      VariableBind `json:"bind,omitempty"`
 	// Generate secret only: generate this many characters once at create; never shown.
 	Generate int64 `json:"generate,omitempty"`
+	// When only applies while each named variable has one of the listed values, e.g. { flavour: [forge] } (booleans as "true"/"false"). The form hides it otherwise, and a hidden select isn't checked against its options_from list. Absent = always applies.
+	When map[string][]string `json:"when,omitempty"`
 }
 
-// OptionsSource A dynamic select list fetched by the panel (never by a host or a hook): GET url (https, host on OPTIONS_FETCH_HOSTS, ≤ 2 MiB JSON, 10 s, cached OPTIONS_CACHE_MIN), take the array at items, keep entries whose fields equal where, map each to value, keep those matching include, optionally reverse, cut to limit. Static options are listed first (e.g. latest). If the fetch fails, a submitted value is accepted when it matches the variable's pattern.
+// OptionsSource A dynamic select list fetched by the panel (never by a host or a hook): GET url (https, host on OPTIONS_FETCH_HOSTS, ≤ 2 MiB JSON, 10 s, cached OPTIONS_CACHE_MIN), take the array at items, keep entries whose fields equal where, map each to value, keep those matching include, optionally reverse, cut to limit. Static options are listed first (e.g. latest). If the fetch fails, a submitted value is accepted when it matches the variable's pattern. url (after the host), where values and include may name other variables as {{vars.<key>}} (no filters): the list then depends on their current values, which the form sends along and refetches with when they change; a value is URL-encoded in url and matched literally in include.
 type OptionsSource struct {
-	// URL https URL; no templates.
+	// URL https URL; {{vars.<key>}} only after the host.
 	URL string `json:"url"`
 	// Items dotted path to the array in the response, e.g. versions. Empty = the response is the array.
 	Items string `json:"items,omitempty"`
 	// Value dotted path inside each item, e.g. id. Empty = the item itself (arrays of strings).
 	Value string `json:"value,omitempty"`
-	// Where item field (dotted path) → required string value, e.g. { type: release }.
+	// Where item field (dotted path) → required string value, e.g. { type: release } or { requires.0.equals: '{{vars.version}}' }.
 	Where map[string]string `json:"where,omitempty"`
-	// Include RE2 the value must match.
+	// Include RE2 the value must match (anywhere); {{vars.<key>}} inserts that value as literal text.
 	Include string `json:"include,omitempty"`
 	// Reverse reverse the order (newest last in the source).
 	Reverse bool `json:"reverse,omitempty"`

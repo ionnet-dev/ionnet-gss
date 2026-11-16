@@ -55,19 +55,24 @@
         "reinstall": { "type": "boolean", "description": "Changing the value re-runs install." },
         "admin_only": { "type": "boolean", "description": "Only admins see and change it." },
         "bind": { "$ref": "#/$defs/VariableBind" },
-        "generate": { "type": "integer", "description": "`secret` only: generate this many characters once at create; never shown." }
+        "generate": { "type": "integer", "description": "`secret` only: generate this many characters once at create; never shown." },
+        "when": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } },
+          "description": "Only applies while each named variable has one of the listed values, e.g. `{ flavour: [forge] }` (booleans as `\"true\"`/`\"false\"`). The form hides it otherwise, and a hidden select isn't checked against its `options_from` list. Absent = always applies."
+        }
       },
       "required": ["key", "type"]
     },
     "OptionsSource": {
       "type": "object",
-      "description": "A dynamic `select` list fetched by the panel (never by a host or a hook): GET `url` (https, host on OPTIONS_FETCH_HOSTS, ≤ 2 MiB JSON, 10 s, cached OPTIONS_CACHE_MIN), take the array at `items`, keep entries whose fields equal `where`, map each to `value`, keep those matching `include`, optionally reverse, cut to `limit`. Static `options` are listed first (e.g. `latest`). If the fetch fails, a submitted value is accepted when it matches the variable's `pattern`.",
+      "description": "A dynamic `select` list fetched by the panel (never by a host or a hook): GET `url` (https, host on OPTIONS_FETCH_HOSTS, ≤ 2 MiB JSON, 10 s, cached OPTIONS_CACHE_MIN), take the array at `items`, keep entries whose fields equal `where`, map each to `value`, keep those matching `include`, optionally reverse, cut to `limit`. Static `options` are listed first (e.g. `latest`). If the fetch fails, a submitted value is accepted when it matches the variable's `pattern`. `url` (after the host), `where` values and `include` may name other variables as `{{vars.<key>}}` (no filters): the list then depends on their current values, which the form sends along and refetches with when they change; a value is URL-encoded in `url` and matched literally in `include`.",
       "properties": {
-        "url": { "type": "string", "description": "https URL; no templates." },
+        "url": { "type": "string", "description": "https URL; `{{vars.<key>}}` only after the host." },
         "items": { "type": "string", "description": "Dotted path to the array in the response, e.g. `versions`. Empty = the response is the array." },
         "value": { "type": "string", "description": "Dotted path inside each item, e.g. `id`. Empty = the item itself (arrays of strings)." },
-        "where": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Item field (dotted path) → required string value, e.g. `{ type: release }`." },
-        "include": { "type": "string", "description": "RE2 the value must match." },
+        "where": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Item field (dotted path) → required string value, e.g. `{ type: release }` or `{ requires.0.equals: '{{vars.version}}' }`." },
+        "include": { "type": "string", "description": "RE2 the value must match (anywhere); `{{vars.<key>}}` inserts that value as literal text." },
         "reverse": { "type": "boolean", "description": "Reverse the order (newest last in the source)." },
         "limit": { "type": "integer", "description": "At most this many options. Default 100, max 500." }
       },

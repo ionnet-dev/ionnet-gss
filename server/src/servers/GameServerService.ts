@@ -229,7 +229,7 @@ export namespace GameServerService {
 
     const decls = definition.document.variables ?? [];
     const { values } = DefinitionEngine.resolveVariables(decls, variables, null, user.isAdmin());
-    await checkDynamicOptions(decls, values, Object.keys(variables), user.isAdmin());
+    await OptionsFetcher.checkValues(decls, values, Object.keys(variables), user.isAdmin());
     const limits = DefinitionEngine.resolveLimits(decls, values, DEFAULT_LIMITS);
     const services = DefinitionEngine.serviceTotals(definition.document);
 
@@ -317,7 +317,7 @@ export namespace GameServerService {
     const definition = server.definition!;
     const decls = definition.document.variables ?? [];
     const { values, reinstall } = DefinitionEngine.resolveVariables(decls, submitted, server.variables, user.isAdmin());
-    await checkDynamicOptions(decls, values, Object.keys(submitted), user.isAdmin());
+    await OptionsFetcher.checkValues(decls, values, Object.keys(submitted), user.isAdmin());
     const limits = DefinitionEngine.resolveLimits(decls, values, DEFAULT_LIMITS);
 
     const grown = {
@@ -481,7 +481,7 @@ export namespace GameServerService {
     let resolved: { values: Record<string, Value>; reinstall: boolean };
     try {
       resolved = DefinitionEngine.resolveVariables(decls, submitted, server.variables, true);
-      await checkDynamicOptions(decls, resolved.values, Object.keys(submitted), user.isAdmin());
+      await OptionsFetcher.checkValues(decls, resolved.values, Object.keys(submitted), user.isAdmin());
     } catch (error) {
       if (error instanceof HttpError && error.status === 400) {
         throw HttpError.badRequest(`The new version doesn't accept one of this server's settings: ${error.message} Send a new value for it with the upgrade.`);
@@ -968,23 +968,6 @@ export namespace GameServerService {
   }
 
   /**
-   * Checked-in `select` values that come from a fetched list. Only the keys the caller sent are looked at, so a stored
-   * value that has since left the list doesn't block unrelated changes.
-   * @throws HttpError 400 naming the variable.
-   */
-  async function checkDynamicOptions(decls: GameDefinition["variables"], values: Record<string, Value>, keys: string[], detailed: boolean): Promise<void> {
-    for (const decl of decls ?? []) {
-      if (!decl.options_from || !keys.includes(decl.key)) continue;
-      const value = values[decl.key];
-      if (typeof value !== "string" || await OptionsFetcher.isAllowed(decl, value)) continue;
-      const list = await OptionsFetcher.getOptions(decl);
-      const cause = list.error === null ? "" : detailed ? `the list couldn't be loaded: ${list.error}` : "the list couldn't be loaded right now";
-      const hint = cause !== "" && decl.pattern !== undefined ? ` (${cause}; it must match ${decl.pattern})` : cause !== "" ? ` (${cause})` : "";
-      throw HttpError.badRequest(`"${decl.label ?? decl.key}" (${decl.key}) must be one of the offered values${hint}.`);
-    }
-  }
-
-  /**
    * What decides whether an upgrade must reinstall: the rendered install steps and the hook files they run.
    */
   function installFingerprint(spec: ServerSpec): string {
@@ -1259,6 +1242,8 @@ export namespace GameServerService {
           reinstall: decl.reinstall ?? false,
           adminOnly: decl.admin_only ?? false,
           optionsFrom: decl.options_from !== undefined,
+          optionsDependOn: OptionsFetcher.dependencies(decl.options_from),
+          when: decl.when ?? null,
           pattern: decl.pattern ?? null,
           value: decl.type === "secret" ? null : value,
           isSet: value !== null && value !== "",

@@ -132,7 +132,7 @@ function load() {
     /** Most files accepted in a checkout. */
     SOURCE_MAX_FILES: readInt("SOURCE_MAX_FILES", 5000, 1),
     /** Comma-separated https hosts `options_from` may fetch from. */
-    OPTIONS_FETCH_HOSTS: readString("OPTIONS_FETCH_HOSTS", "piston-meta.mojang.com,launchermeta.mojang.com,api.papermc.io"),
+    OPTIONS_FETCH_HOSTS: readString("OPTIONS_FETCH_HOSTS", "piston-meta.mojang.com,launchermeta.mojang.com,api.papermc.io,maven.minecraftforge.net,meta.prismlauncher.org"),
     /** Minutes a fetched option list is cached. */
     OPTIONS_CACHE_MIN: readInt("OPTIONS_CACHE_MIN", 15, 1),
 

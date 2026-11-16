@@ -15,10 +15,12 @@ export namespace DefinitionApi {
   }
 
   /**
-   * The current list of an `options_from` select (M3).
+   * The current list of an `options_from` select (M3). `values` holds the current values of the variables the list
+   * depends on.
    */
-  export function getOptions(id: number, key: string): Promise<VariableOptionsResponse> {
-    return BaseApi.GET(`/definitions/${id}/options/${encodeURIComponent(key)}`);
+  export function getOptions(id: number, key: string, values?: URLSearchParams): Promise<VariableOptionsResponse> {
+    const query = values?.toString() ?? "";
+    return BaseApi.GET(`/definitions/${id}/options/${encodeURIComponent(key)}${query === "" ? "" : `?${query}`}`);
   }
 
   /**

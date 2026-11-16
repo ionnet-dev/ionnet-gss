@@ -100,6 +100,14 @@ export interface ServerVariableDto {
    * true = the choices come from the definition's `options_from`; fetch them for this server's pinned definition.
    */
   optionsFrom: boolean;
+  /**
+   * The variables the `options_from` list depends on: refetch it with their current values when they change.
+   */
+  optionsDependOn: string[];
+  /**
+   * Shown only while each named variable holds one of the listed values. null = always.
+   */
+  when: Record<string, string[]> | null;
   pattern: string | null; // Regular expression a free-text value must match. null = none.
 }
 

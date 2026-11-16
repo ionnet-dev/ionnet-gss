@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { AlertDialog, Badge, Button, Card, CardBody, CardFooter, CardHeader, Dialog, Grid, IconTile, Menu, Spinner, Stack, Tabs } from "@ionnet/iontronic/react";
 import { Activity, Archive, ArrowLeft, CircleArrowUp, Download, Ellipsis, FolderOpen, Hammer, LogOut, Play, RotateCw, Settings, Share2, Square, SquareTerminal, TriangleAlert, Users, Zap } from "@ionnet/iontronic/icons";
 import type { GameServerDetailResponse, ServerAccessLevel } from "@shared/api/servers.ts";
@@ -27,6 +27,7 @@ import VariableForm, {
   type FormValues,
   type FormVariable,
   fromDefinition,
+  fromServer,
   initialValues,
   toValues,
   useVariableOptions,
@@ -293,7 +294,10 @@ function UpdateNotice(props: { server: GameServerDetailResponse; onChanged: () =
   const [values, setValues] = useState<FormValues>({});
   const [errors, setErrors] = useState<FormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
-  const fields = useVariableOptions(latest?.id ?? 0, rejected);
+  // The server's own values stand in for the settings the dialog doesn't ask for (lists that depend on them, `when`).
+  const stored = useMemo(() => initialValues(fromServer(server.variables)), [server.variables]);
+  const context = useMemo(() => ({ ...stored, ...values }), [stored, values]);
+  const fields = useVariableOptions(latest?.id ?? 0, rejected, context);
   if (!latest) return null;
 
   const stopped = STOPPED_STATES.includes(server.state);
@@ -345,9 +349,9 @@ function UpdateNotice(props: { server: GameServerDetailResponse; onChanged: () =
 
   const submitFix = (event: FormEvent) => {
     event.preventDefault();
-    const found = validate(fields, values);
+    const found = validate(fields, context);
     setErrors(found);
-    if (Object.keys(found).length === 0) apply(fields, values);
+    if (Object.keys(found).length === 0) apply(fields, context);
   };
 
   return (
@@ -385,7 +389,7 @@ function UpdateNotice(props: { server: GameServerDetailResponse; onChanged: () =
           <form onSubmit={submitFix}>
             <Dialog.Body>
               <Stack gap="16">
-                <VariableForm variables={fields} values={values} errors={errors} onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))} disabled={busy} />
+                <VariableForm variables={fields} values={context} errors={errors} onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))} disabled={busy} />
                 <FormError>{formError}</FormError>
               </Stack>
             </Dialog.Body>

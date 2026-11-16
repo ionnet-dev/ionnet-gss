@@ -218,9 +218,9 @@ function ChoiceCard(props: { selected: boolean; onSelect: () => void; title: Rea
 function Details(props: { host: HostDto; definition: DefinitionDto }) {
   const { host, definition } = props;
   const base = useMemo(() => fromDefinition(definition), [definition]);
-  const variables = useVariableOptions(definition.id, base);
-  const [name, setName] = useState("");
   const [values, setValues] = useState<FormValues>(() => initialValues(base));
+  const variables = useVariableOptions(definition.id, base, values);
+  const [name, setName] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

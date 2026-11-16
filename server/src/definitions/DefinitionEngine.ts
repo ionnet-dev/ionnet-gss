@@ -109,7 +109,7 @@ export namespace DefinitionEngine {
    */
   const TEMPLATED_KEYS = ["image", "install", "configs", "hooks", "start", "ready", "stop", "console", "players", "backup", "services"] as const;
   const DEFINITION_KEYS = ["id", "name", "extends", "image", "packages", "variables", "ports", "install_timeout", ...TEMPLATED_KEYS.filter((k) => k !== "image")];
-  const VARIABLE_KEYS = ["key", "label", "description", "type", "options", "options_from", "pattern", "default", "unit", "min", "max", "reinstall", "admin_only", "bind", "generate"];
+  const VARIABLE_KEYS = ["key", "label", "description", "type", "options", "options_from", "pattern", "default", "unit", "min", "max", "reinstall", "admin_only", "bind", "generate", "when"];
   const PORT_KEYS = ["name", "proto", "default", "internal"];
   const INSTALL_KEYS = ["steamcmd", "download", "extract", "write", "hook"];
   const CONFIG_KEYS = ["file", "format", "set", "template"];
@@ -154,6 +154,7 @@ export namespace DefinitionEngine {
     if (Object.keys(def.services ?? {}).length > MAX_SERVICES) throw new Error(`${path}: "services" lists ${Object.keys(def.services!).length} services; at most ${MAX_SERVICES} are allowed.`);
     const varKeys = new Set((def.variables ?? []).map((v) => v.key));
     const portNames = new Set((def.ports ?? []).map((p) => p.name));
+    checkVariableLinks(def.variables ?? [], path);
     for (const key of TEMPLATED_KEYS) {
       visitStrings(def[key], key, (text, where) => {
         for (const match of text.matchAll(PLACEHOLDER)) {
@@ -193,6 +194,46 @@ export namespace DefinitionEngine {
         }
       });
     }
+  }
+
+  /**
+   * `when` and `options_from` placeholders name other declared variables (not themselves, not secrets), and lists
+   * don't depend on each other in a circle.
+   * @throws Error naming the file and the variable.
+   */
+  function checkVariableLinks(variables: VariableDecl[], path: string): void {
+    const byKey = new Map(variables.map((v) => [v.key, v]));
+    for (const decl of variables) {
+      const links: [string, string][] = [
+        ...Object.keys(decl.when ?? {}).map((key) => [key, "when"] as [string, string]),
+        ...OptionsFetcher.dependencies(decl.options_from).map((key) => [key, "options_from"] as [string, string]),
+      ];
+      for (const [key, where] of links) {
+        const other = byKey.get(key);
+        if (!other) throw new Error(`${path}: variable "${decl.key}" ${where} names "${key}", which isn't declared.`);
+        if (key === decl.key) throw new Error(`${path}: variable "${decl.key}" ${where} can't name the variable itself.`);
+        if (other.type === "secret") throw new Error(`${path}: variable "${decl.key}" ${where} can't depend on the secret "${key}".`);
+      }
+      // Each value of a url placeholder is its own upstream fetch: only variables with a fixed or listed set of values.
+      for (const key of OptionsFetcher.dependencies(decl.options_from ? { url: decl.options_from.url } : undefined)) {
+        const other = byKey.get(key)!;
+        if (other.type !== "select" && other.type !== "boolean") {
+          throw new Error(`${path}: variable "${decl.key}" options_from url can only use select or boolean variables ("${key}" is a ${other.type}); use it in where or include instead.`);
+        }
+      }
+    }
+    // A list that depends on another list must not end up depending on itself.
+    const visiting = new Set<string>();
+    const done = new Set<string>();
+    const visit = (key: string, trail: string[]): void => {
+      if (done.has(key)) return;
+      if (visiting.has(key)) throw new Error(`${path}: the options_from lists of ${[...trail, key].join(" → ")} depend on each other in a circle.`);
+      visiting.add(key);
+      for (const next of OptionsFetcher.dependencies(byKey.get(key)?.options_from)) visit(next, [...trail, key]);
+      visiting.delete(key);
+      done.add(key);
+    };
+    for (const decl of variables) visit(decl.key, []);
   }
 
   /**
@@ -354,6 +395,14 @@ export namespace DefinitionEngine {
           if (!isRecord(item.options_from)) return fail(`${at} options_from`, "must be a mapping with a url.");
           const problem = OptionsFetcher.problem(item.options_from);
           if (problem) fail(`${at} options_from`, problem);
+        }
+        if (item.when !== undefined) {
+          if (!isRecord(item.when) || Object.keys(item.when).length === 0) fail(`${at} when`, "must be a mapping of variable to the values it applies for, e.g. { flavour: [forge] }.");
+          for (const [other, values] of Object.entries(item.when as Record<string, unknown>)) {
+            if (!Array.isArray(values) || values.length === 0 || !values.every((value) => typeof value === "string")) {
+              fail(`${at} when.${other}`, "must be a list of values (text; booleans as \"true\" or \"false\").");
+            }
+          }
         }
         if (item.pattern !== undefined) {
           if (item.type !== "string" && item.type !== "select") fail(`${at} pattern`, "is only for type string or select.");

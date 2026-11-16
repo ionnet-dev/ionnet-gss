@@ -511,6 +511,20 @@ Minecraft server created from the UI on this machine, joinable at the shown addr
   reverse, limit}`; https host on OPTIONS_FETCH_HOSTS; ≤ 2 MiB; 10 s; cached OPTIONS_CACHE_MIN; static `options`
   first; on fetch failure the value must match the variable's new `pattern`. Route
   `GET /api/definitions/:id/options/:key`. Replaces the blueprint's `options_from: { hook }`.
+- **Dependent lists and `when`.** `{{vars.<key>}}` (no filters) in an `options_from` `url` (after the host, URL-encoded),
+  `where` values and `include` (regex-escaped) makes the list depend on other variables: `OptionsFetcher.render`
+  fills them before the fetch. The options route takes the values from the query (`?version=1.21.4`, missing →
+  default); `OptionsFetcher.dependencyValues` refuses a value its own variable wouldn't accept (static option, own
+  list, `pattern`, type), and `.`/`..`, so callers can't make the panel fetch or cache arbitrary combinations.
+  Responses are cached per URL (≤ 32) and lists per rendered source (≤ 500), so only a templated `url` fetches per value.
+  `OptionsFetcher.checkValues` (create, settings, upgrade) re-checks a list when it, a dependency or a `when` key
+  changes. `when: { flavour: [forge] }` shows a variable only for those values (`whenHolds` in `shared/variables.ts`,
+  with `optionsDependencies`, used by both sides); a hidden select isn't checked against its list, but a value sent for
+  it must be a static option or match its `pattern`. Validation refuses unknown, self, secret and circular references.
+  Client: `useVariableOptions(id, variables, values)` refetches a dependent list 300 ms after its dependencies change,
+  skips hidden ones, accepts static options while a list is down, and `VariableForm` moves a value the new list dropped
+  (or a stored value of a list that was hidden at the start) to its first choice. `ServerVariableDto` carries
+  `optionsDependOn` and `when`.
 - **steamcmd** (gss-init): per-server copy in `INIT_STEAMCMD_DIR` (`/data/.gss/steamcmd`; no per-host cache),
   fetched from `STEAMCMD_URL`, anonymous login only, `+force_install_dir <dir>` (below /data), `+app_update <app>
   [-beta b] [validate]`, up to `STEAMCMD_ATTEMPTS` (3) tries, progress lines to the console, install progress per
