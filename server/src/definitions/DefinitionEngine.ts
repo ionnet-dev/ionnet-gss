@@ -794,6 +794,20 @@ export namespace DefinitionEngine {
     }
     return limits;
   }
+
+  /**
+   * The memory and CPU a definition's stack services add on top of the game container's limits. Host capacity and
+   * quota usage (M5) both count them.
+   */
+  export function serviceTotals(document: GameDefinition): { memoryMb: number; cpuMillis: number } {
+    let memoryMb = 0;
+    let cpuMillis = 0;
+    for (const service of Object.values(document.services ?? {})) {
+      memoryMb += service.limits?.memoryMb ?? DEFAULT_SERVICE_LIMITS.memoryMb;
+      cpuMillis += service.limits?.cpuMillis ?? DEFAULT_SERVICE_LIMITS.cpuMillis;
+    }
+    return { memoryMb, cpuMillis };
+  }
   //#endregion
 
   //#region Images and templates

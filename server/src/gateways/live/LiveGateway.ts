@@ -199,6 +199,14 @@ export class LiveGateway {
    * Close a user's sockets, e.g. with LIVE_CLOSE.UNAUTHORIZED after a password change or LIVE_CLOSE.RECONNECT after a
    * role change.
    */
+  /**
+   * Unsubscribe a user's sockets from a topic (M5: a removed share), telling each with `{ t: "error", topic }` so the
+   * client stops expecting the stream.
+   */
+  public static dropTopic(userId: number, topic: LiveTopic): void {
+    // TODO(builder): M5 sharing
+  }
+
   public static closeUser(userId: number, code: number, reason: string): void {
     for (const client of LiveGateway._clients) {
       if (client.userId !== userId) continue;

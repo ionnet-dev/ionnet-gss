@@ -155,7 +155,10 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
    * @param online From `AgentGateway.isOnline(this.id)`.
    * @param serverCount Game servers on this host (0 in M1).
    */
-  public toClientJSON(online: boolean, serverCount: number): HostDto {
+  /**
+   * @param canCreate The caller may create servers here (M5: SERVERS_CREATE and SERVERS_MANAGE_ALL or a grant).
+   */
+  public toClientJSON(online: boolean, serverCount: number, canCreate = false): HostDto {
     return {
       id: this.id,
       name: this.name,
@@ -169,6 +172,7 @@ export class Host extends Model<InferAttributes<Host>, InferCreationAttributes<H
       capacity: { maxMemoryMb: this.maxMemoryMb, maxCpuMillis: this.maxCpuMillis, maxDiskMb: this.maxDiskMb },
       serverCount,
       facts: this.facts,
+      canCreate, // TODO(builder): M5 grants. Callers pass it (HostController list and detail).
     };
   }
 

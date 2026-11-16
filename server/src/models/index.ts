@@ -20,6 +20,7 @@ import { Backup } from "./Backup.ts";
 import { ServerShare } from "./ServerShare.ts";
 import { Schedule } from "./Schedule.ts";
 import { AuditLog } from "./AuditLog.ts";
+import { RecoveryCode } from "./RecoveryCode.ts";
 
 /**
  * The one Sequelize instance. MariaDB through the mysql dialect; columns are snake_case (`underscored`).
@@ -36,7 +37,7 @@ export const sequelize = new Sequelize(Config.DB_NAME, Config.DB_USER, Config.DB
 });
 
 //#region Init
-for (const model of [User, Role, Quota, Invite, Host, HostGrant, EnrolToken, Source, Definition, GameServer, PortAllocation, Backup, ServerShare, Schedule, AuditLog]) {
+for (const model of [User, Role, Quota, Invite, Host, HostGrant, EnrolToken, Source, Definition, GameServer, PortAllocation, Backup, ServerShare, Schedule, AuditLog, RecoveryCode]) {
   model.initModel(sequelize);
 }
 //#endregion
@@ -49,6 +50,7 @@ Role.belongsTo(Role, { as: "inherits", foreignKey: "inheritsId" });
 User.hasOne(Quota, { as: "quota", foreignKey: "userId", onDelete: "CASCADE" });
 Quota.belongsTo(User, { as: "user", foreignKey: "userId" });
 User.belongsTo(User, { as: "invitedBy", foreignKey: "invitedById" });
+User.hasMany(RecoveryCode, { as: "recoveryCodes", foreignKey: "userId", onDelete: "CASCADE" });
 Invite.belongsTo(Role, { as: "role", foreignKey: "roleId" });
 Invite.belongsTo(User, { as: "createdBy", foreignKey: "createdById" });
 Invite.belongsTo(User, { as: "usedBy", foreignKey: "usedById" });
@@ -81,6 +83,7 @@ Backup.belongsTo(User, { as: "createdBy", foreignKey: "createdById" });
 GameServer.hasMany(ServerShare, { as: "shares", foreignKey: "serverId", onDelete: "CASCADE" });
 ServerShare.belongsTo(GameServer, { as: "server", foreignKey: "serverId" });
 ServerShare.belongsTo(User, { as: "user", foreignKey: "userId" });
+User.hasMany(ServerShare, { as: "shares", foreignKey: "userId", onDelete: "CASCADE" });
 GameServer.hasMany(Schedule, { as: "schedules", foreignKey: "serverId", onDelete: "CASCADE" });
 Schedule.belongsTo(GameServer, { as: "server", foreignKey: "serverId" });
 
@@ -106,5 +109,5 @@ export async function isDatabaseUp(): Promise<boolean> {
   return await sequelize.query("SELECT 1").then(() => true).catch(() => false);
 }
 
-export { AuditLog, Backup, Definition, EnrolToken, GameServer, Host, HostGrant, Invite, PortAllocation, Quota, Role, Schedule, ServerShare, Source, User };
+export { AuditLog, Backup, Definition, EnrolToken, GameServer, Host, HostGrant, Invite, PortAllocation, Quota, RecoveryCode, Role, Schedule, ServerShare, Source, User };
 export default sequelize;

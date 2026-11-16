@@ -33,10 +33,12 @@ server/src/
                        + 20261116000000-m2-servers.ts (sources.kind)
                        + 20261117000000-server-deleting.ts (state `deleting`, delete_keep_data)
                        + 20261118000000-server-private-network.ts (allow_private_network)
+                       + 20261119000000-m3-sources.ts + 20261120000000-m5-tenancy.ts (totp_last_step, recovery_codes)
   models/              one class per file (declare attributes, initModel(), finders, serializers) + columns.ts
-                       + index.ts (instance, init, every association)
+                       + index.ts (instance, init, every association); M5: RecoveryCode
   controllers/         one namespace per resource exporting `router`; ApiController mounts them (M4: File, Backup,
-                       Metrics below /servers/:id, Download at /downloads)
+                       Metrics below /servers/:id, Download at /downloads; M5: Quota at /quota, Totp at /auth/totp +
+                       /users/:id/totp, Share below /servers/:id, Agent at /agent)
   gateways/agent/      AgentGateway (static: by host id), AgentConnection (envelope, phases), handlers/ (by type)
   gateways/live/       LiveGateway (static: push(event, data, audience))
   definitions/         DefinitionEngine (pure: parse, resolve extends, variables, limits, image, render, buildSpec),
@@ -46,7 +48,8 @@ server/src/
   jobs/                sourceSync.ts (M3: interval sync of git sources)
   servers/             GameServerService: every server operation (access, quota, ports, provision, lifecycle,
                        console, agent state → rows + live events, reconcile after hello); M4: ServerAccess (share-aware
-                       levels), agentCall (agent codes → HTTP), FileService, BackupService, MetricsService + MetricRing
+                       levels), agentCall (agent codes → HTTP), FileService, BackupService, MetricsService + MetricRing;
+                       M5: ShareService
   transfers/           M4: TransferRelay (browser HTTP ⇄ agent chunks, windowed), DownloadTickets (single-use links)
   lib/                 HttpError, http (AppEnv, readBody, paramInt/Uuid, clientIp), RateLimiter, tokens, portPool, totp (M5)
 client/                npm + Vite (Iontronic is a github: dep Deno can't install)
@@ -56,12 +59,13 @@ client/                npm + Vite (Iontronic is a github: dep Deno can't install
   src/router/          Router.tsx (Router, Link, navigate, useLocation)
   src/Api/             BaseApi.ts (token+user in localStorage, GET/POST/…, M4: PUT_TEXT, UPLOAD with progress) +
                        AuthApi, UserApi, InviteApi, HostApi, ServerApi, DefinitionApi (M2), SourceApi (M3),
-                       FileApi, BackupApi, MetricsApi (M4)
+                       FileApi, BackupApi, MetricsApi (M4), QuotaApi, ShareApi (M5)
   src/controllers/     Controller (notify), AuthController (session, permissions)
   src/hooks/           useController, useAuth, useResource (load + reload + live-event refetch)
   src/live/            LiveSocket (the /ws/live client, on(event))
   src/components/      AppLayout (AppShell/Sidebar/TabBar), AuthLayout, … M4: FileManager (+ FileEditor), BackupList,
-                       MetricsPanel (+ MetricChart), PlayerList
+                       MetricsPanel (+ MetricChart), PlayerList; M5: QuotaUsage, QuotaDialog, ServerSharing,
+                       HostGrants, TwoFactorCard, TotpSetupDialog, QrCode
   src/pages/<Name>/    Login, Setup, Register, Hosts, HostDetail, Users, Invites, Account, NotFound;
                        M2: Servers (also `/`), ServerCreate, ServerDetail; component Console; M3: Sources
 agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
@@ -94,7 +98,9 @@ images/                build.sh (deno task images:build; local tags only), base/
                        (ARG JAVA → :java8/17/21/25)
 games/                 built-in definition source: README.md, minecraft-java/{game.yml, hooks/install.sh},
                        M3: garrys-mod/game.yml, garrys-mod-mysql/{game.yml, templates/gss_database.json}
-docs/                  blueprint.html
+scripts/               install-agent.sh (M5: served by the panel at /api/agent/install.sh, Arch + Debian/Ubuntu)
+docs/                  blueprint.html; M5: admin/ (install panel, add a host, game sources, users and quotas)
+README.md              M5
 ```
 
 ## Boundaries
@@ -771,3 +777,232 @@ Order: all four in parallel. A ↔ B meet at `transfer.open` with `source: "back
 Builders never stop the dev instance (:3200/:5200) or its agent, never `pkill` by pattern, and use their own port,
 scratch DB, agent config, data root and `egressTable`. Integration (main): real Minecraft world restore from the UI on
 this machine, a 1 GiB upload and download through the UI, charts and players live while someone joins.
+
+## M5: tenancy
+
+### Contracts
+
+- **No protocol change.** Quotas, grants, sharing and TOTP are panel-only; the install script drives the existing
+  `gss-agent enrol` (`--token-stdin`) and `run`. `protocol/schema/*` and the generated files stay as they are.
+- **Migration** `20261120000000-m5-tenancy.ts`: `users.totp_last_step` (INTEGER, null; the last accepted TOTP time
+  step, replay guard) and table `recovery_codes` (`user_id` FK cascade, `code_hash` CHAR(64) SHA-256, `used_at`,
+  timestamps; index `user_id`). `quotas`, `host_grants` and `server_shares` exist since v1.
+- **Quotas** (`models/Quota.ts`). Effective limit per field = the user's row value, else `Config.DEFAULT_QUOTA_*`
+  (null = inherit). Admins are `exempt` (usage still reported). Usage, over the owner's servers whose state isn't
+  `deleting`: `servers` = count; `memoryMb`/`cpuMillis` = Σ game limits + Σ service limits
+  (`DefinitionEngine.serviceTotals(definition.document)`, the same sum host capacity uses); `diskMb` = Σ `diskMb`
+  (the soft limit, not measured bytes); `backups` = backups not `failed` on those servers. Usage is charged to the
+  server's **owner**, whoever makes the change (shared managers, SERVERS_MANAGE_ALL).
+  - `Quota.assertFits(userId, delta, transaction)`: first statement locks the user's row (`SELECT … FOR UPDATE` on
+    `users`), then sums usage inside the transaction, then refuses (409) when `used + delta > limit` for any field
+    in `delta`. Only growth is checked: lowering a quota below current usage is allowed and only blocks further growth.
+    Lock order is always **user → host** (create locks the host row after `assertFits`).
+  - Callers make the check and the write that makes the usage visible in the same transaction: create (row insert),
+    update/upgrade (write the new limits before provisioning, put the old ones back if provisioning fails), backup
+    create (row insert `pending`). Host capacity on update/upgrade takes the host row lock in that transaction too
+    (today only create does).
+  - Messages name the field, the would-be total and the limit: "This would use 6144 MB of RAM; your quota is 4096
+    MB." / "You already have 2 game servers, the most your quota allows (2)." / "Your servers already have 5 backups,
+    the most your quota allows (5). Delete an old one first." When the caller isn't the owner: "…; the owner's quota
+    is …".
+  - `BackupService.assertSlot` (per server) is replaced by `Quota.assertFits(server.ownerId, { backups: 1 }, t)`;
+    `BackupListResponse.limit` becomes the owner's user-wide `{ max, used }` (max null = exempt).
+  - Editing: USERS_MANAGE; a non-admin may not edit an admin's quota or **their own** (403), else USERS_MANAGE would
+    let them raise their own limits. Each field: whole number 0 … 2^31-1 or null; absent = unchanged. Audit
+    `user.quota_changed`; live `quota.updated`.
+- **Host grants** (`models/HostGrant.ts`). A grant lets a user with SERVERS_CREATE create servers on that host and
+  see it (list, detail). SERVERS_MANAGE_ALL (and admins) need none. Create already refuses an ungranted host (403,
+  `mayUseHost`); M5 adds the routes and the list rules: `GET /api/hosts` = every host for HOSTS_MANAGE or
+  SERVERS_MANAGE_ALL, else the granted ones for HOSTS_VIEW or SERVERS_CREATE. `HostDto.canCreate` = SERVERS_CREATE
+  and (SERVERS_MANAGE_ALL or granted); the create page's picker shows only `canCreate` hosts. Grants are by username
+  (HOSTS_MANAGE may lack USERS_MANAGE, so there's no user list to pick from). Revoking keeps the user's existing
+  servers on that host running and operable; only new creates are refused. Audit `host.granted`/`host.revoked`;
+  `host.updated` to HOSTS_MANAGE + granted users + the user just revoked.
+- **Sharing** (`servers/ShareService.ts`, `servers/ServerAccess.ts`). Levels `view < operate < manage < owner`;
+  `owner` = the owner or SERVERS_MANAGE_ALL (never stored), the others are `ServerShare.role`. Below the level asked
+  → 404.
+
+  | Level | Allows |
+  | --- | --- |
+  | view | list, detail, console backlog + live topic `server:<id>`, metrics, players |
+  | operate | + start, stop, restart, console input |
+  | manage | + settings (PATCH), upgrade, update game, reinstall, files, backups (create, restore, delete, download) |
+  | owner | + delete the server, list/add/change/remove shares |
+
+  Any shared user may remove their own share (leave) at `view`. Shares are by username; not with yourself or the
+  owner (400); unknown user 404; existing share 409 (use PATCH); at most `LIMITS.SHARES_PER_SERVER` (20) per server.
+  `GameServerDto.access` = the caller's level (the client hides and disables by it). `GameServerService.getAccessible
+  (user, id, level)` now goes through `ServerAccess.get`; `list` uses `ServerAccess.scopeOf(user)` (owned + shared,
+  or all); the live topic check uses `ServerAccess.levelOf` (≥ view).
+  - **Live audiences** for `server.updated`, `server.state`, `server.services`, `backup.updated` are
+    `ServerAccess.audience(serverId, ownerId)` = SERVERS_MANAGE_ALL + owner + every shared user. It is synchronous
+    (pushes happen on the agent event path), backed by an in-memory index `serverId → userIds` that
+    `ServerAccess.init()` loads at startup and `ShareService` updates on every add/remove (`rememberShare`,
+    `forgetShare`, `forgetServer` on delete). One panel process, so the index can't drift from another writer.
+  - Removing a share (or the server) calls `LiveGateway.dropTopic(userId, topic)` so the removed user stops
+    receiving console/stats at once, and pushes `server.updated { serverId }` to them (their client refetches, gets
+    404 and leaves the page). Changing a role pushes `server.updated` to that user.
+  - Audit `server.shared`, `server.share_changed`, `server.unshared` (details: serverId, username, role).
+- **TOTP** (`lib/totp.ts`, `models/User.ts` TOTP region, `models/RecoveryCode.ts`, `controllers/TotpController.ts`).
+  RFC 6238, SHA-1, 6 digits, 30 s, ±1 step, WebCrypto only (no dependency). Base32 secret, 20 random bytes.
+  - Setup → secret stored with `totpEnabled` false (a pending setup is replaced by a new one); 409 when already
+    enabled ("Turn two-factor sign-in off first."). Confirm (code) → `totpEnabled` true, `totpLastStep` = matched
+    step, 10 recovery codes issued and returned once. Disable and new recovery codes need the password and a current
+    code (or a recovery code).
+  - **Login** with TOTP on: `/auth/login` answers `TwoFactorChallenge` (a `purpose: "totp"` JWT, 5 min, carries
+    `ver`). `/auth/login/totp` verifies the challenge (`User.findByChallenge`: purpose `totp`, `ver` current, not
+    disabled, `totpEnabled`), then the code: 6 digits → `verifyCode(secret, code, totpLastStep)` returns the matched
+    step, accepted only if it is newer than `totpLastStep`, stored by a conditional update (`… WHERE totp_last_step IS
+    NULL OR totp_last_step < :step`; 0 rows = replay → 401); otherwise a recovery code (`RecoveryCode.consume`:
+    conditional `UPDATE … SET used_at WHERE code_hash = ? AND used_at IS NULL`, single-use under concurrency). Wrong
+    codes count in the per-user failure limiter (same window as passwords, key `totp:<userId>`); 429 beyond. Audit
+    `user.login` with `{ method: "totp" | "recovery_code" }`, `user.login_failed` with `{ stage: "totp" }`.
+  - Recovery codes: `xxxxx-xxxxx` (10 lowercase base32 characters, 50 bits), compared after lowercasing and removing
+    `-`/spaces, stored as SHA-256 (`lib/tokens.sha256Hex`). New codes replace every old one.
+  - **Admin reset** `POST /api/users/:id/totp/reset` (USERS_MANAGE; non-admins can't reset an admin, 403): clears
+    the secret, `totpEnabled` false, deletes the recovery codes, bumps `tokenVersion` (the user's sessions end).
+    Audit `user.totp_reset`. Enabling or disabling 2FA yourself ends no sessions.
+  - The secret is stored in plain base32 (needed to verify); see open hardening.
+- **QR code**: rendered in the browser from `otpauthUrl` by `components/QrCode` with `qrcode-generator` (MIT, no
+  dependencies, ~20 KB, lazy-loaded with the setup dialog). The secret is shown as text next to it for manual entry.
+- **Agent install** (`scripts/install-agent.sh`, `controllers/AgentController.ts`). Public routes, rate-limited per
+  IP (`RATE_LIMIT_PUBLIC_PER_IP`):
+  - `GET /api/agent/install.sh`: the script with `@PANEL_URL@` replaced by `PUBLIC_URL` and `@INSECURE@` by `1` when
+    `PUBLIC_URL` is plain http:// on a non-loopback host (same rule as `enrolCommand`), else `0`.
+  - `GET /api/agent/download/:os/:arch` (`linux` / `amd64|arm64`): `AGENT_DIST_DIR/gss-agent-<os>-<arch>` (what
+    `make dist` writes), `application/octet-stream`, `Content-Length`, `X-Gss-Version` (from `VERSION`), streamed.
+    `…/sha256`: the hex digest from the `.sha256` sidecar, `text/plain`. Unknown os/arch 400; not built 404 "The
+    panel has no agent build for linux/arm64. Run `make dist` in agent/ (the Docker image includes it)."
+  - `EnrolTokenCreatedResponse.installCommand` = `curl -fsSL <PUBLIC_URL>/api/agent/install.sh | sudo
+    GSS_ENROL_TOKEN=<token> bash` (the token stays out of the script's argv; `command` stays for hosts that already
+    have the binary). The enrol dialog shows the install one-liner first, the manual `command` below it.
+  - Script: `install` (default) | `uninstall` | `help` | `version`; flags `--panel <url>`, `--insecure`,
+    `--no-start`, `--dry-run` (prints each step instead of changing the system), `-y/--yes`. Steps: root check;
+    `/etc/arch-release` → pacman, `/etc/debian_version` → apt, else exit 3; systemd present; Docker (`docker` /
+    `docker.io`) installed, enabled and running; `nftables` package installed but **its service never enabled**
+    (Debian's `/etc/nftables.conf` starts with `flush ruleset`, which would wipe Docker's and the agent's rules);
+    `uname -m` → amd64/arm64; download to `/usr/local/bin/gss-agent.new`, verify against `…/sha256`, rename; enrol
+    with `--token-stdin` unless `/etc/ionnet-gss/agent.json` exists (then it upgrades the binary and restarts); write
+    `/etc/systemd/system/gss-agent.service` (same content as `agent/packaging/gss-agent.service`), `daemon-reload`,
+    `enable --now`. Exit codes: 0, 1 failure, 2 bad arguments, 3 unsupported system. Uninstall stops and removes the
+    unit and binary, keeps `/etc/ionnet-gss` and `/var/lib/ionnet-gss` unless `--purge` (asks `[y/N]`).
+  - `Config.AGENT_DIST_DIR` (default `agent/dist`); the Docker image builds `make dist` in a Go stage and copies
+    `agent/dist` and `scripts/`.
+- **Live (M5)**: `quota.updated { userId }` (USERS_MANAGE + the user). Usage changes need no event: the account
+  page's quota card also refetches on `server.updated` and `backup.updated`, which reach the owner.
+
+### API routes (M5)
+
+Access: `S` signed in, `P:<KEY>` permission, `O` = owner level, `V` = view level, `RL` rate-limited.
+
+| Method | Path | Auth | Body | Response |
+| --- | --- | --- | --- | --- |
+| GET | /api/quota | S | | `EffectiveQuotaDto` (own) |
+| GET | /api/users/:id/quota | P:USERS_MANAGE | | `EffectiveQuotaDto` |
+| PUT | /api/users/:id/quota | P:USERS_MANAGE | `UpdateQuotaBody` | `EffectiveQuotaDto`; 400, 403 own/admin |
+| GET | /api/hosts/:id/grants | P:HOSTS_MANAGE | | `HostGrantDto[]` |
+| POST | /api/hosts/:id/grants | P:HOSTS_MANAGE | `CreateHostGrantBody` | 201 `HostGrantDto`; 404 user, 409 exists |
+| DELETE | /api/hosts/:id/grants/:userId | P:HOSTS_MANAGE | | `OkResponse`; 404 |
+| GET | /api/servers/:id/shares | O | | `ServerShareDto[]` |
+| POST | /api/servers/:id/shares | O | `CreateShareBody` | 201 `ServerShareDto`; 400 self/owner, 404 user, 409 exists/limit |
+| PATCH | /api/servers/:id/shares/:userId | O | `UpdateShareBody` | `ServerShareDto` |
+| DELETE | /api/servers/:id/shares/:userId | O (V for yourself) | | `OkResponse` |
+| POST | /api/auth/login/totp | -, RL | `TotpLoginBody` | `LoginSuccess`; 401, 429 |
+| GET | /api/auth/totp | S | | `TotpStatusResponse` |
+| POST | /api/auth/totp/setup | S | | `TotpSetupResponse`; 409 enabled |
+| POST | /api/auth/totp/confirm | S | `TotpConfirmBody` | `TotpConfirmResponse`; 400 code, 409 no setup |
+| POST | /api/auth/totp/disable | S | `TotpDisableBody` | `UserDto`; 401 password/code |
+| POST | /api/auth/totp/recovery-codes | S | `RecoveryCodesBody` | `RecoveryCodesResponse`; 401 |
+| POST | /api/users/:id/totp/reset | P:USERS_MANAGE | | `UserDto`; 403 admin target |
+| GET | /api/agent/install.sh | -, RL | | `text/x-shellscript` |
+| GET | /api/agent/download/:os/:arch[/sha256] | -, RL | | binary / hex digest; 400, 404 |
+
+Changed shapes: `HostDto.canCreate`, `GameServerDto.access`, `EffectiveQuotaDto.exempt`,
+`EnrolTokenCreatedResponse.installCommand`, `TotpConfirmResponse` (was `UserDto`). The M1 table's
+`PUT /api/hosts/:id/grants/:userId` is now `POST /api/hosts/:id/grants` with a username. Client: no new pages; the
+account page gains a quota card and a two-factor card, the users page a quota dialog and "Reset two-factor", the
+host page a grants card, the server page a Sharing tab (owner level).
+
+### Failure cases (M5)
+
+| Case | What happens |
+| --- | --- |
+| Two creates by one user race for the last slot | both lock the user row in turn; the second sees the first's row → 409 |
+| Update of server A and upgrade of server B (same owner) race for RAM | same user lock; new limits are written in that transaction, provisioning after; on failure the old limits are written back |
+| Admin lowers a quota below usage | allowed; existing servers keep running; any growth (create, bigger limits, backup) → 409 |
+| Shared manager raises RAM | charged to the owner's quota; message says "the owner's quota" |
+| Share removed while the user watches the console | `dropTopic` stops the stream; `server.updated` → refetch → 404 → back to the list |
+| Grant revoked | the host disappears from the user's picker (`host.updated`); their servers there keep running and stay operable |
+| TOTP code replayed within its 90 s window | conditional update on `totp_last_step` matches 0 rows → 401 |
+| Recovery code used twice at once | conditional update; one wins, the other 401 |
+| Code guessing | per-user failure limiter → 429 + Retry-After; the challenge also expires after 5 min |
+| Password changed / user disabled between password and code | challenge `ver` no longer matches / user disabled → 401 |
+| User lost the phone and the codes | admin "Reset two-factor" (ends the user's sessions) |
+| Install on Fedora / no systemd | exit 3 with "Only Arch Linux and Debian/Ubuntu with systemd are supported. …" |
+| Binary not built on the panel | script stops at the download: 404 message printed, nothing installed |
+| Checksum mismatch | `.new` file deleted, exit 1, nothing replaced |
+| Script run again on an enrolled host | no enrol; binary upgraded, service restarted |
+
+### Boundaries added in M5
+
+| From | May import | Never |
+| --- | --- | --- |
+| `models/Quota.ts` | models, `Config`, `DefinitionEngine.serviceTotals` (pure) | `GameServerService`, controllers |
+| `servers/ShareService.ts` | `ServerAccess`, models, `LiveGateway`, `@shared` | Hono `Context` |
+| `servers/ServerAccess.ts` | models, `@shared` | `LiveGateway` sockets (it only builds `Audience` values) |
+| `controllers/{Quota,Totp,Share,Agent}Controller.ts` | their model/service, lib, `Config` | `AgentGateway` |
+| `controllers/AgentController.ts` | `Deno.open` on `AGENT_DIST_DIR` files named by the fixed pattern, `scripts/install-agent.sh` | any path built from request input |
+| `scripts/install-agent.sh` | `curl`, the panel's `/api/agent/*`, `gss-agent enrol/run` | the token in argv (env → `--token-stdin` only) |
+| `client/src/components/QrCode` | `qrcode-generator` (lazy import) | other components (they use `QrCode`) |
+
+### Extension points (M5)
+
+- `Quota.Delta` + `EffectiveQuotaDto`: a new limit = a `quotas` column (migration), a `DEFAULT_QUOTA_*` setting, a
+  usage sum in `Quota.getUsage`, a field in `Delta`, a row in the quota card.
+- `ServerAccess.Level` + the level table above: a new server operation picks a level at its `getAccessible` call.
+- `TotpController`: other second factors (WebAuthn later) add a method next to `totp` in the challenge flow.
+- `install-agent.sh` `pkg_install` / `detect_distro`: another distro = one more branch.
+
+### Open hardening
+
+Carried from M4 (none fits an M5 parcel's files; all stay open): transfer slot fairness (per-server cap on the
+agent, per-user `DownloadTickets` cap) is the one that matters most now that several tenants share a host and is the
+first candidate for a hardening parcel after M5; `files.List` batching; agent/panel file timeouts;
+`RENAME_NOREPLACE`; restore/OpenRoot atomicity; client ticket errors and the `.gss` folder; stack backups end to end;
+Minecraft `System chat:` joins.
+
+New in M5:
+
+- TOTP secrets are stored in plain base32; encrypting them with a key outside the DB (e.g. derived from a separate
+  `TOTP_KEY`) would protect them against a database-only leak.
+- Disk quota counts the servers' soft `diskMb` limits, not measured bytes (backups aren't in it); measured usage
+  is in `server.stats.diskBytes` if a hard check is wanted later.
+- The usage sum loads the owner's servers with their definition documents on every check; fine for a handful of
+  servers per user, cache the service totals on the row if that grows.
+
+## M5 work split
+
+Main-session-only files (as before, plus; all M5 contracts are already in them): `shared/api/*`, `shared/live.ts`,
+`shared/constants.ts`, `shared/index.ts`, `server/src/{index,Config}.ts`, `.env.example`, `Dockerfile` +
+`.dockerignore` (Go stage runs `make dist`), compose files, `migrations/*`, `models/index.ts`, `ApiController.ts`, `definitions/DefinitionEngine.ts`
+(`serviceTotals` moved there), `client/package.json` + lock (`qrcode-generator` added), every `client/src/Api/*.ts`
+(all M5 wrappers written), `client/src/components/QrCode/**`, `client/src/routes.tsx`, `AppLayout.tsx`. The access
+wiring in `GameServerService` and `BackupService` (levels at every `getAccessible`, `ServerAccess.audience`,
+`scopeOf` in `list`, `access` in `toDto`) is done; parcel A may edit only the quota regions marked `TODO(builder):
+M5 quota`. Need a change elsewhere? Report it back.
+
+| Parcel | Difficulty / route | Owns | Contract | Verify on its own |
+| --- | --- | --- | --- | --- |
+| **A: quotas** | **Hard** (accounting under concurrency, lock order, rollback of reserved limits): `builder-opus` | `models/Quota.ts`, `controllers/QuotaController.ts`, the quota region of `controllers/UserController.ts`, the `TODO(builder): M5 quota` regions of `servers/GameServerService.ts` (create, updateLocked, upgradeLocked + host lock there), `assertSlot`/`slot` + the create path's slot check in `servers/BackupService.ts`, `client/src/components/{QuotaUsage,QuotaDialog}/**`, `client/src/pages/Users/**` (quota dialog + "Reset two-factor" action calling `UserApi.resetTotp`) | `Quota.Delta`, `assertFits(userId, delta, t)`, `getUsage`, `getEffective`, `EffectiveQuotaDto`, live `quota.updated` | `deno task check`. Private panel `PORT=3311 DB_NAME=gss_b` (+ `deno task migrate up`), a scratch agent enrolled to it with its own `--config`, data root and `egressTable` (or a fake-agent WebSocket that answers provision ok): set a user's quota (servers 1, RAM 2048) → create one → second create 409; fire two creates in parallel with `curl … & curl … & wait` → exactly one 201; PATCH a variable bound to memory over the limit → 409, row unchanged; two parallel limit raises on two servers → one 409; admin creates past the defaults; `GET /api/quota` numbers match a hand `SELECT`; backups counted across servers; non-admin USERS_MANAGE editing own quota → 403. Client: `npm run typecheck && npm run build`, Playwright with mocked `/api/quota` + `/api/users/*/quota`, screenshots light + dark |
+| **B: server sharing** | Medium (access table is security-relevant but `ServerAccess` exists): `builder` (reviewer checks the level table) | `servers/ServerAccess.ts` (scopeOf, audience + share index, init), `servers/ShareService.ts`, `controllers/ShareController.ts`, `models/ServerShare.ts`, `gateways/live/LiveGateway.ts` (`dropTopic`), `client/src/components/{ServerSharing,Console}/**`, `client/src/pages/{ServerDetail,Servers}/**` (Sharing tab, gating by `access`, "Shared by" badge) | level table, `ServerShareDto`/`CreateShareBody`/`UpdateShareBody`, `GameServerDto.access`, `ServerAccess.audience` | `deno task check`. Private panel `PORT=3312 DB_NAME=gss_c` + fake agent: owner shares with user2 as `view` → user2 lists it, detail 200, start 404, `/ws/live` subscribe ok and receives `server.state`; role → `operate` → start ok, PATCH 404; → `manage` → files/backups ok, DELETE server 404, shares 404; remove share while user2 is subscribed → stream stops, user2 gets `server.updated`, detail 404; user2 leaves a share himself; share with owner/self 400, unknown 404, 21st 409. Client: typecheck + build, Playwright with mocked access levels (view/operate/manage/owner): buttons and tabs hidden or disabled, Sharing tab CRUD; screenshots |
+| **C: TOTP 2FA** | **Hard** (auth, replay, single-use codes, brute force): `builder-opus` | `lib/totp.ts`, `models/RecoveryCode.ts`, the `//#region TOTP` of `models/User.ts`, `controllers/AuthController.ts` (`/login/totp`), `controllers/TotpController.ts`, `client/src/pages/{Login,Account}/**`, `client/src/components/{TwoFactorCard,TotpSetupDialog}/**`, `client/src/controllers/AuthController.ts` | TOTP routes and shapes in `shared/api/auth.ts`, `User.findByChallenge`, `RecoveryCode.issue/consume/countLeft` | `deno task check`; scratch `deno run server/src/test-totp.ts` (delete after) checks RFC 6238 appendix B vectors (SHA-1 secret `12345678901234567890`: 59 → 94287082, 1111111109 → 07081804, truncated to 6 digits) and base32. Private panel `PORT=3313 DB_NAME=gss_d`: setup → compute codes with `oathtool --totp -b <secret>` (or the scratch script) → confirm → 10 codes; login → challenge → code → session; same code again → 401; recovery code once ok, twice 401; 11 wrong codes → 429; password change between steps → 401; disable needs password + code; admin reset → user's token 401, login without code. Client: typecheck + build, Playwright: setup dialog shows a QR (screenshot) + secret, codes shown once with copy/download, login second step with "Use a recovery code" |
+| **D: host grants + agent install** | Medium (Bash, systemd, distro detection): `builder` | `controllers/HostController.ts` (grant routes, list rules, `canCreate`), `models/{Host,HostGrant}.ts` (serializer `canCreate`, grant finders), `controllers/AgentController.ts`, `controllers/EnrolTokenController.ts`, `scripts/install-agent.sh`, `agent/packaging/gss-agent.service` (if the unit changes, the script's copy changes with it), `client/src/components/{HostGrants,EnrolDialog}/**`, `client/src/pages/{HostDetail,ServerCreate}/**` | grant routes, `HostDto.canCreate`, `CreateHostGrantBody`, agent routes, `installCommand`, script flags/exit codes | `deno task check`; `bash -n` + `shellcheck scripts/install-agent.sh`. Private panel `PORT=3314 DB_NAME=gss_e` with `make dist` output in `AGENT_DIST_DIR`: grant/revoke by curl, user2's `GET /api/hosts` and `canCreate` follow; create on an ungranted host 403. `curl …/api/agent/install.sh` has the URL baked in; download + `sha256sum -c`. In `docker run --rm debian:12` and `archlinux:latest` (with `--network host` to reach the panel): `--dry-run` prints the pacman/apt steps and downloads + verifies the binary; a real install only inside a throwaway systemd container or VM, never on this machine. Client: typecheck + build, Playwright: enrol dialog shows the one-liner, grants card add/remove, picker hides non-`canCreate` hosts |
+| **E: admin docs** (after integration) | Easy: `builder` | `README.md`, `docs/admin/{install-panel,add-host,game-sources,users-and-quotas}.md` | `~/.claude/rules/docs.md` (app README: pitch, `## Key Features`, screenshots, short technical section); the behaviour as integrated | Every command in the docs run once against a private panel (copy-paste works); screenshots from the integrated build |
+
+Order: A, B, C, D in parallel; E after integration (the docs describe what was verified, not the plan). A ↔ B
+meet only in `GameServerService` (A's quota regions vs the access wiring already done) and `BackupService`
+(A's slot check vs `ServerAccess.audience`, done). C stands alone. D ↔ A at `canCreate` vs quota (independent
+checks at create). Builders never stop the dev instance (:3200/:5200) or its agent, never `pkill` by pattern, and use
+their own port, scratch DB (create `gss_e` like the others), agent config, data root and `egressTable`. Integration
+(main): a second (non-admin) user on this machine limited by quota, granted one host, a server shared with them at
+`operate`, 2FA on for both users, and a fresh host installed with the one-liner in a VM or systemd container.

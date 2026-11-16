@@ -2,8 +2,9 @@
  * Game server orchestration: the only code that combines models, `DefinitionEngine` and `AgentGateway` for servers.
  * Controllers and agent handlers call it; it never sees a Hono `Context`.
  *
- * Access (M2): owner, or SERVERS_MANAGE_ALL. Create needs SERVERS_CREATE, a host grant (admins and
- * SERVERS_MANAGE_ALL skip it), `Quota.assertFits`, and host capacity. Settings change only while stopped.
+ * Access: `ServerAccess` levels (M5), passed at every `getAccessible`: view (detail, console backlog), operate (power,
+ * console input), manage (settings, upgrade, update game, reinstall), owner (delete). Create needs SERVERS_CREATE, a
+ * host grant (SERVERS_MANAGE_ALL skips it), `Quota.assertFits`, and host capacity. Settings change only while stopped.
  * Every state change the agent reports is stored on the row and pushed as `server.state`.
  *
  * Deletes (and creates rolled back) leave the row as a tombstone in state `deleting`, ports still held, until the
@@ -52,6 +53,8 @@ import { RateLimiter } from "../lib/RateLimiter.ts";
 import { Definition, GameServer, Host, HostGrant, PortAllocation, Quota, sequelize, User } from "../models/index.ts";
 import { BackupService } from "./BackupService.ts";
 import { MetricsService } from "./MetricsService.ts";
+import { ServerAccess } from "./ServerAccess.ts";
+import { ShareService } from "./ShareService.ts";
 
 type Value = DefinitionEngine.Value;
 type Limits = ServerSpec["limits"];
@@ -147,30 +150,29 @@ export namespace GameServerService {
 
   //#region Queries
   /**
-   * Servers the user may see (all for SERVERS_MANAGE_ALL), newest first.
+   * Servers the user may see: their own and the ones shared with them (all for SERVERS_MANAGE_ALL), newest first.
    */
   export async function list(user: User): Promise<GameServerDto[]> {
+    const scope = await ServerAccess.scopeOf(user);
+    const shared = [...scope.shared.keys()];
     const servers = await GameServer.findAll({
-      where: user.hasPermission("SERVERS_MANAGE_ALL") ? {} : { ownerId: user.id },
+      where: scope.all ? {} : shared.length ? { [Op.or]: [{ ownerId: user.id }, { id: shared }] } : { ownerId: user.id },
       include: LIST_INCLUDE,
       order: [["createdAt", "DESC"]],
     });
-    return servers.map(toDto);
+    return servers.map((server) => toDto(server, ServerAccess.levelIn(scope, user, server)));
   }
 
   /**
-   * The server if the user may access it. 404 (not 403) otherwise, so ids can't be probed.
+   * The server (everything included) if the user holds at least `level` on it. 404 (not 403) otherwise, so ids can't
+   * be probed.
    */
-  export async function getAccessible(user: User, serverId: string): Promise<GameServer> {
-    const server = await GameServer.findByPk(serverId, { include: FULL_INCLUDE });
-    if (!server || (server.ownerId !== user.id && !user.hasPermission("SERVERS_MANAGE_ALL"))) {
-      throw HttpError.notFound("There is no game server with that id.");
-    }
-    return server;
+  export async function getAccessible(user: User, serverId: string, level: ServerAccess.Level): Promise<GameServer> {
+    return await ServerAccess.get(user, serverId, level, { include: FULL_INCLUDE });
   }
 
   /**
-   * Whether the user may access the server (live topic subscribe check). Never throws.
+   * Whether the user may follow the server's live topic (any level). Never throws.
    */
   export async function canAccess(userId: number, serverId: string): Promise<boolean> {
     try {
@@ -179,7 +181,7 @@ export namespace GameServerService {
       if (!server) return false;
       if (server.ownerId === userId) return true;
       const user = await User.findWithRoles({ id: userId });
-      return user !== null && user.hasPermission("SERVERS_MANAGE_ALL");
+      return user !== null && await ServerAccess.levelOf(user, server) !== null;
     } catch (error) {
       console.error("server access check failed", error);
       return false;
@@ -187,7 +189,7 @@ export namespace GameServerService {
   }
 
   export async function detail(user: User, serverId: string): Promise<GameServerDetailResponse> {
-    return await toDetail(user, await getAccessible(user, serverId));
+    return await toDetail(user, await getAccessible(user, serverId, "view"));
   }
   //#endregion
 
@@ -225,7 +227,8 @@ export namespace GameServerService {
     const { values } = DefinitionEngine.resolveVariables(decls, variables, null, user.isAdmin());
     await checkDynamicOptions(decls, values, Object.keys(variables), user.isAdmin());
     const limits = DefinitionEngine.resolveLimits(decls, values, DEFAULT_LIMITS);
-    const services = serviceTotals(definition.document);
+    const services = DefinitionEngine.serviceTotals(definition.document);
+    // TODO(builder): M5 quota. Move this check into the transaction below, before the host lock (order: user, host).
     await Quota.assertFits(user.id, { servers: 1, memoryMb: limits.memoryMb + services.memoryMb, cpuMillis: limits.cpuMillis + services.cpuMillis, diskMb: limits.diskMb });
 
     const id = crypto.randomUUID();
@@ -295,7 +298,7 @@ export namespace GameServerService {
   }
 
   async function updateLocked(user: User, serverId: string, body: UpdateServerBody): Promise<UpdateServerResponse> {
-    const server = await getAccessible(user, serverId);
+    const server = await getAccessible(user, serverId, "manage");
     if (server.state === "deleting") throw deletingError();
     if (!SETTINGS_STATES.includes(server.state)) {
       throw HttpError.conflict("Stop the server before changing its settings. They apply at the next start.");
@@ -318,6 +321,8 @@ export namespace GameServerService {
       diskMb: Math.max(0, limits.diskMb - server.diskMb),
     };
     if (grown.memoryMb || grown.cpuMillis || grown.diskMb) {
+      // TODO(builder): M5 quota. One transaction: lock user, then host; check both; write the new limits; provision
+      // after commit and write the old limits back if it fails. Pass `{ actorId: user.id }`.
       await Quota.assertFits(server.ownerId, grown);
       await assertHostCapacity(server.host!, limits, server.id, definition.document);
     }
@@ -344,10 +349,10 @@ export namespace GameServerService {
 
   export async function start(user: User, serverId: string): Promise<GameServerDto> {
     return await withLock(serverId, async () => {
-      const server = await getAccessible(user, serverId);
+      const server = await getAccessible(user, serverId, "operate");
       if (server.state !== "stopped" && server.state !== "crashed") throw notStartable(server.state);
       await startOnAgent(server);
-      return await dtoOf(serverId);
+      return await dtoOf(user, serverId);
     });
   }
 
@@ -363,19 +368,19 @@ export namespace GameServerService {
   }
 
   export async function stop(user: User, serverId: string, kill: boolean): Promise<GameServerDto> {
-    const server = await getAccessible(user, serverId);
+    const server = await getAccessible(user, serverId, "operate");
     // Stopping an install cancels it (the server ends install_failed and can be reinstalled).
     if (server.state === "deleting") throw deletingError();
     const stoppable = server.state === "running" || server.state === "starting" || server.state === "installing" || (kill && server.state === "stopping");
     if (!stoppable) throw HttpError.conflict(server.state === "stopping" ? "The server is already stopping." : "The server isn't running.");
     const status = await callAgent(server.hostId, "server.stop", { serverId, kill });
     await storeStatus(serverId, status);
-    return await dtoOf(serverId);
+    return await dtoOf(user, serverId);
   }
 
   export async function restart(user: User, serverId: string): Promise<GameServerDto> {
     return await withLock(serverId, async () => {
-      const server = await getAccessible(user, serverId);
+      const server = await getAccessible(user, serverId, "operate");
       if (server.state === "running" || server.state === "starting") {
         const timeoutMs = lifecycleTimeoutMs(server) + (startTimeoutMs(server.definition!.document) ?? 0);
         await storeStatus(serverId, await callAgent(server.hostId, "server.restart", { serverId }, timeoutMs));
@@ -386,7 +391,7 @@ export namespace GameServerService {
       else {
         throw notStartable(server.state);
       }
-      return await dtoOf(serverId);
+      return await dtoOf(user, serverId);
     });
   }
 
@@ -400,7 +405,7 @@ export namespace GameServerService {
   }
 
   async function upgradeLocked(user: User, serverId: string, body: Partial<UpgradeServerBody>): Promise<UpgradeServerResponse> {
-    const server = await getAccessible(user, serverId);
+    const server = await getAccessible(user, serverId, "manage");
     if (server.state === "deleting") throw deletingError();
     if (!SETTINGS_STATES.includes(server.state)) throw HttpError.conflict("Stop the server before upgrading it. The new version applies at the next start.");
     const current = server.definition!;
@@ -440,8 +445,8 @@ export namespace GameServerService {
     const values = resolved.values;
     const limits = DefinitionEngine.resolveLimits(decls, values, { memoryMb: server.memoryMb, cpuMillis: server.cpuMillis, pids: DEFAULT_LIMITS.pids, diskMb: server.diskMb });
 
-    const before = serviceTotals(current.document);
-    const after = serviceTotals(target.document);
+    const before = DefinitionEngine.serviceTotals(current.document);
+    const after = DefinitionEngine.serviceTotals(target.document);
     const grown = {
       servers: 0,
       memoryMb: Math.max(0, limits.memoryMb + after.memoryMb - (server.memoryMb + before.memoryMb)),
@@ -449,6 +454,7 @@ export namespace GameServerService {
       diskMb: Math.max(0, limits.diskMb - server.diskMb),
     };
     if (grown.memoryMb || grown.cpuMillis || grown.diskMb) {
+      // TODO(builder): M5 quota. Same as updateLocked: check and write the limits under the user and host locks.
       await Quota.assertFits(server.ownerId, grown);
       await assertHostCapacity(server.host!, limits, server.id, target.document);
     }
@@ -521,7 +527,7 @@ export namespace GameServerService {
   }
 
   async function updateGameLocked(user: User, serverId: string): Promise<GameServerDto> {
-    const server = await getAccessible(user, serverId);
+    const server = await getAccessible(user, serverId, "manage");
     if (server.state === "deleting") throw deletingError();
     if (!canUpdateGame(server.definition!.document)) {
       throw HttpError.badRequest("This game has nothing to update: its definition has no steamcmd step and no update hook.");
@@ -532,7 +538,7 @@ export namespace GameServerService {
     if (!SETTINGS_STATES.includes(server.state)) throw HttpError.conflict("Stop the server before updating the game.");
     const status = await callAgent(server.hostId, "server.update", { serverId }, PROVISION_TIMEOUT_MS);
     await storeStatus(serverId, status);
-    return await dtoOf(serverId);
+    return await dtoOf(user, serverId);
   }
 
   /**
@@ -553,11 +559,11 @@ export namespace GameServerService {
    */
   export async function reinstall(user: User, serverId: string): Promise<GameServerDto> {
     return await withLock(serverId, async () => {
-      const server = await getAccessible(user, serverId);
+      const server = await getAccessible(user, serverId, "manage");
       if (server.state === "deleting") throw deletingError();
       if (!SETTINGS_STATES.includes(server.state)) throw HttpError.conflict("Stop the server before reinstalling it.");
       await reprovision(server, true);
-      return await dtoOf(serverId);
+      return await dtoOf(user, serverId);
     });
   }
 
@@ -569,7 +575,7 @@ export namespace GameServerService {
    */
   export async function remove(user: User, serverId: string, keepData: boolean): Promise<boolean> {
     return await withLock(serverId, async () => {
-      const server = await getAccessible(user, serverId);
+      const server = await getAccessible(user, serverId, "owner");
       if (server.state !== "deleting" && !AgentGateway.isOnline(server.hostId)) throw offlineError(server.host!);
       if (server.state !== "deleting" && BackupService.operationOf(server.id)?.operation === "restore") {
         throw new HttpError(409, "A restore of this server is running. Wait until it finishes, then delete the server.");
@@ -625,6 +631,7 @@ export namespace GameServerService {
     _agentSpecHash.delete(serverId);
     MetricsService.forget(serverId);
     pushUpdated(row.ownerId, serverId);
+    ShareService.forgetServer(serverId); // After the push, so shared users get the last `server.updated`.
     return true;
   }
 
@@ -691,7 +698,7 @@ export namespace GameServerService {
     if (typeof line !== "string" || line.trim() === "") throw HttpError.badRequest("\"line\" must be the command to send.");
     if (line.length > MAX_INPUT_CHARS) throw HttpError.badRequest(`A console line can be at most ${MAX_INPUT_CHARS} characters long.`);
     if (/[\r\n]/.test(line)) throw HttpError.badRequest("Send one line at a time (no line breaks).");
-    const server = await getAccessible(user, serverId);
+    const server = await getAccessible(user, serverId, "operate");
     _inputLimiter.hit(serverId);
     if (server.state !== "running" && server.state !== "starting") throw HttpError.conflict("The server isn't running, so it can't take commands.");
     await callAgent(server.hostId, "server.input", { serverId, line });
@@ -702,7 +709,7 @@ export namespace GameServerService {
    * CONSOLE_BATCH_MAX_BYTES; `more` says older lines exist.
    */
   export async function backlog(user: User, serverId: string, limit: number, beforeSeq: number): Promise<ConsoleBacklogResponse> {
-    const server = await getAccessible(user, serverId);
+    const server = await getAccessible(user, serverId, "view");
     const empty: ConsoleBacklogResponse = { lines: [], more: false };
     if (!AgentGateway.isOnline(server.hostId)) return empty; // Nothing to show while the host is away.
     try {
@@ -869,20 +876,7 @@ export namespace GameServerService {
     if (JSON.stringify(server.servicesStatus ?? []) === JSON.stringify(services)) return;
     await GameServer.update({ servicesStatus: services }, { where: { id: server.id } });
     server.servicesStatus = services;
-    LiveGateway.push("server.services", { serverId: server.id, services }, audience(server.ownerId));
-  }
-
-  /**
-   * The memory and CPU a definition's services add on top of the game container's limits.
-   */
-  function serviceTotals(document: GameDefinition): { memoryMb: number; cpuMillis: number } {
-    let memoryMb = 0;
-    let cpuMillis = 0;
-    for (const service of Object.values(document.services ?? {})) {
-      memoryMb += service.limits?.memoryMb ?? DefinitionEngine.DEFAULT_SERVICE_LIMITS.memoryMb;
-      cpuMillis += service.limits?.cpuMillis ?? DefinitionEngine.DEFAULT_SERVICE_LIMITS.cpuMillis;
-    }
-    return { memoryMb, cpuMillis };
+    LiveGateway.push("server.services", { serverId: server.id, services }, ServerAccess.audience(server.id, server.ownerId));
   }
 
   /**
@@ -1138,24 +1132,23 @@ export namespace GameServerService {
       reason: server.stateReason,
       installProgress: _progress.get(server.id) ?? null,
       at: server.stateChangedAt.toISOString(),
-    }, audience(server.ownerId));
+    }, ServerAccess.audience(server.id, server.ownerId));
   }
 
   function pushUpdated(ownerId: number, serverId: string): void {
-    LiveGateway.push("server.updated", { serverId }, audience(ownerId));
+    LiveGateway.push("server.updated", { serverId }, ServerAccess.audience(serverId, ownerId));
   }
 
-  function audience(ownerId: number): LiveGateway.Audience {
-    return { permission: "SERVERS_MANAGE_ALL", userIds: [ownerId] };
-  }
-
-  async function dtoOf(serverId: string): Promise<GameServerDto> {
+  async function dtoOf(user: User, serverId: string): Promise<GameServerDto> {
     const server = await GameServer.findByPk(serverId, { include: LIST_INCLUDE });
     if (!server) throw HttpError.notFound("There is no game server with that id.");
-    return toDto(server);
+    return toDto(server, await ServerAccess.levelOf(user, server) ?? "view");
   }
 
-  function toDto(server: GameServer): GameServerDto {
+  /**
+   * @param access The level of the user the DTO is for.
+   */
+  function toDto(server: GameServer, access: ServerAccess.Level): GameServerDto {
     const host = server.host!;
     const ports = [...server.ports!].sort((a, b) => a.id - b.id);
     const main = ports.find((port) => port.name === "game") ?? ports[0];
@@ -1177,6 +1170,7 @@ export namespace GameServerService {
       autostart: server.autostart,
       autoRestart: server.autoRestart,
       allowPrivateNetwork: server.allowPrivateNetwork,
+      access,
       createdAt: server.createdAt.toISOString(),
     };
   }
@@ -1210,7 +1204,7 @@ export namespace GameServerService {
       attributes: ["id", "commit", "updatedAt"],
     });
     return {
-      ...toDto(server),
+      ...toDto(server, await ServerAccess.levelOf(user, server) ?? "view"),
       variables,
       updateAvailable: newest !== null,
       latestDefinition: newest ? { id: newest.id, commit: newest.commit, syncedAt: newest.updatedAt.toISOString() } : null,
@@ -1239,11 +1233,11 @@ export namespace GameServerService {
       transaction,
     });
     const used = {
-      memoryMb: others.reduce((sum, row) => sum + row.memoryMb + serviceTotals(row.definition!.document).memoryMb, 0),
-      cpuMillis: others.reduce((sum, row) => sum + row.cpuMillis + serviceTotals(row.definition!.document).cpuMillis, 0),
+      memoryMb: others.reduce((sum, row) => sum + row.memoryMb + DefinitionEngine.serviceTotals(row.definition!.document).memoryMb, 0),
+      cpuMillis: others.reduce((sum, row) => sum + row.cpuMillis + DefinitionEngine.serviceTotals(row.definition!.document).cpuMillis, 0),
       diskMb: others.reduce((sum, row) => sum + row.diskMb, 0),
     };
-    const own = serviceTotals(document);
+    const own = DefinitionEngine.serviceTotals(document);
     const needs = { memoryMb: limits.memoryMb + own.memoryMb, cpuMillis: limits.cpuMillis + own.cpuMillis, diskMb: limits.diskMb };
     const facts = host.facts;
     const capacity = {

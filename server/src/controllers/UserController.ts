@@ -201,6 +201,7 @@ export namespace UserController {
 
   /**
    * PUT /api/users/:id/quota  UpdateQuotaBody → EffectiveQuotaDto. A field set to null falls back to the default.
+   * 403 when a non-admin edits an admin's quota or their own. Audit `user.quota_changed`; live `quota.updated`.
    */
   router.put("/:id/quota", async (c) => {
     const id = paramInt(c, "id");

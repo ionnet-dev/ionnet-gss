@@ -68,12 +68,22 @@ export interface QuotaDto {
 }
 
 /**
- * The quota with defaults applied, and what the user uses now (M5).
+ * The quota with defaults applied, and what the user uses now (M5). Usage is over the user's own servers (not
+ * `deleting`): memory and CPU include stack service limits, disk is the sum of the servers' `diskMb` limits, backups
+ * are the non-failed backups of those servers.
  */
 export interface EffectiveQuotaDto {
+  userId: number;
+  /**
+   * Admins: nothing is enforced. `limits` still shows what would apply.
+   */
+  exempt: boolean;
   limits: { [K in keyof QuotaDto]: number };
   used: { servers: number; memoryMb: number; cpuMillis: number; diskMb: number; backups: number };
-  overrides: QuotaDto;
+  overrides: QuotaDto; // The user's own values; null = default.
 }
 
+/**
+ * `PUT /api/users/:id/quota`. Absent = unchanged, null = back to the panel default, else a whole number 0 … 2^31-1.
+ */
 export type UpdateQuotaBody = Partial<QuotaDto>;

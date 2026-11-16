@@ -1,10 +1,12 @@
 import type { OkResponse } from "@shared/api/common.ts";
 import type {
   CreateEnrolTokenBody,
+  CreateHostGrantBody,
   EnrolTokenCreatedResponse,
   EnrolTokenDto,
   HostDetailResponse,
   HostDto,
+  HostGrantDto,
   UpdateHostBody,
 } from "@shared/api/hosts.ts";
 import { useResource } from "@/hooks/useResource.ts";
@@ -29,6 +31,30 @@ export namespace HostApi {
   export function remove(id: string): Promise<OkResponse> {
     return BaseApi.DELETE(`/hosts/${id}`);
   }
+
+  //#region Grants (M5)
+  export function listGrants(id: string): Promise<HostGrantDto[]> {
+    return BaseApi.GET(`/hosts/${id}/grants`);
+  }
+
+  export function addGrant(id: string, body: CreateHostGrantBody): Promise<HostGrantDto> {
+    return BaseApi.POST(`/hosts/${id}/grants`, body);
+  }
+
+  export function removeGrant(id: string, userId: number): Promise<OkResponse> {
+    return BaseApi.DELETE(`/hosts/${id}/grants/${userId}`);
+  }
+
+  /**
+   * A host's grants, refetched when `host.updated` names it.
+   */
+  export function useGrants(id: string) {
+    return useResource(() => listGrants(id), [id], {
+      liveEvents: ["host.updated"],
+      liveFilter: (_event, data) => !("hostId" in data) || data.hostId === null || data.hostId === id,
+    });
+  }
+  //#endregion
 
   //#region Enrol tokens
   export function listEnrolTokens(): Promise<EnrolTokenDto[]> {

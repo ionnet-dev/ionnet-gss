@@ -1,11 +1,42 @@
 /**
- * `/api/servers`: game servers. Access in M2: the owner, or SERVERS_MANAGE_ALL (admins). Sharing comes later.
- * Settings can change only while the server is stopped (409 otherwise); they apply at the next start.
+ * `/api/servers`: game servers. Access: the owner and SERVERS_MANAGE_ALL hold `owner`; shared users hold their
+ * share's role (M5). Settings can change only while the server is stopped (409 otherwise); they apply at the next
+ * start.
  */
 import type { IsoDate } from "./common.ts";
 import type { ConsoleLine, InstallProgress, PortProto, ServerState, ServiceStatus, VariableType } from "../protocol/protocol.gen.ts";
 
 export type VariableValue = string | number | boolean;
+
+//#region Sharing (M5)
+/**
+ * Role of a share: view (console, stats) < operate (+ start/stop/restart, console input) < manage (+ settings,
+ * files, backups, upgrades).
+ */
+export type ServerShareRole = "view" | "operate" | "manage";
+
+/**
+ * What the caller holds on a server. `owner` (the owner or SERVERS_MANAGE_ALL) adds delete and sharing.
+ */
+export type ServerAccessLevel = ServerShareRole | "owner";
+
+export interface ServerShareDto {
+  userId: number;
+  username: string;
+  displayName: string | null;
+  role: ServerShareRole;
+  createdAt: IsoDate;
+}
+
+export interface CreateShareBody {
+  username: string;
+  role: ServerShareRole;
+}
+
+export interface UpdateShareBody {
+  role: ServerShareRole;
+}
+//#endregion
 
 export interface ServerPortDto {
   name: string;
@@ -39,6 +70,10 @@ export interface GameServerDto {
    * internet (the host's agent filters the rest and won't start the server when it can't).
    */
   allowPrivateNetwork: boolean;
+  /**
+   * The caller's level on this server (M5). The client hides or disables what the level doesn't allow.
+   */
+  access: ServerAccessLevel;
   createdAt: IsoDate;
 }
 

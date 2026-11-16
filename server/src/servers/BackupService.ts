@@ -23,7 +23,9 @@
  * finish that arrives first is remembered (`_finishedEarly`) so the late answer doesn't bring the operation back.
  *
  * Quota seam: `assertSlot` counts this server's non-failed backups against the owner's `maxBackups`
- * (DEFAULT_QUOTA_BACKUPS when null); admins pass. M5 replaces it with the user-wide `Quota.assertFits`.
+ * (DEFAULT_QUOTA_BACKUPS when null); admins pass. TODO(builder): M5 quota. Replace it with
+ * `Quota.assertFits(server.ownerId, { backups: 1 }, t)` in the transaction that inserts the `pending` row, and make
+ * `slot()` (BackupListResponse.limit) the owner's user-wide `{ max, used }`.
  */
 import { Op } from "sequelize";
 import type { BackupDto, BackupListResponse, BackupOperationDto, CreateBackupBody, RestoreBackupResponse } from "@shared/api/backups.ts";
@@ -208,7 +210,7 @@ export namespace BackupService {
     }
     else {
       await AuditLog.record({ action: "server.restored", hostId, serverId: server.id, details: { backupId: finished.backupId, ok: finished.ok, error: finished.error } });
-      LiveGateway.push("server.updated", { serverId: server.id }, audience(server.ownerId));
+      LiveGateway.push("server.updated", { serverId: server.id }, ServerAccess.audience(server.id, server.ownerId));
     }
     pushUpdated(server, finished.backupId);
   }
@@ -356,12 +358,9 @@ export namespace BackupService {
     return name;
   }
 
-  function audience(ownerId: number): LiveGateway.Audience {
-    return { permission: "SERVERS_MANAGE_ALL", userIds: [ownerId] };
-  }
 
   function pushUpdated(server: Pick<GameServer, "id" | "ownerId">, backupId: number | null): void {
-    LiveGateway.push("backup.updated", { serverId: server.id, backupId }, audience(server.ownerId));
+    LiveGateway.push("backup.updated", { serverId: server.id, backupId }, ServerAccess.audience(server.id, server.ownerId));
   }
 }
 

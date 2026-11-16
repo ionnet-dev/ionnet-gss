@@ -1,7 +1,9 @@
 node_modules
 client/node_modules
 client/dist
-agent
+# M5: the image builds the agent (make dist) for the install script; only local build output stays out.
+agent/bin
+agent/dist
 images
 games
 docs

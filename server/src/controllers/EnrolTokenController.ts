@@ -24,6 +24,14 @@ function enrolCommand(token: string): string {
 }
 
 /**
+ * The one-line install for a token (M5): fetches `/api/agent/install.sh` (which has PUBLIC_URL and `--insecure`
+ * baked in) and passes the token through the environment, never argv.
+ */
+function installCommand(token: string): string {
+  return `curl -fsSL ${Config.PUBLIC_URL}/api/agent/install.sh | sudo GSS_ENROL_TOKEN=${token} bash`;
+}
+
+/**
  * `/api/enrol-tokens` (HOSTS_MANAGE). The agent redeems a token over `/ws/agent` (`enrol`), not here.
  * Pushes `enrolToken.updated`. Audit: `enrol_token.created`, `enrol_token.revoked`.
  */
@@ -53,6 +61,7 @@ export namespace EnrolTokenController {
       enrolToken: enrolToken.toClientJSON(),
       token,
       command: enrolCommand(token),
+      installCommand: installCommand(token),
     }, 201);
   });
 

@@ -69,6 +69,15 @@ export interface LiveEvents {
   // `server:<id>`. Apply in place.
   "backup.progress": { serverId: string; backupId: number; operation: BackupOperation; bytes: number; totalBytes: number | null };
   //#endregion
+
+  //#region M5
+  // Since M5, every "owner + SERVERS_MANAGE_ALL" audience above also reaches the users the server is shared with
+  // (`ServerAccess.audience`), and the `server:<id>` subscribe check accepts any share level. A removed share gets a
+  // last `server.updated` and its topic is dropped.
+  // A user's quota limits were edited (usage changes arrive as `server.updated` / `backup.updated`). Audience:
+  // USERS_MANAGE + the user themself.
+  "quota.updated": { userId: number };
+  //#endregion
 }
 
 export type LiveEventName = keyof LiveEvents;

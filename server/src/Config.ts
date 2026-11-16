@@ -108,6 +108,8 @@ function load() {
     AGENT_HEARTBEAT_SEC: readInt("AGENT_HEARTBEAT_SEC", 15, 1),
     AGENT_OFFLINE_AFTER_SEC: readInt("AGENT_OFFLINE_AFTER_SEC", 45, 1),
     AGENT_REQUEST_TIMEOUT_SEC: readInt("AGENT_REQUEST_TIMEOUT_SEC", 30, 1),
+    /** M5: where `make dist` put the agent builds the panel serves (`gss-agent-linux-<arch>` + `.sha256` + VERSION). */
+    AGENT_DIST_DIR: readString("AGENT_DIST_DIR", "agent/dist"),
 
     // Hosts
     DEFAULT_PORT_POOL: readString("DEFAULT_PORT_POOL", "25565-25664,27015-27064"),

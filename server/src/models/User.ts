@@ -39,6 +39,7 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
   declare tokenVersion: CreationOptional<number>; // In every JWT; bumping it ends every session of the user.
   declare totpSecret: string | null; // Base32, set while enrolling 2FA and after (M5).
   declare totpEnabled: CreationOptional<boolean>;
+  declare totpLastStep: CreationOptional<number | null>; // Last accepted TOTP time step (M5): older or equal = replay.
   declare lastLoginAt: Date | null;
   declare invitedById: ForeignKey<User["id"]> | null;
   declare createdAt: CreationOptional<Date>;
@@ -61,6 +62,7 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
       tokenVersion: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
       totpSecret: { type: DataTypes.STRING(64), allowNull: true },
       totpEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+      totpLastStep: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
       lastLoginAt: { type: DataTypes.DATE, allowNull: true },
       invitedById: intFk(true),
       createdAt: DataTypes.DATE,
@@ -283,6 +285,42 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
   public async bumpTokenVersion(transaction?: Transaction): Promise<void> {
     this.tokenVersion += 1;
     await this.save({ transaction });
+  }
+  //#endregion
+
+  //#region TOTP (M5)
+  /**
+   * The user a login challenge (`createToken("totp")`) belongs to, or null when the token is invalid, expired, not a
+   * `totp` challenge, of an old `tokenVersion`, the user is disabled, or two-factor is off. Loads `roles`.
+   */
+  public static async findByChallenge(token: string): Promise<User | null> {
+    throw HttpError.notImplemented("User.findByChallenge"); // TODO(builder): M5
+  }
+
+  /**
+   * Check a 6-digit code against `totpSecret` and use up its time step: a conditional update of `totp_last_step`
+   * (`… WHERE totp_last_step IS NULL OR totp_last_step < :step`), so a code is accepted once even under concurrency.
+   * @returns Whether the code was valid and not used before.
+   */
+  public async consumeTotpCode(code: string): Promise<boolean> {
+    throw HttpError.notImplemented("User.consumeTotpCode"); // TODO(builder): M5
+  }
+
+  /**
+   * A TOTP code (6 digits) or a recovery code (anything else), for the login second step, disabling and new
+   * recovery codes.
+   * @returns `"totp"` / `"recovery_code"` for the method that matched, or null.
+   */
+  public async consumeSecondFactor(code: string): Promise<"totp" | "recovery_code" | null> {
+    throw HttpError.notImplemented("User.consumeSecondFactor"); // TODO(builder): M5
+  }
+
+  /**
+   * Turn two-factor off: secret, `totpEnabled`, `totpLastStep` cleared, recovery codes deleted. Saves. Used by
+   * disable and by the admin reset (which also bumps `tokenVersion`).
+   */
+  public async clearTotp(transaction?: Transaction): Promise<void> {
+    throw HttpError.notImplemented("User.clearTotp"); // TODO(builder): M5
   }
   //#endregion
 

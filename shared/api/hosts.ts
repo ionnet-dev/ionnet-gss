@@ -23,6 +23,11 @@ export interface HostDto {
   capacity: HostCapacityDto;
   serverCount: number;
   facts: HostFacts | null; // Last facts the agent reported. null = never reported.
+  /**
+   * The caller may create servers here (M5): SERVERS_CREATE and either SERVERS_MANAGE_ALL or a grant. The create
+   * page's host picker shows only these.
+   */
+  canCreate: boolean;
 }
 
 /**
@@ -51,6 +56,13 @@ export interface HostGrantDto {
   userId: number;
   username: string;
   createdAt: IsoDate;
+}
+
+/**
+ * `POST /api/hosts/:id/grants`. By username: HOSTS_MANAGE may not hold USERS_MANAGE, so there's no user list.
+ */
+export interface CreateHostGrantBody {
+  username: string;
 }
 //#endregion
 
@@ -81,5 +93,10 @@ export interface EnrolTokenCreatedResponse {
    * Ready-to-paste command for the host, e.g. `sudo gss-agent enrol --panel https://gss.ionnet.dev --token gss_enrol_…`.
    */
   command: string;
+  /**
+   * M5: one line that installs Docker, the agent and its systemd unit and enrols, e.g.
+   * `curl -fsSL https://gss.ionnet.dev/api/agent/install.sh | sudo GSS_ENROL_TOKEN=gss_enrol_… bash`.
+   */
+  installCommand: string;
 }
 //#endregion

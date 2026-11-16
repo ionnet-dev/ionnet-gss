@@ -8,10 +8,7 @@ import type {
   LoginSuccess,
   RegisterBody,
   SetupBody,
-  TotpConfirmBody,
-  TotpDisableBody,
   TotpLoginBody,
-  TotpSetupResponse,
 } from "@shared/api/auth.ts";
 import type { UserDto } from "@shared/api/users.ts";
 import { ROLES } from "@shared/permissions.ts";
@@ -112,7 +109,10 @@ export namespace AuthController {
   });
 
   /**
-   * POST /api/auth/login/totp  TotpLoginBody → LoginSuccess. Public. 401 on a bad challenge or code. M5.
+   * POST /api/auth/login/totp  TotpLoginBody → LoginSuccess. Public, rate-limited per IP; wrong codes count in
+   * `loginFailuresPerUser` (key `totp:<userId>`). 401 "The code is wrong or was already used." on a bad challenge,
+   * code or replay. `User.findByChallenge` + `User.consumeSecondFactor`. M5. The self-service TOTP routes are in
+   * `TotpController` (`/api/auth/totp`).
    */
   router.post("/login/totp", async (c) => {
     const body = await readBody<TotpLoginBody>(c);
@@ -169,31 +169,6 @@ export namespace AuthController {
     LiveGateway.closeUser(user.id, LIVE_CLOSE.RECONNECT, "Password changed.");
     return c.json<LoginSuccess>(await startSession(user));
   });
-
-  //#region TOTP (M5)
-  /**
-   * POST /api/auth/totp/setup → TotpSetupResponse. Signed in. Stores a pending secret (`totpEnabled` stays false).
-   */
-  router.post("/totp/setup", User.$middleware(), async (c) => {
-    throw HttpError.notImplemented("POST /api/auth/totp/setup"); // TODO(builder): M5
-  });
-
-  /**
-   * POST /api/auth/totp/confirm  TotpConfirmBody → UserDto. Signed in. Enables TOTP when the code matches.
-   */
-  router.post("/totp/confirm", User.$middleware(), async (c) => {
-    const body = await readBody<TotpConfirmBody>(c);
-    throw HttpError.notImplemented("POST /api/auth/totp/confirm"); // TODO(builder): M5
-  });
-
-  /**
-   * POST /api/auth/totp/disable  TotpDisableBody → UserDto. Signed in. Needs the password and a current code.
-   */
-  router.post("/totp/disable", User.$middleware(), async (c) => {
-    const body = await readBody<TotpDisableBody>(c);
-    throw HttpError.notImplemented("POST /api/auth/totp/disable"); // TODO(builder): M5
-  });
-  //#endregion
 }
 
 export default AuthController;

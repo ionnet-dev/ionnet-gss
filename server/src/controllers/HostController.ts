@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { OkResponse } from "@shared/api/common.ts";
-import type { HostDetailResponse, HostDto, HostGrantDto, UpdateHostBody } from "@shared/api/hosts.ts";
+import type { CreateHostGrantBody, HostDetailResponse, HostDto, HostGrantDto, UpdateHostBody } from "@shared/api/hosts.ts";
 import { LIMITS } from "@shared/constants.ts";
 import { CLOSE_REVOKED } from "@shared/protocol/protocol.gen.ts";
 import { AgentGateway } from "../gateways/agent/AgentGateway.ts";
@@ -153,7 +153,7 @@ export namespace HostController {
 
   //#region Grants (M5)
   /**
-   * GET /api/hosts/:id/grants → HostGrantDto[]. HOSTS_MANAGE.
+   * GET /api/hosts/:id/grants → HostGrantDto[] (by username). HOSTS_MANAGE.
    */
   router.get("/:id/grants", User.$middleware({ permissions: ["HOSTS_MANAGE"] }), async (c) => {
     const id = paramUuid(c, "id");
@@ -161,16 +161,18 @@ export namespace HostController {
   });
 
   /**
-   * PUT /api/hosts/:id/grants/:userId → HostGrantDto. HOSTS_MANAGE. Idempotent.
+   * POST /api/hosts/:id/grants  CreateHostGrantBody → 201 HostGrantDto. HOSTS_MANAGE. 404 unknown host or username,
+   * 409 already granted. Audit `host.granted`; `host.updated` to HOSTS_MANAGE + granted users.
    */
-  router.put("/:id/grants/:userId", User.$middleware({ permissions: ["HOSTS_MANAGE"] }), async (c) => {
+  router.post("/:id/grants", User.$middleware({ permissions: ["HOSTS_MANAGE"] }), async (c) => {
     const id = paramUuid(c, "id");
-    const userId = paramInt(c, "userId");
-    throw HttpError.notImplemented("PUT /api/hosts/:id/grants/:userId"); // TODO(builder): M5
+    const body = await readBody<CreateHostGrantBody>(c);
+    throw HttpError.notImplemented("POST /api/hosts/:id/grants"); // TODO(builder): M5
   });
 
   /**
-   * DELETE /api/hosts/:id/grants/:userId → OkResponse. HOSTS_MANAGE. Existing servers stay.
+   * DELETE /api/hosts/:id/grants/:userId → OkResponse. HOSTS_MANAGE. 404 when there is no such grant. The user's
+   * servers on the host stay. Audit `host.revoked`; `host.updated` also to the revoked user.
    */
   router.delete("/:id/grants/:userId", User.$middleware({ permissions: ["HOSTS_MANAGE"] }), async (c) => {
     const id = paramUuid(c, "id");

@@ -1,5 +1,14 @@
 import type { OkResponse } from "@shared/api/common.ts";
-import type { CreateUserBody, RoleDto, SetUserPasswordBody, UpdateUserBody, UpdateUserResponse, UserDto } from "@shared/api/users.ts";
+import type {
+  CreateUserBody,
+  EffectiveQuotaDto,
+  RoleDto,
+  SetUserPasswordBody,
+  UpdateQuotaBody,
+  UpdateUserBody,
+  UpdateUserResponse,
+  UserDto,
+} from "@shared/api/users.ts";
 import { useResource } from "@/hooks/useResource.ts";
 import { BaseApi } from "./BaseApi.ts";
 
@@ -29,6 +38,33 @@ export namespace UserApi {
   export function remove(id: number): Promise<OkResponse> {
     return BaseApi.DELETE(`/users/${id}`);
   }
+
+  //#region M5
+  export function getQuota(id: number): Promise<EffectiveQuotaDto> {
+    return BaseApi.GET(`/users/${id}/quota`);
+  }
+
+  export function setQuota(id: number, body: UpdateQuotaBody): Promise<EffectiveQuotaDto> {
+    return BaseApi.PUT(`/users/${id}/quota`, body);
+  }
+
+  /**
+   * Turn off a user's two-factor sign-in (lost phone and codes). Ends their sessions.
+   */
+  export function resetTotp(id: number): Promise<UserDto> {
+    return BaseApi.POST(`/users/${id}/totp/reset`);
+  }
+
+  /**
+   * One user's quota, refetched on `quota.updated` for that user.
+   */
+  export function useQuota(id: number) {
+    return useResource(() => getQuota(id), [id], {
+      liveEvents: ["quota.updated"],
+      liveFilter: (_event, data) => !("userId" in data) || data.userId === id,
+    });
+  }
+  //#endregion
 
   export function listRoles(): Promise<RoleDto[]> {
     return BaseApi.GET("/roles");

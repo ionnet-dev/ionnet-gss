@@ -6,8 +6,15 @@ import type {
   LoginResponse,
   LoginSuccess,
   RegisterBody,
+  RecoveryCodesBody,
+  RecoveryCodesResponse,
   SetupBody,
+  TotpConfirmBody,
+  TotpConfirmResponse,
+  TotpDisableBody,
   TotpLoginBody,
+  TotpSetupResponse,
+  TotpStatusResponse,
 } from "@shared/api/auth.ts";
 import type { MetaResponse } from "@shared/api/meta.ts";
 import type { UserDto } from "@shared/api/users.ts";
@@ -52,6 +59,28 @@ export namespace AuthApi {
   export function changePassword(body: ChangePasswordBody): Promise<LoginSuccess> {
     return BaseApi.POST("/auth/password", body);
   }
+
+  //#region TOTP (M5)
+  export function getTotp(): Promise<TotpStatusResponse> {
+    return BaseApi.GET("/auth/totp");
+  }
+
+  export function setupTotp(): Promise<TotpSetupResponse> {
+    return BaseApi.POST("/auth/totp/setup");
+  }
+
+  export function confirmTotp(body: TotpConfirmBody): Promise<TotpConfirmResponse> {
+    return BaseApi.POST("/auth/totp/confirm", body);
+  }
+
+  export function disableTotp(body: TotpDisableBody): Promise<UserDto> {
+    return BaseApi.POST("/auth/totp/disable", body);
+  }
+
+  export function regenerateRecoveryCodes(body: RecoveryCodesBody): Promise<RecoveryCodesResponse> {
+    return BaseApi.POST("/auth/totp/recovery-codes", body);
+  }
+  //#endregion
 }
 
 export default AuthApi;

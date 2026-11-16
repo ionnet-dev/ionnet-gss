@@ -22,6 +22,9 @@ export const LIMITS = {
   TOTP_DIGITS: 6,
   BACKUP_NAME_MAX: 128, // M4: `backups.name` is STRING(128).
   METRICS_HISTORY_SAMPLES: 720, // M4: samples the panel keeps per server (one hour at STATS_INTERVAL_SEC).
+  SHARES_PER_SERVER: 20, // M5: users one server can be shared with.
+  RECOVERY_CODES: 10, // M5: recovery codes issued per TOTP setup or regeneration.
+  RECOVERY_CODE_PATTERN: /^[a-z2-7]{5}-?[a-z2-7]{5}$/, // M5: after lowercasing and removing spaces.
 } as const;
 
 /**
