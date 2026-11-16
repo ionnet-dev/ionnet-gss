@@ -1282,3 +1282,58 @@ From the integrated review; all in the contract above now:
   changed."). The client says so next to the password field.
 - **Smaller:** background sends release their cooldown when the relay fails (`Mailer.send` inside the background
   task); `assertPassword` counts before checking (like `hitSecondFactor`) and resets on success.
+
+## M8: game settings
+
+A server's **Game settings** tab edits the game's own config files (Minecraft: `server.properties`) through a typed
+form described by the definition's `settings:` block. The explainer is the artifact "GSS Game Settings Tab".
+**No agent change:** the panel reads and writes the files through the existing `files.read` / `files.write`.
+
+### Contracts
+
+- **Schema.** `definition.json` `SettingsSpec {version, version_file, files}` → `SettingsFile {file, format, label,
+  others, groups}` → `SettingsGroup {name, description, fields}` → `SettingField {key, label, description, type
+  (SettingType: string|number|boolean|select), options, labels, default, min, max, integer, unit, pattern, since,
+  until, when}`. `settings` never reaches the `ServerSpec`; a child definition's `settings` replace the parent's.
+- **The file is the source of truth.** Values are never stored in the DB. A save rewrites only the changed keys
+  (other lines byte-identical, missing keys appended in key order), so the game's own edits (`/whitelist on`) and
+  hand edits in the Files tab survive. Keys `configs.set` manages in the same file are never listed, can't be
+  declared (sync error) and are refused on save. Changes apply at the next start.
+- **Versions.** `GameSettings.compareVersions` compares numeric segments (`1.21.4 < 26.1`, `1.21 == 1.21.0`).
+  The version is the first line of `version_file` (Minecraft's install hook writes `gss-version` for every flavour),
+  else the rendered `version` template; a non-version (`latest`) is unknown, and then `until` fields are hidden and
+  `since` fields shown. A key may be declared several times with disjoint ranges; the first applicable field wins.
+- **`others: true`** lists undeclared, unmanaged keys found in the file as `string` fields in a last group "Other";
+  saving such a key is allowed only while it is in the file. `hide` keys (container-breaking, unpublished ports,
+  secrets) are never listed and refused on save. A settings file may not also be a `template` config or a config of
+  another format (gss-init would undo saves), and settings paths have no `.` segments (`./x` would dodge the
+  managed-key match).
+- **Formats.** `GameSettings.FORMATS` (`read`, `write`); only `properties`, which mirrors
+  `agent/internal/initd/configs/properties.go` (Java escaping, `\uXXXX` for non-ASCII, continuation lines, CRLF).
+  Sync refuses other formats in `settings` until they have a codec here.
+- **Concurrency.** Each file's `modifiedAt` goes to the client and back: a stale one is a 409 before anything is
+  written (null = "didn't exist", so a file the game created since is a 409 too), and the write checks the freshly
+  read one. The client keeps the edits across a stale-file 409. Values are validated for every file before the first write;
+  writes are sequential per file (not atomic across files). No per-server lock (it is held for whole installs).
+
+### API routes (M8)
+
+| Method | Path | Auth | Body | Response |
+| --- | --- | --- | --- | --- |
+| GET | /api/servers/:id/game-settings | manage | | `GameSettingsResponse`; 404 no `settings`; 409 host offline |
+| PUT | /api/servers/:id/game-settings | manage | `UpdateGameSettingsBody` | `GameSettingsResponse`; 400 naming `"Label" (key)`; 409 file changed |
+
+`GameServerDetailResponse.hasGameSettings` shows the tab. `PUT` audits `game_settings.updated` with file and key
+names only (values can be passwords).
+
+### Files (M8)
+
+`server/src/definitions/GameSettings.ts` (pure), settings checks in `DefinitionEngine` (`checkSettings`,
+`checkSettingsLinks`), `servers/GameSettingsService.ts`, `controllers/GameSettingsController.ts`;
+`shared/api/gameSettings.ts`; `client/src/Api/GameSettingsApi.ts`, `client/src/components/GameSettings/`; games:
+`minecraft-java/game.yml` `settings`, `hooks/install.sh` (`gss-version`), `README.md`.
+
+### Extension points (M8)
+
+- A settings format = a `SettingsFormat` in `GameSettings.FORMATS` (the sync check follows the registry). Next
+  candidates: `yaml` (Paper's `config/paper-global.yml`, `bukkit.yml`, `spigot.yml`), `cfg` (Garry's Mod `server.cfg`).

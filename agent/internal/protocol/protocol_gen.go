@@ -260,6 +260,80 @@ type GameDefinition struct {
 	Backup         *BackupSpec  `json:"backup,omitempty"`
 	// Services extra containers of a stack, keyed by the host name the game reaches them under (^[a-z][a-z0-9-]{0,30}$, at most 4). On the server's bridge only, never published, started before the game (waiting for healthcheck), stopped after it, removed with it.
 	Services map[string]ServiceSpec `json:"services,omitempty"`
+	Settings *SettingsSpec          `json:"settings,omitempty"`
+}
+
+// SettingsSpec the server's Game settings tab: keys of the game's own config files, edited in place by the panel through the file API (the file stays the source of truth; nothing reaches the agent's spec). A child definition's settings replace the parent's whole block.
+type SettingsSpec struct {
+	// Version the game version since/until compare against, a template of {{vars.<key>}} only, e.g. {{vars.version}}. A value that isn't a version (latest) counts as unknown: the newest fields apply.
+	Version string `json:"version,omitempty"`
+	// VersionFile file below /data whose first line is the installed version (written by the install hook, e.g. gss-version). Wins over version when it exists.
+	VersionFile string         `json:"version_file,omitempty"`
+	Files       []SettingsFile `json:"files"`
+}
+
+// SettingsFile one config file of the tab. Keys configs.set manages in the same file are left out (the panel sets them before every start) and can't be declared.
+type SettingsFile struct {
+	// File path below /data, e.g. server.properties.
+	File   string       `json:"file"`
+	Format ConfigFormat `json:"format"`
+	// Label section title. Default is the file name.
+	Label string `json:"label,omitempty"`
+	// Others also list the keys found in the file that no applicable field declares, as text fields under "Other" (new keys of versions the definition doesn't know yet).
+	Others bool `json:"others,omitempty"`
+	// Hide keys never listed under "Other" and refused on save: ones that break the container (server-ip), open ports that aren't published, or hold secrets. Can't name a declared field.
+	Hide   []string        `json:"hide,omitempty"`
+	Groups []SettingsGroup `json:"groups"`
+}
+
+// SettingsGroup is defined in protocol/schema/definition.json.
+type SettingsGroup struct {
+	// Name group title, e.g. Gameplay.
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Fields      []SettingField `json:"fields"`
+}
+
+// SettingType is defined in protocol/schema/definition.json.
+type SettingType string
+
+// SettingType values.
+const (
+	SettingTypeString  SettingType = "string"
+	SettingTypeNumber  SettingType = "number"
+	SettingTypeBoolean SettingType = "boolean"
+	SettingTypeSelect  SettingType = "select"
+)
+
+// SettingField one key of the file. A key may be declared more than once with different since/until/when (e.g. numeric difficulty before 1.14); the first field that applies wins.
+type SettingField struct {
+	// Key the key as the format addresses it (properties: the literal key, e.g. view-distance).
+	Key         string      `json:"key"`
+	Label       string      `json:"label,omitempty"`
+	Description string      `json:"description,omitempty"`
+	Type        SettingType `json:"type"`
+	// Options select only: the values as written in the file.
+	Options []string `json:"options,omitempty"`
+	// Labels select only: display text by option value, e.g. { "0": Peaceful }. Missing = the value itself.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Default what the game uses when the key is missing (shown, not written).
+	Default any `json:"default,omitempty"`
+	// Min number only.
+	Min float64 `json:"min,omitempty"`
+	// Max number only.
+	Max float64 `json:"max,omitempty"`
+	// Integer number only: whole numbers only.
+	Integer bool `json:"integer,omitempty"`
+	// Unit display unit, e.g. chunks.
+	Unit string `json:"unit,omitempty"`
+	// Pattern string only: RE2 the whole value must match.
+	Pattern string `json:"pattern,omitempty"`
+	// Since first game version that has the key (inclusive), e.g. 1.19.
+	Since string `json:"since,omitempty"`
+	// Until first game version that no longer has it (exclusive).
+	Until string `json:"until,omitempty"`
+	// When only applies while each named variable has one of the listed values, like VariableDecl.when (e.g. { flavour: [paper] }).
+	When map[string][]string `json:"when,omitempty"`
 }
 
 // VariableType is defined in protocol/schema/definition.json.

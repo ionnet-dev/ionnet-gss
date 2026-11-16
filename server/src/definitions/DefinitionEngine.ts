@@ -6,12 +6,15 @@ import { parse as parseYaml } from "@std/yaml";
 import {
   CONFIG_FORMAT_VALUES,
   CONSOLE_INPUT_VALUES,
+  type ConfigFormat,
   type ConfigMapping,
   type GameDefinition,
   type InstallStep,
   PORT_PROTO_VALUES,
   type PortBinding,
+  SETTING_TYPE_VALUES,
   type ServerSpec,
+  type SettingField,
   type SpecFile,
   VARIABLE_BIND_VALUES,
   VARIABLE_TYPE_VALUES,
@@ -19,6 +22,7 @@ import {
 } from "@shared/protocol/protocol.gen.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { sha256Hex } from "../lib/tokens.ts";
+import { GameSettings } from "./GameSettings.ts";
 import { OptionsFetcher } from "./OptionsFetcher.ts";
 import { Patterns } from "./patterns.ts";
 
@@ -108,11 +112,18 @@ export namespace DefinitionEngine {
    * Keys of a definition whose strings may hold `{{…}}` templates.
    */
   const TEMPLATED_KEYS = ["image", "install", "configs", "hooks", "start", "ready", "stop", "console", "players", "backup", "services"] as const;
-  const DEFINITION_KEYS = ["id", "name", "extends", "image", "packages", "variables", "ports", "install_timeout", ...TEMPLATED_KEYS.filter((k) => k !== "image")];
+  const DEFINITION_KEYS = ["id", "name", "extends", "image", "packages", "variables", "ports", "install_timeout", ...TEMPLATED_KEYS.filter((k) => k !== "image"), "settings"];
   const VARIABLE_KEYS = ["key", "label", "description", "type", "options", "options_from", "pattern", "default", "unit", "min", "max", "reinstall", "admin_only", "bind", "generate", "when"];
   const PORT_KEYS = ["name", "proto", "default", "internal"];
   const INSTALL_KEYS = ["steamcmd", "download", "extract", "write", "hook"];
   const CONFIG_KEYS = ["file", "format", "set", "template"];
+  const SETTINGS_KEYS = ["version", "version_file", "files"];
+  const SETTINGS_FILE_KEYS = ["file", "format", "label", "others", "hide", "groups"];
+  const SETTINGS_GROUP_KEYS = ["name", "description", "fields"];
+  const SETTING_FIELD_KEYS = ["key", "label", "description", "type", "options", "labels", "default", "min", "max", "integer", "unit", "pattern", "since", "until", "when"];
+  const MAX_SETTINGS_FILES = 8;
+  const MAX_SETTINGS_FIELDS = 400;
+  const MAX_SETTING_KEY_CHARS = 128;
 
   //#region Parse and validate
   /**
@@ -155,6 +166,7 @@ export namespace DefinitionEngine {
     const varKeys = new Set((def.variables ?? []).map((v) => v.key));
     const portNames = new Set((def.ports ?? []).map((p) => p.name));
     checkVariableLinks(def.variables ?? [], path);
+    checkSettingsLinks(def, path);
     for (const key of TEMPLATED_KEYS) {
       visitStrings(def[key], key, (text, where) => {
         for (const match of text.matchAll(PLACEHOLDER)) {
@@ -316,6 +328,20 @@ export namespace DefinitionEngine {
       }
     }
     return false;
+  }
+
+  /**
+   * `isSafePath` without `.` segments, so the file a setting names compares equal to the one `configs` names.
+   */
+  function isSettingsPath(path: string): boolean {
+    return isSafePath(path) && !path.split("/").includes(".");
+  }
+
+  /**
+   * The path without `.` segments (`./server.properties` → `server.properties`).
+   */
+  export function normalPath(path: string): string {
+    return path.split("/").filter((part) => part !== ".").join("/");
   }
 
   function isSafePath(path: string): boolean {
@@ -625,7 +651,188 @@ export namespace DefinitionEngine {
         }
       }
     }
+    if (raw.settings !== undefined) checkSettings(raw.settings, path);
     return raw as unknown as GameDefinition;
+  }
+
+  /**
+   * Structure of the `settings` block (definition.json SettingsSpec): known keys at every level, typed values, a field's
+   * `default` valid for the field itself.
+   * @throws Error naming the file and the field.
+   */
+  function checkSettings(raw: unknown, path: string): void {
+    const fail = (where: string, message: string): never => {
+      throw new Error(`${path}: ${where} ${message}`);
+    };
+    const checkKeys = (obj: Record<string, unknown>, allowed: string[], where: string) => {
+      for (const key of Object.keys(obj)) {
+        if (!allowed.includes(key)) fail(`${where}.${key}`, `is not a known key. Known keys: ${allowed.join(", ")}.`);
+      }
+    };
+    const text = (value: unknown, where: string, optional = true) => {
+      if (value === undefined && optional) return;
+      if (typeof value !== "string") fail(where, "must be a string.");
+    };
+    const list = (value: unknown, where: string): unknown[] => {
+      if (!Array.isArray(value)) return fail(where, "must be a list.");
+      return value;
+    };
+    const isVersionText = (value: unknown): boolean => typeof value === "string" && GameSettings.isVersion(value);
+
+    if (!isRecord(raw)) return fail("settings", "must be a mapping with a list of files.");
+    checkKeys(raw, SETTINGS_KEYS, "settings");
+    text(raw.version, "settings.version");
+    if (raw.version_file !== undefined && (typeof raw.version_file !== "string" || !isSettingsPath(raw.version_file))) {
+      fail("settings.version_file", "must be a relative path without \".\" or \"..\" segments (e.g. gss-version).");
+    }
+    const files = list(raw.files, "settings.files");
+    if (files.length === 0) fail("settings.files", "needs at least one file.");
+    if (files.length > MAX_SETTINGS_FILES) fail("settings.files", `lists ${files.length} files; at most ${MAX_SETTINGS_FILES} are allowed.`);
+    files.forEach((file, i) => {
+      const where = `settings.files[${i}]`;
+      if (!isRecord(file)) return fail(where, "must be a mapping with a file, a format and groups.");
+      checkKeys(file, SETTINGS_FILE_KEYS, where);
+      if (typeof file.file !== "string" || !isSettingsPath(file.file)) fail(`${where}.file`, "must be a relative path without \".\" or \"..\" segments (e.g. server.properties).");
+      if (!CONFIG_FORMAT_VALUES.includes(file.format as never)) fail(`${where}.format`, `must be one of: ${CONFIG_FORMAT_VALUES.join(", ")}.`);
+      if (GameSettings.FORMATS[file.format as ConfigFormat] === undefined) {
+        const supported = Object.keys(GameSettings.FORMATS);
+        fail(`${where}.format`, `"${file.format}" isn't supported: settings support only the ${supported.join(", ")} format${supported.length === 1 ? "" : "s"} for now.`);
+      }
+      text(file.label, `${where}.label`);
+      if (file.others !== undefined && typeof file.others !== "boolean") fail(`${where}.others`, "must be true or false.");
+      if (file.hide !== undefined) list(file.hide, `${where}.hide`).forEach((key, k) => text(key, `${where}.hide[${k}]`, false));
+      let fieldCount = 0;
+      list(file.groups, `${where}.groups`).forEach((group, g) => {
+        const at = `${where}.groups[${g}]`;
+        if (!isRecord(group)) return fail(at, "must be a mapping with a name and fields.");
+        checkKeys(group, SETTINGS_GROUP_KEYS, at);
+        if (typeof group.name !== "string" || group.name.trim() === "") fail(`${at}.name`, "must be the group's title (a non-empty string).");
+        text(group.description, `${at}.description`);
+        list(group.fields, `${at}.fields`).forEach((field, f) => {
+          if (++fieldCount > MAX_SETTINGS_FIELDS) fail(where, `declares more than ${MAX_SETTINGS_FIELDS} fields; split them over several files or drop the rarely used ones.`);
+          checkSettingField(field, `${at}.fields[${f}]`, fail, isVersionText);
+        });
+      });
+    });
+  }
+
+  function checkSettingField(item: unknown, where: string, fail: (where: string, message: string) => never, isVersionText: (value: unknown) => boolean): void {
+    if (!isRecord(item)) return fail(where, "must be a mapping with a key and a type.");
+    for (const key of Object.keys(item)) {
+      if (!SETTING_FIELD_KEYS.includes(key)) fail(`${where}.${key}`, `is not a known key. Known keys: ${SETTING_FIELD_KEYS.join(", ")}.`);
+    }
+    // deno-lint-ignore no-control-regex
+    if (typeof item.key !== "string" || item.key === "" || item.key.length > MAX_SETTING_KEY_CHARS || /[\u0000-\u001f\u007f]/.test(item.key)) {
+      fail(`${where}.key`, `must be the key as the file spells it (1-${MAX_SETTING_KEY_CHARS} characters).`);
+    }
+    const at = `${where} (${item.key})`;
+    if (!SETTING_TYPE_VALUES.includes(item.type as never)) fail(`${at} type`, `needs a type, one of: ${SETTING_TYPE_VALUES.join(", ")}.`);
+    for (const name of ["label", "description", "unit"] as const) {
+      if (item[name] !== undefined && typeof item[name] !== "string") fail(`${at} ${name}`, "must be a string.");
+    }
+    if (item.type === "select") {
+      if (!Array.isArray(item.options) || item.options.length === 0) fail(`${at} options`, "needs at least one choice (a list of strings; quote numbers, e.g. \"0\").");
+      if (!(item.options as unknown[]).every((option) => typeof option === "string")) fail(`${at} options`, "must all be strings (quote numbers, e.g. \"0\").");
+    }
+    else if (item.options !== undefined) {
+      fail(`${at} options`, "is only for type select.");
+    }
+    if (item.labels !== undefined) {
+      if (item.type !== "select") fail(`${at} labels`, "is only for type select.");
+      if (!isRecord(item.labels)) return fail(`${at} labels`, "must be a mapping of option to display text.");
+      for (const [option, label] of Object.entries(item.labels)) {
+        if (typeof label !== "string") fail(`${at} labels.${option}`, "must be a string.");
+        if (!(item.options as string[]).includes(option)) fail(`${at} labels.${option}`, `isn't one of the options (${(item.options as string[]).join(", ")}).`);
+      }
+    }
+    for (const bound of ["min", "max"] as const) {
+      if (item[bound] === undefined) continue;
+      if (item.type !== "number") fail(`${at} ${bound}`, "is only for type number.");
+      if (typeof item[bound] !== "number" || !Number.isFinite(item[bound])) fail(`${at} ${bound}`, "must be a number.");
+    }
+    if (typeof item.min === "number" && typeof item.max === "number" && item.min > item.max) fail(`${at} min`, `(${item.min}) is larger than max (${item.max}).`);
+    if (item.integer !== undefined) {
+      if (item.type !== "number") fail(`${at} integer`, "is only for type number.");
+      if (typeof item.integer !== "boolean") fail(`${at} integer`, "must be true or false.");
+    }
+    if (item.pattern !== undefined) {
+      if (item.type !== "string") fail(`${at} pattern`, "is only for type string.");
+      if (typeof item.pattern !== "string") fail(`${at} pattern`, "must be a regular expression string.");
+      const problem = Patterns.problem(item.pattern as string);
+      if (problem) fail(`${at} pattern`, problem);
+    }
+    for (const name of ["since", "until"] as const) {
+      if (item[name] !== undefined && !isVersionText(item[name])) fail(`${at} ${name}`, "must be a version: dotted numbers like 1.19 or 26.1 (quote it in YAML).");
+    }
+    if (item.since !== undefined && item.until !== undefined && GameSettings.compareVersions(item.since as string, item.until as string) >= 0) {
+      fail(`${at} since`, `(${item.since}) must be older than until (${item.until}).`);
+    }
+    if (item.when !== undefined) {
+      if (!isRecord(item.when) || Object.keys(item.when).length === 0) fail(`${at} when`, "must be a mapping of variable to the values it applies for, e.g. { flavour: [paper] }.");
+      for (const [other, values] of Object.entries(item.when as Record<string, unknown>)) {
+        if (!Array.isArray(values) || values.length === 0 || !values.every((value) => typeof value === "string")) {
+          fail(`${at} when.${other}`, "must be a list of values (text; booleans as \"true\" or \"false\").");
+        }
+      }
+    }
+    if (item.default !== undefined) {
+      if (typeof item.default !== "string" && typeof item.default !== "number" && typeof item.default !== "boolean") fail(`${at} default`, "must be a string, number or boolean.");
+      try {
+        GameSettings.checkValue(item as unknown as SettingField, GameSettings.toText(item.default as string | number | boolean));
+      } catch (error) {
+        fail(`${at} default`, `isn't valid for the field itself: ${(error as Error).message}`);
+      }
+    }
+  }
+
+  /**
+   * What only a complete definition can check about `settings`: `version` reads declared non-secret variables
+   * (`{{vars.<key>}}`, no filter), `when` names declared non-secret variables, no file twice, and no key that `configs`
+   * sets in the same file (the panel manages it before every start).
+   * @throws Error naming both places.
+   */
+  function checkSettingsLinks(def: GameDefinition, path: string): void {
+    const settings = def.settings;
+    if (settings === undefined) return;
+    const byKey = new Map((def.variables ?? []).map((v) => [v.key, v]));
+    const variable = (key: string, where: string): void => {
+      const decl = byKey.get(key);
+      if (!decl) throw new Error(`${path}: ${where} names the variable "${key}", which isn't declared.`);
+      if (decl.type === "secret") throw new Error(`${path}: ${where} can't use the secret "${key}".`);
+    };
+    for (const match of (settings.version ?? "").matchAll(PLACEHOLDER)) {
+      const { path: name, filter } = splitPlaceholder(match[1]);
+      if (filter !== null || !/^vars\.[a-z][a-z0-9_]*$/.test(name)) {
+        throw new Error(`${path}: settings.version: {{${match[1]}}} isn't allowed; use only {{vars.<key>}} placeholders without filters, e.g. {{vars.version}}.`);
+      }
+      variable(name.slice("vars.".length), "settings.version");
+    }
+    const seen = new Set<string>();
+    settings.files.forEach((file, i) => {
+      const where = `settings.files[${i}]`;
+      if (seen.has(file.file)) throw new Error(`${path}: ${where}: "${file.file}" is listed twice; put all its groups in one file entry.`);
+      seen.add(file.file);
+      const managed = new Map<string, number>();
+      (def.configs ?? []).forEach((config, c) => {
+        if (normalPath(config.file) !== file.file) return;
+        // gss-init rewrites a template file whole, and another format would edit it differently: saves would be lost.
+        if (config.format === "template" || config.format !== file.format) {
+          throw new Error(`${path}: ${where} (${file.file}) is also written by configs[${c}] as ${config.format}, which would undo every save at the next start. Use the same format with \"set\", or drop one of them.`);
+        }
+        for (const key of Object.keys(config.set ?? {})) managed.set(key, c);
+      });
+      const hidden = new Set(file.hide ?? []);
+      for (const group of file.groups) {
+        for (const field of group.fields) {
+          for (const other of Object.keys(field.when ?? {})) variable(other, `${where} field "${field.key}" when`);
+          if (hidden.has(field.key)) throw new Error(`${path}: ${where} (${file.file}) declares "${field.key}" and also hides it. Remove it from one of them.`);
+          const config = managed.get(field.key);
+          if (config !== undefined) {
+            throw new Error(`${path}: ${where} (${file.file}) declares "${field.key}", which configs[${config}] also sets before every start. Remove one of them.`);
+          }
+        }
+      }
+    });
   }
   //#endregion
 

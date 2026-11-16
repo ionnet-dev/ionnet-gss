@@ -1,0 +1,47 @@
+.game-settings {
+  &__group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-12);
+  }
+
+  &__title {
+    margin: 0;
+    font-size: var(--io-text-sm);
+    font-weight: 600;
+  }
+
+  // A changed field gets an accent edge so unsaved edits stand out in a long list.
+  &__item {
+    padding-inline-start: var(--io-space-8);
+    border-inline-start: 2px solid transparent;
+
+    &[data-changed] {
+      border-inline-start-color: var(--io-color-accent);
+    }
+  }
+
+  &__edited {
+    color: var(--io-color-accent);
+  }
+
+  &__default {
+    white-space: nowrap;
+  }
+
+  &__bar {
+    position: sticky;
+    bottom: var(--io-space-16);
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--io-space-12);
+    padding: var(--io-space-12) var(--io-space-16);
+    border: 1px solid var(--io-color-line);
+    border-radius: var(--io-radius-sm);
+    background: var(--io-color-surface-raised);
+    font-size: var(--io-text-sm);
+  }
+}

@@ -52,6 +52,7 @@ import { HttpError } from "../lib/HttpError.ts";
 import { RateLimiter } from "../lib/RateLimiter.ts";
 import { Definition, GameServer, Host, HostGrant, PortAllocation, Quota, sequelize, User } from "../models/index.ts";
 import { BackupService } from "./BackupService.ts";
+import { GameSettingsService } from "./GameSettingsService.ts";
 import { MetricsService } from "./MetricsService.ts";
 import { ServerAccess } from "./ServerAccess.ts";
 import { ShareService } from "./ShareService.ts";
@@ -1262,6 +1263,7 @@ export namespace GameServerService {
       source: { name: source?.name ?? "", kind: source?.kind ?? "local" },
       services: server.servicesStatus ?? [],
       canUpdateGame: canUpdateGame(server.definition!.document),
+      hasGameSettings: GameSettingsService.hasSettings(server.definition!.document),
       installed: server.installedAt !== null,
     };
   }

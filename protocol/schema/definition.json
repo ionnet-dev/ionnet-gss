@@ -25,9 +25,72 @@
         "console": { "$ref": "#/$defs/ConsoleSpec" },
         "players": { "$ref": "#/$defs/PlayersSpec" },
         "backup": { "$ref": "#/$defs/BackupSpec" },
-        "services": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ServiceSpec" }, "description": "Extra containers of a stack, keyed by the host name the game reaches them under (`^[a-z][a-z0-9-]{0,30}$`, at most 4). On the server's bridge only, never published, started before the game (waiting for `healthcheck`), stopped after it, removed with it." }
+        "services": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ServiceSpec" }, "description": "Extra containers of a stack, keyed by the host name the game reaches them under (`^[a-z][a-z0-9-]{0,30}$`, at most 4). On the server's bridge only, never published, started before the game (waiting for `healthcheck`), stopped after it, removed with it." },
+        "settings": { "$ref": "#/$defs/SettingsSpec" }
       },
       "required": ["id"]
+    },
+    "SettingsSpec": {
+      "type": "object",
+      "description": "The server's Game settings tab: keys of the game's own config files, edited in place by the panel through the file API (the file stays the source of truth; nothing reaches the agent's spec). A child definition's `settings` replace the parent's whole block.",
+      "properties": {
+        "version": { "type": "string", "description": "The game version `since`/`until` compare against, a template of `{{vars.<key>}}` only, e.g. `{{vars.version}}`. A value that isn't a version (`latest`) counts as unknown: the newest fields apply." },
+        "version_file": { "type": "string", "description": "File below /data whose first line is the installed version (written by the install hook, e.g. `gss-version`). Wins over `version` when it exists." },
+        "files": { "type": "array", "items": { "$ref": "#/$defs/SettingsFile" } }
+      },
+      "required": ["files"]
+    },
+    "SettingsFile": {
+      "type": "object",
+      "description": "One config file of the tab. Keys `configs.set` manages in the same file are left out (the panel sets them before every start) and can't be declared.",
+      "properties": {
+        "file": { "type": "string", "description": "Path below /data, e.g. `server.properties`." },
+        "format": { "$ref": "#/$defs/ConfigFormat" },
+        "label": { "type": "string", "description": "Section title. Default is the file name." },
+        "others": { "type": "boolean", "description": "Also list the keys found in the file that no applicable field declares, as text fields under \"Other\" (new keys of versions the definition doesn't know yet)." },
+        "hide": { "type": "array", "items": { "type": "string" }, "description": "Keys never listed under \"Other\" and refused on save: ones that break the container (`server-ip`), open ports that aren't published, or hold secrets. Can't name a declared field." },
+        "groups": { "type": "array", "items": { "$ref": "#/$defs/SettingsGroup" } }
+      },
+      "required": ["file", "format", "groups"]
+    },
+    "SettingsGroup": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Group title, e.g. `Gameplay`." },
+        "description": { "type": "string" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/SettingField" } }
+      },
+      "required": ["name", "fields"]
+    },
+    "SettingType": {
+      "type": "string",
+      "enum": ["string", "number", "boolean", "select"]
+    },
+    "SettingField": {
+      "type": "object",
+      "description": "One key of the file. A key may be declared more than once with different `since`/`until`/`when` (e.g. numeric difficulty before 1.14); the first field that applies wins.",
+      "properties": {
+        "key": { "type": "string", "description": "The key as the format addresses it (properties: the literal key, e.g. `view-distance`)." },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "type": { "$ref": "#/$defs/SettingType" },
+        "options": { "type": "array", "items": { "type": "string" }, "description": "`select` only: the values as written in the file." },
+        "labels": { "type": "object", "additionalProperties": { "type": "string" }, "description": "`select` only: display text by option value, e.g. `{ \"0\": Peaceful }`. Missing = the value itself." },
+        "default": { "type": ["string", "number", "boolean"], "description": "What the game uses when the key is missing (shown, not written)." },
+        "min": { "type": "number", "description": "`number` only." },
+        "max": { "type": "number", "description": "`number` only." },
+        "integer": { "type": "boolean", "description": "`number` only: whole numbers only." },
+        "unit": { "type": "string", "description": "Display unit, e.g. `chunks`." },
+        "pattern": { "type": "string", "description": "`string` only: RE2 the whole value must match." },
+        "since": { "type": "string", "description": "First game version that has the key (inclusive), e.g. `1.19`." },
+        "until": { "type": "string", "description": "First game version that no longer has it (exclusive)." },
+        "when": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } },
+          "description": "Only applies while each named variable has one of the listed values, like `VariableDecl.when` (e.g. `{ flavour: [paper] }`)."
+        }
+      },
+      "required": ["key", "type"]
     },
     "VariableType": {
       "type": "string",

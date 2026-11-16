@@ -418,6 +418,115 @@ export interface GameDefinition {
    * Extra containers of a stack, keyed by the host name the game reaches them under (`^[a-z][a-z0-9-]{0,30}$`, at most 4). On the server's bridge only, never published, started before the game (waiting for `healthcheck`), stopped after it, removed with it.
    */
   services?: Record<string, ServiceSpec>;
+  settings?: SettingsSpec;
+}
+
+/**
+ * The server's Game settings tab: keys of the game's own config files, edited in place by the panel through the file API (the file stays the source of truth; nothing reaches the agent's spec). A child definition's `settings` replace the parent's whole block.
+ */
+export interface SettingsSpec {
+  /**
+   * The game version `since`/`until` compare against, a template of `{{vars.<key>}}` only, e.g. `{{vars.version}}`. A value that isn't a version (`latest`) counts as unknown: the newest fields apply.
+   */
+  version?: string;
+  /**
+   * File below /data whose first line is the installed version (written by the install hook, e.g. `gss-version`). Wins over `version` when it exists.
+   */
+  version_file?: string;
+  files: SettingsFile[];
+}
+
+/**
+ * One config file of the tab. Keys `configs.set` manages in the same file are left out (the panel sets them before every start) and can't be declared.
+ */
+export interface SettingsFile {
+  /**
+   * Path below /data, e.g. `server.properties`.
+   */
+  file: string;
+  format: ConfigFormat;
+  /**
+   * Section title. Default is the file name.
+   */
+  label?: string;
+  /**
+   * Also list the keys found in the file that no applicable field declares, as text fields under "Other" (new keys of versions the definition doesn't know yet).
+   */
+  others?: boolean;
+  /**
+   * Keys never listed under "Other" and refused on save: ones that break the container (`server-ip`), open ports that aren't published, or hold secrets. Can't name a declared field.
+   */
+  hide?: string[];
+  groups: SettingsGroup[];
+}
+
+export interface SettingsGroup {
+  /**
+   * Group title, e.g. `Gameplay`.
+   */
+  name: string;
+  description?: string;
+  fields: SettingField[];
+}
+
+export type SettingType = "string" | "number" | "boolean" | "select";
+export const SETTING_TYPE_VALUES: readonly SettingType[] = ["string", "number", "boolean", "select"];
+
+/**
+ * One key of the file. A key may be declared more than once with different `since`/`until`/`when` (e.g. numeric difficulty before 1.14); the first field that applies wins.
+ */
+export interface SettingField {
+  /**
+   * The key as the format addresses it (properties: the literal key, e.g. `view-distance`).
+   */
+  key: string;
+  label?: string;
+  description?: string;
+  type: SettingType;
+  /**
+   * `select` only: the values as written in the file.
+   */
+  options?: string[];
+  /**
+   * `select` only: display text by option value, e.g. `{ "0": Peaceful }`. Missing = the value itself.
+   */
+  labels?: Record<string, string>;
+  /**
+   * What the game uses when the key is missing (shown, not written).
+   */
+  default?: string | number | boolean;
+  /**
+   * `number` only.
+   */
+  min?: number;
+  /**
+   * `number` only.
+   */
+  max?: number;
+  /**
+   * `number` only: whole numbers only.
+   */
+  integer?: boolean;
+  /**
+   * Display unit, e.g. `chunks`.
+   */
+  unit?: string;
+  /**
+   * `string` only: RE2 the whole value must match.
+   */
+  pattern?: string;
+  /**
+   * First game version that has the key (inclusive), e.g. `1.19`.
+   */
+  since?: string;
+  /**
+   * First game version that no longer has it (exclusive).
+   */
+  until?: string;
+  /**
+   * Only applies while each named variable has one of the listed values, like `VariableDecl.when` (e.g. `{ flavour: [paper] }`).
+   */
+  when?: Record<string, string[]>;
 }
 
 export type VariableType = "string" | "number" | "boolean" | "select" | "secret";

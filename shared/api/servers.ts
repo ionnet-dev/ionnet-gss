@@ -139,6 +139,10 @@ export interface GameServerDetailResponse extends GameServerDto {
    * update can be retried).
    */
   installed: boolean;
+  /**
+   * The definition has a `settings` block, so the Game settings tab (`/api/servers/:id/game-settings`) applies.
+   */
+  hasGameSettings: boolean;
 }
 
 /**
