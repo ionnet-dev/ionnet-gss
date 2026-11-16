@@ -50,7 +50,7 @@ li { margin-bottom: 4px; }
 
 <div class="wrap">
 <header>
-  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 to 3 done, milestone 4 being built</p>
+  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 to 4 done, milestone 5 next</p>
   <h1>Ionnet GSS</h1>
   <p class="lead">Ionnet Game Server Studio. A game server manager: one control panel, an agent on every Host Machine, and one Docker container or stack per Game Server. Each game is a folder of configuration in a git repo, so adding a game means pushing a folder.</p>
   <p>This page is the design we agreed in three rounds of questions, plus the defaults I filled in around them. Rows tagged <span class="tag you">you chose</span> are settled. Rows tagged <span class="tag mine">my default</span> were my proposals, which you accepted on 2026-11-15.</p>
@@ -383,10 +383,11 @@ services:
     <tr><td>M2 First server</td><td>Done</td><td>Base and Minecraft images, <code>gss-init</code>, agent Docker side, definition engine, game server API, servers pages with live console. Reviewed, 14 findings fixed, committed as <code>1ac1557</code>.</td></tr>
     <tr><td>Outbound block</td><td>Done</td><td>Private, host and link-local destinations are rejected by default; admin switch per server. Committed as <code>a6b884f</code>. Not separately reviewed yet.</td></tr>
     <tr><td>M3 Definitions</td><td>Done</td><td>Git sources with pinning and upgrade, <code>ini</code>/<code>json</code>/<code>yaml</code>/<code>cfg</code> formats, steamcmd, derived images for packages, stacks, dynamic dropdowns, Garry's Mod and Garry's Mod + MariaDB. Reviewed together with the outbound block; 15 findings fixed; committed as <code>1a1d15a</code>.</td></tr>
-    <tr><td>M4 Operations</td><td>Building</td><td>Contracts and skeletons committed as <code>18fa86c</code> on 2026-11-16. Four parcels are being built in parallel: files and transfers, backups and restore, metrics and players, the Files and Backups tabs. Then integration with a real Minecraft world restore, review, fixes and commit.</td></tr>
+    <tr><td>M4 Operations</td><td>Done</td><td>File manager with chunked upload and download, backups and restore, live metrics and the player list, with Overview, Files and Backups tabs. Contracts <code>18fa86c</code>; built in four parallel parcels, run end to end in the real UI, reviewed (13 findings, 7 fixed, 6 on the hardening list), committed as <code>dd425e9</code> on 2026-11-16.</td></tr>
+    <tr><td>M5 Tenancy</td><td>Next</td><td>Quotas, host grants, sharing, 2FA, agent install script, docs.</td></tr>
   </table></div>
   <h3>M4 design, as agreed in the contracts</h3>
-  <p>These are my defaults, filled in while you were away. Nothing here is built and proven yet; say so if you want one changed.</p>
+  <p>These are my defaults, filled in while you were away. They are built as described; say so if you want one changed.</p>
   <div class="scroll"><table>
     <tr><th>Topic</th><th>Decision</th><th>Why</th></tr>
     <tr><td>File transfers</td><td>The panel pulls or pushes a file in 512 KiB chunks over the agent's existing socket, at most 4 chunks in flight, and streams it to or from the browser over plain HTTP.</td><td>The agent only dials out, so the panel must relay. The small window keeps panel memory flat however large the file is.</td></tr>
@@ -404,7 +405,47 @@ services:
     <tr><td>Players</td><td><code>gss-init</code> matches the definition's join and leave patterns and keeps the list, which resets when the game exits. The panel shows count and names.</td><td>The list survives a panel or agent restart because it lives beside the game.</td></tr>
     <tr><td>Access</td><td>Files and backups need the manage level, metrics the view level. Owners and admins have manage.</td><td>Ready for server sharing in M5 without changing routes.</td></tr>
   </table></div>
-  <h3>M4 failure cases the build must prove</h3>
+  <h3>M4 proof, real output from this machine</h3>
+  <pre><code>Files (Paper 26.3 server, real web UI, headless browser)
+  edit server.properties online-mode=true → false: saved, confirmed on disk
+  file touched on disk between open and save → "This file changed on the server since you opened it"
+  upload 200 MB: 0 B → 47 → 96 → 144 → 191 → 200 MB, on disk 209715200 bytes
+  upload cancelled at 49 MB: temp file in .gss/uploads present, then gone; no target file
+  download by ticket: sha256 7b01bfa8…baee70 for both the original and the download
+  1 GiB by curl: up 2.3 s, down 1.9 s, identical; panel memory peaked at 239 MB
+  symlink to /etc/passwd, "..", write through an outward link → 400 "…leaves the server's folder."
+
+Backup and restore
+  backup while running: 5.4 s, 390,929,128 bytes → 352 MB archive
+  console: save-off · save-all flush · Automatic saving is now disabled · Saved the game · save-on
+  edit world/restore-edit.txt to v2, add a marker, delete big.bin, stop, restore from the UI
+    → v1, no marker, big.bin back, no leftover folders; start → Done (4.675s)!
+  restore of a 1.7 GB backup: about 4.1 s
+  during a restore: delete, start, file listing and a second restore → 409 with a reason
+  kill -9 the agent mid-backup → partial file removed, backup failed, save-on sent
+  kill -9 between the swap renames → "rolled an interrupted restore back", live data intact
+  non-admin at the limit → 409 "This server already has 2 backups, the most your quota allows (2)."
+
+Metrics and players
+  server.stats on the socket every 5.0 s; CPU 193% at startup, about 1% idle; memory 885 MB of 2 GiB
+  a scripted Minecraft client joined: "[23:59:44] [Server thread/INFO]: System chat: Steve joined the game"
+    → Players online: 1 (Steve); 0 after it left; the list survived an agent restart
+  say Steve joined the game → "[Not Secure] [Server] Steve joined the game": not counted</code></pre>
+  <p>Run on scratch panels and agents next to your dev instance, then removed. Your dev agent was restarted on the new build afterwards and re-attached to the running server.</p>
+  <h3>What the M4 review and the real runs turned up</h3>
+  <div class="scroll"><table>
+    <tr><th>Found</th><th>Outcome</th></tr>
+    <tr><td>Fake joins through chat</td><td>The first player patterns matched any line containing "X joined the game". They are now anchored at the start of the line, and allow the <code>System chat:</code> prefix Paper 26.3 really logs. A plugin's own broadcast with that text would still count.</td></tr>
+    <tr><td>Good backup shown as failed</td><td>A backup finishing while the agent was disconnected could be marked failed by the panel's reconnect check. The agent's "finished" now wins over the panel's guess.</td></tr>
+    <tr><td>Orphan archive</td><td>A slow backup start could time out on the panel while the agent wrote the archive anyway. The agent now answers before measuring, and the panel keeps the row so it can be deleted or completed.</td></tr>
+    <tr><td>Paused database</td><td>A service container whose unpause failed stayed paused. The agent now unpauses its own services at startup and after the next backup. Unit-tested only.</td></tr>
+    <tr><td>Restore with a service the backup lacks</td><td>The current volume is moved aside and a fresh one is created on the next start, since the backup proves the service had no data then. Unit-tested only.</td></tr>
+    <tr><td>Disk walks</td><td>The stats loop walked every data folder once a minute on top of the disk check. It now reads the disk check's figure, so the disk number can lag by up to a minute.</td></tr>
+    <tr><td>Too many players</td><td>One server reporting an over-long list made the panel reject its whole host. The list is now cut at every hop.</td></tr>
+    <tr><td>Not proven</td><td>A stack backup with a live database (needs the 7 GB Garry's Mod install, and a root agent to read the database's files); delete with "keep data" after M4; the 507 disk-full refusal over HTTP.</td></tr>
+    <tr><td>Left for hardening</td><td>Transfer slots are per host, so four users can hold all 16; huge folders are listed in one read; a rename without overwrite has a small race; a failed ticket download shows as a browser error; the Files tab shows the internal <code>.gss</code> folder. Listed in <code>STRUCTURE.md</code>.</td></tr>
+  </table></div>
+  <h3>M4 failure cases</h3>
   <div class="scroll"><table>
     <tr><th>Case</th><th>Expected</th></tr>
     <tr><td>Path escape</td><td>400, nothing opened.</td></tr>
