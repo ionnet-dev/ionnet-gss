@@ -1,0 +1,94 @@
+.metric-chart {
+  margin: 0;
+  min-inline-size: 0;
+
+  &__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--io-space-4) var(--io-space-12);
+    margin-block-end: var(--io-space-4);
+  }
+
+  &__title {
+    font-weight: 600;
+  }
+
+  &__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--io-space-4) var(--io-space-12);
+    font-size: var(--io-text-sm);
+    color: var(--io-color-text-muted);
+  }
+
+  &__key {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--io-space-4);
+
+    b {
+      color: var(--io-color-text);
+      font-weight: 600;
+    }
+  }
+
+  &__swatch {
+    inline-size: 10px;
+    block-size: 3px;
+    border-radius: 2px;
+    background: currentcolor;
+
+    &--dashed {
+      background: repeating-linear-gradient(90deg, currentcolor 0 4px, transparent 4px 7px);
+    }
+  }
+
+  &__frame {
+    position: relative;
+    min-inline-size: 0;
+
+    svg {
+      display: block;
+      max-inline-size: 100%;
+      touch-action: pan-y;
+    }
+  }
+
+  &__grid {
+    stroke: var(--io-color-line);
+    stroke-width: 1;
+  }
+
+  &__tick {
+    fill: var(--io-color-text-subtle);
+    font-size: 11px;
+  }
+
+  &__line {
+    stroke-width: 1.75;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+
+  &__limit {
+    stroke-width: 1.25;
+    stroke-dasharray: 5 4;
+    opacity: 0.8;
+  }
+
+  &__cursor {
+    stroke: var(--io-color-line-strong);
+    stroke-width: 1;
+  }
+
+  &__time {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline-end: var(--io-space-8);
+    font-size: 11px;
+    color: var(--io-color-text-muted);
+    pointer-events: none;
+  }
+}

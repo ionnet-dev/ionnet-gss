@@ -65,6 +65,13 @@ references, a repeated group that contains a quantifier or `|` (`([a-z0-9_]+)*`,
 on such a group is fine, as in `[0-9]+\.[0-9]+(\.[0-9]+)?`), and more than three unbounded quantifiers (`*`, `+`,
 `{n,}`). Write a character class or one quantifier instead (`[a-z0-9_]*`).
 
+## Player patterns
+
+`players.join` and `players.leave` are RE2 patterns that gss-init matches against every console line of the running game
+(colour codes stripped); the first capture group is the player name. Anchor them at the line start (`^`, then only
+the log prefix) and the line end, so chat can't fake a join or leave: see `minecraft-java/game.yml`. A pattern without a
+capture group is refused.
+
 ## Templates and quoting
 
 Strings in `image`, `install`, `configs`, `hooks`, `start`, `ready`, `stop`, `console`, `players`, `backup` and

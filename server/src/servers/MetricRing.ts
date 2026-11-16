@@ -18,7 +18,29 @@ export class MetricRing {
    * Add a sample and return it as stored (with rates). Samples older than the newest are dropped (null).
    */
   public push(stats: ServerStats, at: Date): MetricSampleDto | null {
-    throw new Error("Not implemented."); // TODO(builder)
+    const newest = this._samples[this._samples.length - 1];
+    if (newest && at.getTime() < Date.parse(newest.at)) return null;
+    let rx = 0;
+    let tx = 0;
+    const last = this._last;
+    if (last && at.getTime() > last.at && stats.netRxBytes >= last.rx && stats.netTxBytes >= last.tx) {
+      const seconds = (at.getTime() - last.at) / 1000;
+      rx = (stats.netRxBytes - last.rx) / seconds;
+      tx = (stats.netTxBytes - last.tx) / seconds; // A decrease (container restarted) keeps both rates 0.
+    }
+    this._last = { at: at.getTime(), rx: stats.netRxBytes, tx: stats.netTxBytes };
+    const sample: MetricSampleDto = {
+      at: at.toISOString(),
+      cpuPercent: stats.cpuPercent,
+      memoryBytes: stats.memoryBytes,
+      memoryLimitBytes: stats.memoryLimitBytes,
+      netRxBytesPerSec: Math.round(rx),
+      netTxBytesPerSec: Math.round(tx),
+      pids: stats.pids,
+    };
+    this._samples.push(sample);
+    if (this._samples.length > this.capacity) this._samples.splice(0, this._samples.length - this.capacity);
+    return sample;
   }
 
   /**

@@ -51,8 +51,14 @@ func (m *manager) Start(ctx context.Context, serverID string) (protocol.ServerSt
 	if err != nil {
 		return protocol.ServerStatus{}, err
 	}
+	if err := s.checkIdle("start"); err != nil {
+		return protocol.ServerStatus{}, err
+	}
 	s.op.Lock()
 	defer s.op.Unlock()
+	if err := s.checkIdle("start"); err != nil {
+		return protocol.ServerStatus{}, err
+	}
 	return m.start(ctx, s)
 }
 
@@ -99,6 +105,11 @@ func (m *manager) Stop(ctx context.Context, serverID string, kill bool) (protoco
 	if err != nil {
 		return protocol.ServerStatus{}, err
 	}
+	// Stop is allowed during a backup (the archive goes on); a restore runs only while the game is stopped and
+	// holds s.op until it ends.
+	if op := s.currentOperation(); op != nil && op.Operation == protocol.BackupOperationRestore {
+		return protocol.ServerStatus{}, s.checkIdle("stop")
+	}
 	s.op.Lock()
 	defer s.op.Unlock()
 	s.setWantRunning(false)
@@ -131,8 +142,14 @@ func (m *manager) Update(ctx context.Context, serverID string) (protocol.ServerS
 	if err != nil {
 		return protocol.ServerStatus{}, err
 	}
+	if err := s.checkIdle("update the game"); err != nil {
+		return protocol.ServerStatus{}, err
+	}
 	s.op.Lock()
 	defer s.op.Unlock()
+	if err := s.checkIdle("update the game"); err != nil {
+		return protocol.ServerStatus{}, err
+	}
 	if state := s.Status().State; isActive(state) {
 		return protocol.ServerStatus{}, remoteError(protocol.ErrorCodeConflict, "Server %s is %s. Stop it before updating the game.", serverID, state)
 	}
@@ -159,8 +176,14 @@ func (m *manager) Restart(ctx context.Context, serverID string) (protocol.Server
 	if err != nil {
 		return protocol.ServerStatus{}, err
 	}
+	if err := s.checkIdle("restart"); err != nil {
+		return protocol.ServerStatus{}, err
+	}
 	s.op.Lock()
 	defer s.op.Unlock()
+	if err := s.checkIdle("restart"); err != nil {
+		return protocol.ServerStatus{}, err
+	}
 	client, err := m.up(ctx, s)
 	if err != nil {
 		return protocol.ServerStatus{}, err
@@ -206,6 +229,10 @@ func (m *manager) Delete(ctx context.Context, serverID string, keepData bool) er
 	}
 	if s != nil {
 		image = s.request().Spec.Image
+		// A running backup is cancelled (its partial archive removed); a restore refuses the delete.
+		if err := m.cancelBackup(ctx, s); err != nil {
+			return err
+		}
 		s.op.Lock()
 		defer s.op.Unlock()
 		stopTimeout = s.stopTimeout()
@@ -215,6 +242,10 @@ func (m *manager) Delete(ctx context.Context, serverID string, keepData bool) er
 		m.mu.Lock()
 		delete(m.servers, serverID)
 		m.mu.Unlock()
+		// A backup that began between the check above and the lock (none can begin now that it is forgotten).
+		if err := m.cancelBackup(ctx, s); err != nil {
+			return err
+		}
 	}
 	// `docker stop` lets gss-init stop the game gracefully (SIGTERM → stop command → timeout → kill).
 	name := ContainerName(serverID)

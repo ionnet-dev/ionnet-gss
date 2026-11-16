@@ -21,14 +21,31 @@ export class DownloadTickets {
    * Store a grant and return its link. Sweeps expired tickets on the way.
    */
   public static issue(grant: Omit<DownloadTickets.Grant, "expiresAt">): DownloadTicketResponse {
-    throw new Error("Not implemented."); // TODO(builder): crypto.getRandomValues(32) → base64url, expiresAt = now + TTL_SEC, `/api/downloads/${ticket}`.
+    DownloadTickets._sweep();
+    const ticket = crypto.getRandomValues(new Uint8Array(32)).toBase64({ alphabet: "base64url", omitPadding: true });
+    const expiresAt = Date.now() + DownloadTickets.TTL_SEC * 1000;
+    DownloadTickets._tickets.set(ticket, { ...grant, expiresAt });
+    return { url: `/api/downloads/${ticket}`, expiresAt: new Date(expiresAt).toISOString() };
   }
 
   /**
    * Take a ticket out (single use). null when unknown or expired.
    */
   public static consume(ticket: string): DownloadTickets.Grant | null {
-    throw new Error("Not implemented."); // TODO(builder): delete + expiry check (constant-time compare is unnecessary: lookup by map key).
+    const grant = DownloadTickets._tickets.get(ticket);
+    if (!grant) return null;
+    DownloadTickets._tickets.delete(ticket);
+    return grant.expiresAt > Date.now() ? grant : null;
+  }
+
+  /**
+   * Drop expired tickets, so links nobody opened don't pile up.
+   */
+  private static _sweep(): void {
+    const now = Date.now();
+    for (const [ticket, grant] of DownloadTickets._tickets) {
+      if (grant.expiresAt <= now) DownloadTickets._tickets.delete(ticket);
+    }
   }
 }
 

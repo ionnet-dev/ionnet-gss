@@ -1,5 +1,6 @@
 import type { OkResponse } from "@shared/api/common.ts";
 import type { DownloadTicketResponse, FileContentResponse, FileEntryDto, FileListResponse } from "@shared/api/files.ts";
+import { useResource } from "@/hooks/useResource.ts";
 import { BaseApi } from "./BaseApi.ts";
 
 /**
@@ -9,6 +10,14 @@ import { BaseApi } from "./BaseApi.ts";
 export namespace FileApi {
   export function list(serverId: string, path: string): Promise<FileListResponse> {
     return BaseApi.GET(`/servers/${serverId}/files?path=${encodeURIComponent(path)}`);
+  }
+
+  /**
+   * The listing of one folder, loaded again when `path` changes. There are no live events: call `reload()` after a
+   * change.
+   */
+  export function useFiles(serverId: string, path: string) {
+    return useResource(() => list(serverId, path), [serverId, path]);
   }
 
   export function read(serverId: string, path: string): Promise<FileContentResponse> {
@@ -50,7 +59,14 @@ export namespace FileApi {
    * Hand a ticket URL to the browser's download manager (a temporary `<a download>` click; no page navigation).
    */
   export function startDownload(ticket: DownloadTicketResponse): void {
-    throw new Error("Not implemented."); // TODO(builder)
+    const link = document.createElement("a");
+    link.href = ticket.url;
+    link.download = ""; // The panel's Content-Disposition names the file.
+    link.rel = "noopener";
+    link.hidden = true;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   }
 }
 

@@ -279,6 +279,9 @@ func (s *Supervisor) statusLocked() protocol.InitStatus {
 		InstallProgress: s.progress,
 		Reason:          s.reason,
 	}
+	if s.spec != nil && s.spec.players != nil {
+		st.Players = s.spec.players.List()
+	}
 	if s.run != nil && s.run.game != nil && s.isLiveLocked() {
 		pid := int64(s.run.game.PID())
 		st.PID = &pid
@@ -741,6 +744,7 @@ func (s *Supervisor) runGame(r *gameRun) {
 	if r.stopTimer != nil {
 		r.stopTimer.Stop()
 	}
+	spec.players.Reset() // No leave events: the panel clears its list when the game stops.
 	exit := int64(code)
 	crashed := !r.stopRequested && code != 0
 	if crashed {
@@ -789,12 +793,26 @@ func (r *gameRun) stopReasonPtr() *string {
 	return ptr(r.stopReason)
 }
 
-// onGameOutput moves starting → running on the first line matching the ready pattern.
+// onGameOutput moves starting → running on the first line matching the ready pattern, and tracks players from the
+// `players` patterns while the game runs.
 func (s *Supervisor) onGameOutput(r *gameRun, line protocol.ConsoleLine) {
+	text := plainText(line.Text)
+	if r.spec.players.join != nil || r.spec.players.leave != nil {
+		s.mu.Lock()
+		if s.run == r {
+			if name, action, ok := r.spec.players.Match(text); ok {
+				event := protocol.PlayerEvent{ServerID: r.spec.ServerID, Player: name, Action: action, At: time.Now().UTC()}
+				if env, err := protocol.NewEvent(protocol.InitMsgPlayer, event); err == nil {
+					s.hub.publish(env)
+				}
+			}
+		}
+		s.mu.Unlock()
+	}
 	if r.ready.Load() || r.spec.ready == nil {
 		return
 	}
-	if !r.spec.ready.MatchString(plainText(line.Text)) {
+	if !r.spec.ready.MatchString(text) {
 		return
 	}
 	s.mu.Lock()

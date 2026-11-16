@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ionnet-dev/ionnet-gss/agent/internal/protocol"
+	"github.com/ionnet-dev/ionnet-gss/agent/internal/stacks"
 )
 
 // stateFile is the agent's runtime record (paths.Layout.StateFile). The spec of each server lives in its manifest;
@@ -213,6 +217,8 @@ func (m *manager) restoreOne(ctx context.Context, s *server, blocked string) {
 	if err := secureServerFolder(m.opts.Layout, s.id); err != nil {
 		slog.Warn("could not make the server folder private", "server", s.id, "error", err)
 	}
+	// Before the container starts: an interrupted restore swap is rolled back first.
+	interruptedBackup := m.recoverOperations(ctx, s)
 	m.migrateRestart(ctx, s)
 	if blocked != "" {
 		m.holdBack(ctx, s, blocked)
@@ -229,6 +235,9 @@ func (m *manager) restoreOne(ctx context.Context, s *server, blocked string) {
 	if _, err := s.waitConnected(ctx, restoreWait); err != nil {
 		slog.Warn("gss-init did not answer yet; the agent keeps trying in the background", "server", s.id, "error", err)
 		return
+	}
+	if interruptedBackup {
+		m.resumeAfterInterruptedBackup(s)
 	}
 
 	s.mu.Lock()
@@ -247,3 +256,127 @@ func (m *manager) restoreOne(ctx context.Context, s *server, blocked string) {
 		slog.Warn("autostart failed", "server", s.id, "error", err)
 	}
 }
+
+//#region Backup and restore recovery (M4)
+
+// recoverOperations cleans up after backups and restores an earlier agent didn't finish, and reports each as failed
+// (backup.finished is kept until the panel has it): a restore journal in phase "swapping" is rolled back (the old
+// folders return; "done" only needs the cleanup), leftover restore-<id> folders and `.partial` archives are removed,
+// paused service containers are unpaused (unpauseServices), and the data folder's upload temp files go. It reports whether a
+// backup was interrupted (its `after` commands are owed to a game that still runs).
+func (m *manager) recoverOperations(ctx context.Context, s *server) (interruptedBackup bool) {
+	layout := m.opts.Layout
+	serverDir := layout.ServerDir(s.id)
+	reported := map[int64]bool{}
+	report := func(operation protocol.BackupOperation, backupID int64, ok bool, message string) {
+		finished := protocol.BackupFinished{ServerID: s.id, BackupID: backupID, Operation: operation, Ok: ok, At: time.Now().UTC()}
+		if !ok {
+			finished.Error = &message
+		}
+		m.opts.Sink.BackupFinished(finished)
+	}
+
+	journalFile := layout.ServerRestoreJournal(s.id)
+	if raw, err := os.ReadFile(journalFile); err == nil {
+		var journal restoreJournal
+		if err := json.Unmarshal(raw, &journal); err != nil {
+			slog.Error("the restore journal is unreadable; leaving it and the restore folders for an operator", "server", s.id, "file", journalFile, "error", err)
+			return false
+		}
+		reported[journal.BackupID] = true
+		dir := layout.ServerRestoreDir(s.id, journal.BackupID)
+		if journal.Phase == journalDone {
+			slog.Info("finishing a restore whose swap was complete when the agent stopped", "server", s.id, "backup", journal.BackupID)
+			report(protocol.BackupOperationRestore, journal.BackupID, true, "")
+		} else {
+			if err := rollbackSwaps(serverDir, journal); err != nil {
+				slog.Error("could not roll an interrupted restore back; leaving the journal and restore folders for an operator", "server", s.id, "backup", journal.BackupID, "error", err)
+				report(protocol.BackupOperationRestore, journal.BackupID, false, fmt.Sprintf("The host's agent stopped during the restore and could not put the previous data back (%v). An operator has to fix %s by hand.", err, serverDir))
+				return false
+			}
+			slog.Warn("rolled an interrupted restore back to the previous data", "server", s.id, "backup", journal.BackupID)
+			report(protocol.BackupOperationRestore, journal.BackupID, false, "The host's agent stopped during the restore; the server's previous data was put back.")
+		}
+		removeJournal(layout, s.id, dir)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("could not read the restore journal", "server", s.id, "error", err)
+	}
+
+	if entries, err := os.ReadDir(serverDir); err == nil {
+		for _, entry := range entries {
+			raw, ok := strings.CutPrefix(entry.Name(), "restore-")
+			backupID, err := strconv.ParseInt(raw, 10, 64)
+			if !ok || !entry.IsDir() || err != nil {
+				continue
+			}
+			if !reported[backupID] {
+				reported[backupID] = true
+				report(protocol.BackupOperationRestore, backupID, false, "The host's agent stopped while it extracted the backup; the server's data was not changed.")
+			}
+			if err := os.RemoveAll(filepath.Join(serverDir, entry.Name())); err != nil {
+				slog.Warn("could not remove a leftover restore folder", "server", s.id, "dir", entry.Name(), "error", err)
+			}
+		}
+	}
+
+	if entries, err := os.ReadDir(layout.ServerBackups(s.id)); err == nil {
+		for _, entry := range entries {
+			raw, ok := strings.CutSuffix(entry.Name(), protocol.BackupExtension+".partial")
+			backupID, err := strconv.ParseInt(raw, 10, 64)
+			if !ok || err != nil {
+				continue
+			}
+			interruptedBackup = true
+			slog.Warn("removing the partial archive of a backup an earlier agent didn't finish", "server", s.id, "backup", backupID)
+			if err := os.Remove(filepath.Join(layout.ServerBackups(s.id), entry.Name())); err != nil {
+				slog.Warn("could not remove a partial archive", "server", s.id, "file", entry.Name(), "error", err)
+			}
+			report(protocol.BackupOperationCreate, backupID, false, "The host's agent restarted while the backup ran.")
+		}
+	}
+	m.unpauseServices(ctx, s)
+
+	if fsys, err := m.Files(s.id); err == nil {
+		if err := fsys.ClearUploads(); err != nil {
+			slog.Warn("could not remove leftover upload files", "server", s.id, "error", err)
+		}
+		fsys.Close()
+	}
+	return interruptedBackup
+}
+
+// unpauseServices thaws every paused service container of the server. Only a backup pauses them (for its walk of the
+// volume), so a paused one at startup is left over from an agent that died mid-backup or whose unpause failed; a
+// frozen database would hang the game, and `docker start` refuses a paused container.
+func (m *manager) unpauseServices(ctx context.Context, s *server) {
+	for _, name := range sortedServiceNames(s.services()) {
+		container := stacks.ContainerName(s.id, name)
+		info, exists, err := m.opts.Docker.ContainerInspect(ctx, container)
+		if err != nil {
+			slog.Warn("could not check a service container at startup", "server", s.id, "container", container, "error", err)
+			continue
+		}
+		if !exists || info.Status != "paused" {
+			continue
+		}
+		if err := m.opts.Docker.ContainerUnpause(ctx, container); err != nil {
+			slog.Error("could not unpause a service a backup left paused; run `docker unpause` on it", "server", s.id, "container", container, "error", err)
+			continue
+		}
+		slog.Warn("unpaused a service a backup had left paused", "server", s.id, "container", container)
+	}
+}
+
+// resumeAfterInterruptedBackup sends the `backup.after` commands an interrupted backup owed a game that is still
+// running (otherwise it would stay in save-off).
+func (m *manager) resumeAfterInterruptedBackup(s *server) {
+	req := s.request()
+	if req.Spec.Backup == nil || len(req.Spec.Backup.After) == 0 || s.Status().State != protocol.ServerStateRunning {
+		return
+	}
+	slog.Info("sending the backup's after commands an interrupted backup didn't send", "server", s.id)
+	m.console(s, "A backup was interrupted when the host's agent restarted; sending the game its after-backup commands.")
+	m.sendCommands(s, req.Spec.Backup.After)
+}
+
+//#endregion

@@ -250,6 +250,33 @@ export namespace DefinitionEngine {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
+  /**
+   * Whether an RE2 / JS pattern holds a capturing group: an unescaped `(` outside a character class that is not
+   * `(?:`, a lookaround or a flag group. Named groups (`(?P<n>`, `(?<n>`) count.
+   */
+  function hasCaptureGroup(pattern: string): boolean {
+    let inClass = false;
+    for (let i = 0; i < pattern.length; i++) {
+      const char = pattern[i];
+      if (char === "\\") {
+        i++;
+      }
+      else if (inClass) {
+        if (char === "]") inClass = false;
+      }
+      else if (char === "[") {
+        inClass = true;
+        if (pattern[i + 1] === "^") i++;
+        if (pattern[i + 1] === "]") i++; // A leading `]` is a literal.
+      }
+      else if (char === "(") {
+        if (pattern[i + 1] !== "?") return true;
+        if (pattern.startsWith("(?P<", i) || (pattern.startsWith("(?<", i) && pattern[i + 3] !== "=" && pattern[i + 3] !== "!")) return true;
+      }
+    }
+    return false;
+  }
+
   function isSafePath(path: string): boolean {
     return path !== "" && !path.startsWith("/") && !path.includes("\\") && !path.split("/").some((part) => part === ".." || part === "");
   }
@@ -481,6 +508,12 @@ export namespace DefinitionEngine {
       checkKeys(players, ["join", "leave"], "players");
       str(players.join, "players.join");
       str(players.leave, "players.leave");
+      for (const key of ["join", "leave"]) {
+        const pattern = players[key];
+        if (typeof pattern === "string" && !hasCaptureGroup(pattern)) {
+          fail(`players.${key}`, "needs a capture group around the player name, e.g. '(\\w+) joined the game'.");
+        }
+      }
     }
     if (raw.backup !== undefined) {
       if (!isRecord(raw.backup)) fail("backup", "must be a mapping.");

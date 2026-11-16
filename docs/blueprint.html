@@ -50,7 +50,7 @@ li { margin-bottom: 4px; }
 
 <div class="wrap">
 <header>
-  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 to 3 done, milestone 4 next</p>
+  <p class="kicker">Design blueprint · agreed 2026-11-15 · milestones 1 to 3 done, milestone 4 being built</p>
   <h1>Ionnet GSS</h1>
   <p class="lead">Ionnet Game Server Studio. A game server manager: one control panel, an agent on every Host Machine, and one Docker container or stack per Game Server. Each game is a folder of configuration in a git repo, so adding a game means pushing a folder.</p>
   <p>This page is the design we agreed in three rounds of questions, plus the defaults I filled in around them. Rows tagged <span class="tag you">you chose</span> are settled. Rows tagged <span class="tag mine">my default</span> were my proposals, which you accepted on 2026-11-15.</p>
@@ -320,7 +320,7 @@ services:
     <tr><td>Game crashes</td><td><code>crashed</code> with the exit code; auto-restart if enabled and under the limit.</td></tr>
     <tr><td>Source sync breaks a definition</td><td>Validation fails at sync, the previous version stays active, the error shows on the Sources page. Existing servers are pinned and unaffected.</td></tr>
     <tr><td>Host out of ports or RAM</td><td>Creation is refused with a message naming the limit.</td></tr>
-    <tr><td>Path escape in the file manager</td><td>The agent resolves every path beneath the data folder with <code>openat2(RESOLVE_BENEATH)</code>; symlinks pointing out are refused.</td></tr>
+    <tr><td>Path escape in the file manager</td><td>The agent opens the data folder as a Go <code>os.Root</code> and walks every path beneath it, which gives the same guarantee as <code>openat2(RESOLVE_BENEATH)</code> without an extra dependency. <code>..</code>, absolute paths and symlinks pointing out are refused; symlinks that stay inside the folder are followed.</td></tr>
   </table></div>
 </section>
 
@@ -383,7 +383,36 @@ services:
     <tr><td>M2 First server</td><td>Done</td><td>Base and Minecraft images, <code>gss-init</code>, agent Docker side, definition engine, game server API, servers pages with live console. Reviewed, 14 findings fixed, committed as <code>1ac1557</code>.</td></tr>
     <tr><td>Outbound block</td><td>Done</td><td>Private, host and link-local destinations are rejected by default; admin switch per server. Committed as <code>a6b884f</code>. Not separately reviewed yet.</td></tr>
     <tr><td>M3 Definitions</td><td>Done</td><td>Git sources with pinning and upgrade, <code>ini</code>/<code>json</code>/<code>yaml</code>/<code>cfg</code> formats, steamcmd, derived images for packages, stacks, dynamic dropdowns, Garry's Mod and Garry's Mod + MariaDB. Reviewed together with the outbound block; 15 findings fixed; committed as <code>1a1d15a</code>.</td></tr>
-    <tr><td>M4 Operations</td><td>Next</td><td>File manager, backups and restore, metrics and players.</td></tr>
+    <tr><td>M4 Operations</td><td>Building</td><td>Contracts and skeletons committed as <code>18fa86c</code> on 2026-11-16. Four parcels are being built in parallel: files and transfers, backups and restore, metrics and players, the Files and Backups tabs. Then integration with a real Minecraft world restore, review, fixes and commit.</td></tr>
+  </table></div>
+  <h3>M4 design, as agreed in the contracts</h3>
+  <p>These are my defaults, filled in while you were away. Nothing here is built and proven yet; say so if you want one changed.</p>
+  <div class="scroll"><table>
+    <tr><th>Topic</th><th>Decision</th><th>Why</th></tr>
+    <tr><td>File transfers</td><td>The panel pulls or pushes a file in 512 KiB chunks over the agent's existing socket, at most 4 chunks in flight, and streams it to or from the browser over plain HTTP.</td><td>The agent only dials out, so the panel must relay. The small window keeps panel memory flat however large the file is.</td></tr>
+    <tr><td>Downloads</td><td>The browser asks for a single-use ticket (60 s), then opens <code>/api/downloads/:ticket</code>. Always sent as an attachment.</td><td>A browser download cannot send the sign-in header, and this lets the browser's download manager stream the file. A user's file is never rendered on the panel's origin.</td></tr>
+    <tr><td>Uploads</td><td>Written to <code>.gss/uploads/</code> inside the data folder and renamed into place when complete. Size limit <code>UPLOAD_MAX_MB</code>; refused when the disk or the server's disk limit cannot fit it.</td><td>An aborted upload never leaves a half file where the game would read it.</td></tr>
+    <tr><td>Text editor</td><td>Files up to 2 MiB. A save is refused when the file changed since it was opened; the editor offers reload or overwrite.</td><td>The game may rewrite its own config while you edit.</td></tr>
+    <tr><td>Backup format</td><td><code>&lt;server&gt;/backups/&lt;id&gt;.tar.zst</code> on the host, with the data folder and, for stacks, each service's volume.</td><td>zstd is fast and pure Go. Backups stay next to the server; off-host storage is a later feature.</td></tr>
+    <tr><td>Backup of a running game</td><td>The definition's <code>before</code> commands, a 5 s settle, archive, then the <code>after</code> commands, which also run when the archive fails.</td><td>Minecraft must flush and pause saving, and must never be left with saving off.</td></tr>
+    <tr><td>Backup of a running database</td><td>The service container is paused while its volume is archived. If the pause fails, the backup fails.</td><td>A point-in-time copy the database recovers from like a power cut. The game's queries stall for that time.</td></tr>
+    <tr><td>Restore</td><td>Only while the game is stopped. The archive is extracted to a sibling folder, the swap is a journalled rename, and the game container is restarted so it sees the new folder. An interrupted swap is rolled back when the agent starts.</td><td>A failed restore must not leave a half-written world.</td></tr>
+    <tr><td>One operation per server</td><td>One backup or restore at a time. Start, restart, update and reinstall answer 409 meanwhile; stop is allowed during a backup.</td><td>Keeps lifecycle and data operations from racing.</td></tr>
+    <tr><td>Backup limit</td><td>A server's backups are counted against the owner's backup quota; at the limit you delete one first. No automatic rotation.</td><td>The full user-wide quota arrives in M5.</td></tr>
+    <tr><td>Metrics</td><td>CPU, memory, network and process count every 5 s, disk use every 60 s. The panel keeps the last hour in memory; nothing is stored in the database.</td><td>Enough for live charts. History across panel restarts can come with schedules.</td></tr>
+    <tr><td>Metrics for stacks</td><td>CPU and memory are summed over the containers, and so are the memory limits. Network is the game container's only.</td><td>Used versus limit stays meaningful, and game to database traffic is not counted twice.</td></tr>
+    <tr><td>Players</td><td><code>gss-init</code> matches the definition's join and leave patterns and keeps the list, which resets when the game exits. The panel shows count and names.</td><td>The list survives a panel or agent restart because it lives beside the game.</td></tr>
+    <tr><td>Access</td><td>Files and backups need the manage level, metrics the view level. Owners and admins have manage.</td><td>Ready for server sharing in M5 without changing routes.</td></tr>
+  </table></div>
+  <h3>M4 failure cases the build must prove</h3>
+  <div class="scroll"><table>
+    <tr><th>Case</th><th>Expected</th></tr>
+    <tr><td>Path escape</td><td>400, nothing opened.</td></tr>
+    <tr><td>Upload or download aborted</td><td>The agent closes the transfer and deletes the temp file.</td></tr>
+    <tr><td>Agent restarts during a backup</td><td>The partial archive is removed and the backup is marked failed.</td></tr>
+    <tr><td>Agent dies during a restore swap</td><td>The old folders are put back at startup; the restore is reported failed.</td></tr>
+    <tr><td>Disk full</td><td>Checked before starting (507); if it fills midway the partial files are removed and live data is untouched.</td></tr>
+    <tr><td>Restore while running, start during a restore</td><td>409 with a message saying what to do.</td></tr>
   </table></div>
   <h3>M1 proof, real output from this machine</h3>
   <pre><code>$ gss-agent enrol --panel http://localhost:3200 --token gss_enrol_… --config …/agent.json

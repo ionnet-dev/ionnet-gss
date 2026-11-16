@@ -110,7 +110,24 @@ export namespace BaseApi {
    * PUT a raw text body (`text/plain; charset=utf-8`), e.g. the file editor's save (M4).
    */
   export async function PUT_TEXT<T>(path: string, text: string): Promise<T> {
-    throw new Error("Not implemented."); // TODO(builder): like request(), body = text, content-type text/plain; charset=utf-8.
+    const sentToken = getToken();
+    const res = await fetch(`/api${path}`, {
+      method: "PUT",
+      headers: { ...getHeaders(), "content-type": "text/plain; charset=utf-8" },
+      body: text,
+    });
+    const raw = await res.text();
+    let data: unknown = null;
+    try {
+      data = raw ? JSON.parse(raw) : null;
+    } catch {
+      data = null;
+    }
+    if (!res.ok) {
+      if (res.status === 401 && sentToken !== null && getToken() === sentToken) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+      throw new ApiError(res.status, (data as { message?: string } | null)?.message || res.statusText);
+    }
+    return data as T;
   }
 
   /**
@@ -120,7 +137,44 @@ export namespace BaseApi {
    * @param signal Aborts the upload (the panel then discards the partial file).
    */
   export function UPLOAD<T>(path: string, file: Blob, onProgress?: (sent: number, total: number) => void, signal?: AbortSignal): Promise<T> {
-    return Promise.reject(new Error("Not implemented.")); // TODO(builder)
+    return new Promise<T>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new DOMException("The upload was cancelled.", "AbortError"));
+        return;
+      }
+      const sentToken = getToken();
+      const xhr = new XMLHttpRequest();
+      const onAbort = () => xhr.abort();
+      xhr.open("PUT", `/api${path}`);
+      for (const [name, value] of Object.entries(getHeaders())) xhr.setRequestHeader(name, value);
+      xhr.setRequestHeader("content-type", "application/octet-stream");
+      if (onProgress) xhr.upload.onprogress = (event) => onProgress(event.loaded, event.lengthComputable ? event.total : file.size);
+      xhr.onload = () => {
+        signal?.removeEventListener("abort", onAbort);
+        let data: unknown = null;
+        try {
+          data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+        } catch {
+          data = null;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(data as T);
+          return;
+        }
+        if (xhr.status === 401 && sentToken !== null && getToken() === sentToken) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+        reject(new ApiError(xhr.status, (data as { message?: string } | null)?.message || xhr.statusText));
+      };
+      xhr.onerror = () => {
+        signal?.removeEventListener("abort", onAbort);
+        reject(new ApiError(0, "The upload failed: the connection to the panel was lost."));
+      };
+      xhr.onabort = () => {
+        signal?.removeEventListener("abort", onAbort);
+        reject(new DOMException("The upload was cancelled.", "AbortError"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      xhr.send(file);
+    });
   }
 }
 

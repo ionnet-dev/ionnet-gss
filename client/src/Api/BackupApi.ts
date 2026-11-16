@@ -2,6 +2,8 @@ import type { BackupDto, BackupListResponse, CreateBackupBody, RestoreBackupResp
 import type { OkResponse } from "@shared/api/common.ts";
 import type { DownloadTicketResponse } from "@shared/api/files.ts";
 import type { LiveEvents } from "@shared/live.ts";
+import { useEffect, useState } from "react";
+import { liveSocket } from "@/live/LiveSocket.ts";
 import { useResource } from "@/hooks/useResource.ts";
 import { BaseApi } from "./BaseApi.ts";
 
@@ -43,7 +45,23 @@ export namespace BackupApi {
    * The newest `backup.progress` of the server (topic `server:<id>`), or null; cleared when the list refetches.
    */
   export function useProgress(serverId: string): LiveEvents["backup.progress"] | null {
-    return null; // TODO(builder): liveSocket.subscribeTopic + on("backup.progress")
+    const [progress, setProgress] = useState<LiveEvents["backup.progress"] | null>(null);
+    useEffect(() => {
+      setProgress(null);
+      const offTopic = liveSocket.subscribeTopic(`server:${serverId}`);
+      const offProgress = liveSocket.on("backup.progress", (data) => {
+        if (data.serverId === serverId) setProgress(data);
+      });
+      const offUpdated = liveSocket.on("backup.updated", (data) => {
+        if (data.serverId === serverId) setProgress(null);
+      });
+      return () => {
+        offTopic();
+        offProgress();
+        offUpdated();
+      };
+    }, [serverId]);
+    return progress;
   }
 }
 

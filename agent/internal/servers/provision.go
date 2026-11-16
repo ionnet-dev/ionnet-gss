@@ -98,6 +98,10 @@ func (m *manager) Provision(ctx context.Context, req protocol.ProvisionRequest) 
 	}
 	m.mu.Unlock()
 
+	// A restore holds s.op for its whole run: answer now instead of queueing behind it.
+	if op := s.currentOperation(); op != nil && op.Operation == protocol.BackupOperationRestore {
+		return protocol.ServerStatus{}, s.checkIdle("change its settings or reinstall")
+	}
 	s.op.Lock()
 	defer s.op.Unlock()
 	if m.get(id) != s {
@@ -115,6 +119,12 @@ func (m *manager) Provision(ctx context.Context, req protocol.ProvisionRequest) 
 		return protocol.ServerStatus{}, err
 	}
 	recreate := !exists || info.Labels[LabelSpec] != req.SpecHash
+	if changed || recreate || req.Reinstall {
+		// A backup reads the folders this would rewrite; a retried provision that changes nothing may pass.
+		if err := s.checkIdle("change its settings or reinstall"); err != nil {
+			return protocol.ServerStatus{}, err
+		}
+	}
 	if (changed || recreate || req.Reinstall) && exists && info.Running && isActive(current.State) {
 		return protocol.ServerStatus{}, remoteError(protocol.ErrorCodeConflict, "Server %s is %s. Stop it before changing its settings or reinstalling.", id, current.State)
 	}

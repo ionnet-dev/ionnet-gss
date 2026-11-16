@@ -162,15 +162,42 @@ func (m *manager) diskLoop() {
 	}
 }
 
-// checkDisk measures one running server and stops it when it is over its disk limit.
+// measureDisk walks the server's folders and stores the result as its last measurement.
+func (m *manager) measureDisk(s *server) int64 {
+	used := m.usedBytes(s, false)
+	s.mu.Lock()
+	s.diskBytes = used
+	s.diskMeasuredAt = time.Now()
+	s.mu.Unlock()
+	return used
+}
+
+// lastDisk is the last stored measurement and when it was taken (zero time = never).
+func (s *server) lastDisk() (int64, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.diskBytes, s.diskMeasuredAt
+}
+
+// cachedUsed is the stored measurement while it is younger than two disk checks, else a fresh walk (a stopped server
+// isn't checked, so its first caller measures). A running server's figure is kept fresh by diskLoop.
+func (m *manager) cachedUsed(s *server) int64 {
+	if bytes, at := s.lastDisk(); !at.IsZero() && time.Since(at) < 2*diskInterval {
+		return bytes
+	}
+	return m.measureDisk(s)
+}
+
+// checkDisk measures one running server, keeps the figure for the stats loop and the file manager, and stops the
+// server when it is over its disk limit.
 func (m *manager) checkDisk(s *server) {
 	limitMB := s.request().Spec.Limits.DiskMB
 	state := s.Status().State
-	if limitMB <= 0 || (state != protocol.ServerStateRunning && state != protocol.ServerStateStarting) {
+	if state != protocol.ServerStateRunning && state != protocol.ServerStateStarting {
 		return
 	}
-	used := m.usedBytes(s, false)
-	if used <= limitMB<<20 {
+	used := m.measureDisk(s)
+	if limitMB <= 0 || used <= limitMB<<20 {
 		return
 	}
 	// Another operation (stop, restart, delete) owns the server right now; measure again next round.

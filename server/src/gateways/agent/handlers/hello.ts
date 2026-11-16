@@ -71,11 +71,13 @@ function parseServers(value: unknown): ServerStatus[] {
 }
 
 /**
- * `ServerStatus.players` (M4): at most PLAYERS_MAX strings, each cut to PLAYER_NAME_MAX_CHARS.
+ * `ServerStatus.players` (M4): anything but a list is refused; names that aren't non-empty strings are dropped, each
+ * is cut to PLAYER_NAME_MAX_CHARS and the list to PLAYERS_MAX (a misbehaving game server must not keep its host
+ * from connecting).
  */
 function parsePlayers(value: unknown, bad: (what: string) => AgentRequestError): string[] {
-  if (!Array.isArray(value) || value.length > PLAYERS_MAX) throw bad(`players must be a list of at most ${PLAYERS_MAX} names.`);
-  return value.filter((name): name is string => typeof name === "string" && name !== "").map((name) => name.slice(0, PLAYER_NAME_MAX_CHARS));
+  if (!Array.isArray(value)) throw bad("players must be a list of names.");
+  return value.filter((name): name is string => typeof name === "string" && name !== "").slice(0, PLAYERS_MAX).map((name) => name.slice(0, PLAYER_NAME_MAX_CHARS));
 }
 
 /**

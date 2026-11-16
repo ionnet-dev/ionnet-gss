@@ -50,6 +50,8 @@ import { LiveGateway } from "../gateways/live/LiveGateway.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { RateLimiter } from "../lib/RateLimiter.ts";
 import { Definition, GameServer, Host, HostGrant, PortAllocation, Quota, sequelize, User } from "../models/index.ts";
+import { BackupService } from "./BackupService.ts";
+import { MetricsService } from "./MetricsService.ts";
 
 type Value = DefinitionEngine.Value;
 type Limits = ServerSpec["limits"];
@@ -569,6 +571,9 @@ export namespace GameServerService {
     return await withLock(serverId, async () => {
       const server = await getAccessible(user, serverId);
       if (server.state !== "deleting" && !AgentGateway.isOnline(server.hostId)) throw offlineError(server.host!);
+      if (server.state !== "deleting" && BackupService.operationOf(server.id)?.operation === "restore") {
+        throw new HttpError(409, "A restore of this server is running. Wait until it finishes, then delete the server.");
+      }
       await markDeleting(server, keepData);
       return await finishDelete(server.id, server.hostId, keepData, lifecycleTimeoutMs(server), true);
     });
@@ -618,6 +623,7 @@ export namespace GameServerService {
     _progress.delete(serverId);
     _hostOf.delete(serverId);
     _agentSpecHash.delete(serverId);
+    MetricsService.forget(serverId);
     pushUpdated(row.ownerId, serverId);
     return true;
   }

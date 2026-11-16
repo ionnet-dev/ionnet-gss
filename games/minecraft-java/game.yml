@@ -78,8 +78,10 @@ stop: { command: stop, timeout: 60 }
 
 console: { input: stdin }
 players:
-  join: '(\w+) joined the game'
-  leave: '(\w+) left the game'
+  # Anchored at the line start (only the log prefix may come before the name) and at the line end, so chat and
+  # /say lines can't fake a join. Matches vanilla "[12:00:00] [Server thread/INFO]: ", Paper "[12:00:00 INFO]: " and recent Paper, which logs "System chat: Steve joined the game".
+  join: '^(?:\[[^\]]*\] )*\[[^\]]*INFO\]: (?:System chat: )?(\w+) joined the game\s*$'
+  leave: '^(?:\[[^\]]*\] )*\[[^\]]*INFO\]: (?:System chat: )?(\w+) left the game\s*$'
 
 backup:
   before: [save-off, save-all flush]

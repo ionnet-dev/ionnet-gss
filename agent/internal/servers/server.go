@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -40,7 +41,11 @@ type server struct {
 	svcSize       int64
 	svcMeasuredAt time.Time
 	svcMeasuring  bool
-	dialErr       error // why the last connection attempt failed
+	// The disk check's last measurement of data/ + services/ (disk.go); the stats loop and the file manager read it
+	// instead of walking the folder themselves.
+	diskBytes      int64
+	diskMeasuredAt time.Time
+	dialErr        error // why the last connection attempt failed
 	// svc is the last known state of the stack's services (services.go); never nil.
 	svc              []protocol.ServiceStatus
 	servicesStopping bool // a stopServicesLater goroutine is waiting
@@ -156,6 +161,9 @@ func (s *server) applyChange(change protocol.StateChange) {
 	s.status.ExitCode = change.ExitCode
 	s.status.Reason = change.Reason
 	s.status.InstallProgress = change.InstallProgress
+	if change.State != protocol.ServerStateStarting && change.State != protocol.ServerStateRunning {
+		s.players = nil // The panel clears its list on the same state change, so no leave events are sent.
+	}
 	switch change.State {
 	case protocol.ServerStateRunning:
 		s.wantRunning = true
@@ -404,6 +412,9 @@ func (s *server) attach(client supervisor.Client) error {
 	s.downNoticed = false
 	s.dialWarned = false
 	s.reviveDelay = 0
+	reported := cutPlayers(st.Players) // Only gss-init enforces the limits otherwise.
+	joined, left := diffPlayers(s.players, reported)
+	s.players = append([]string(nil), reported...)
 	if st.State == protocol.ServerStateRunning {
 		s.wantRunning = true
 	}
@@ -425,6 +436,14 @@ func (s *server) attach(client supervisor.Client) error {
 			Reason:          st.Reason,
 			InstallProgress: st.InstallProgress,
 		})
+	}
+	// Whoever joined or left while the agent wasn't listening reaches the panel as ordinary events.
+	now := time.Now().UTC()
+	for _, name := range left {
+		s.m.opts.Sink.Player(protocol.PlayerEvent{ServerID: s.id, Player: name, Action: protocol.PlayerActionLeave, At: now})
+	}
+	for _, name := range joined {
+		s.m.opts.Sink.Player(protocol.PlayerEvent{ServerID: s.id, Player: name, Action: protocol.PlayerActionJoin, At: now})
 	}
 	slog.Info("attached to gss-init", "server", s.id, "state", st.State, "lastSeq", st.LastSeq, "caughtUp", caughtUp)
 	return nil
@@ -547,10 +566,74 @@ func (s *server) pump(client supervisor.Client) {
 			case event.Player != nil:
 				player := *event.Player
 				player.ServerID = s.id
-				s.m.opts.Sink.Player(player)
+				player.Player = cutName(player.Player)
+				if s.applyPlayer(player) {
+					s.m.opts.Sink.Player(player)
+				}
 			}
 		}
 	}
+}
+
+// applyPlayer records a join or leave in the server's list and reports whether it changed it (a repeated join or
+// the leave of someone not listed is dropped).
+func (s *server) applyPlayer(event protocol.PlayerEvent) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := slices.Index(s.players, event.Player)
+	switch event.Action {
+	case protocol.PlayerActionJoin:
+		if index >= 0 {
+			return false
+		}
+		if len(s.players) >= protocol.PlayersMax {
+			return false
+		}
+		s.players = append(s.players, event.Player)
+	case protocol.PlayerActionLeave:
+		if index < 0 {
+			return false
+		}
+		s.players = slices.Delete(s.players, index, index+1)
+	default:
+		return false
+	}
+	return true
+}
+
+// cutName cuts a player name to PLAYER_NAME_MAX_CHARS characters.
+func cutName(name string) string {
+	if runes := []rune(name); len(runes) > protocol.PlayerNameMaxChars {
+		return string(runes[:protocol.PlayerNameMaxChars])
+	}
+	return name
+}
+
+// cutPlayers is a list of at most PLAYERS_MAX names of at most PLAYER_NAME_MAX_CHARS characters, without empty names.
+func cutPlayers(names []string) []string {
+	out := make([]string, 0, min(len(names), protocol.PlayersMax))
+	for _, name := range names {
+		if name == "" || len(out) >= protocol.PlayersMax {
+			continue
+		}
+		out = append(out, cutName(name))
+	}
+	return out
+}
+
+// diffPlayers returns who is in next but not in current (joined) and the reverse (left).
+func diffPlayers(current, next []string) (joined, left []string) {
+	for _, name := range next {
+		if !slices.Contains(current, name) {
+			joined = append(joined, name)
+		}
+	}
+	for _, name := range current {
+		if !slices.Contains(next, name) {
+			left = append(left, name)
+		}
+	}
+	return joined, left
 }
 
 // errNotRunning is answered when gss-init is unreachable because the container is stopped.

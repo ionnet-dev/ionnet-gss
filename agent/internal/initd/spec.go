@@ -26,6 +26,7 @@ const (
 type compiledSpec struct {
 	protocol.InitSpec
 	ready       *regexp.Regexp // nil = running as soon as the process starts
+	players     *players       // never nil; no patterns = never matches
 	stopTimeout time.Duration
 }
 
@@ -54,6 +55,11 @@ func compileSpec(spec protocol.InitSpec) (*compiledSpec, error) {
 		}
 		c.ready = re
 	}
+	tracker, err := newPlayers(spec.Players)
+	if err != nil {
+		return nil, err
+	}
+	c.players = tracker
 	if spec.Stop.Signal != "" {
 		if _, ok := parseSignal(spec.Stop.Signal); !ok {
 			return nil, fmt.Errorf("stop signal %q is not a known signal (e.g. SIGTERM, SIGINT)", spec.Stop.Signal)

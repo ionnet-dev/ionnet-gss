@@ -728,6 +728,26 @@ Client: ServerDetail tabs Overview (`MetricsPanel` + `PlayerList`, default), Con
 - `ServerAccess.Level`: sharing UI (M5) only adds rows to `server_shares`.
 - `ServerStats` per-service breakdown: add a `services` list to the schema; the summed fields stay.
 
+### Open hardening (not in M4)
+
+From the M4 review; none of these loses data or crosses tenants.
+
+- Transfer slots: TRANSFER_MAX_OPEN is per host (16) and TRANSFERS_PER_USER is 4, so four users can hold every slot on
+  a host, and a slow reader never goes idle. Add a per-server cap on the agent. `DownloadTickets.issue` has no
+  per-user limit (entries expire after 60 s).
+- `files.List` reads and sorts a whole folder before cutting to the listing limit; a folder with a million entries
+  costs agent memory. Read in batches.
+- Timeouts: the agent allows file operations 120 s, the panel waits 30 s, so a huge list/delete can answer 504 while it
+  still finishes on the host.
+- `CommitUpload` and rename without overwrite check then rename; a file created in between is replaced. Needs
+  `renameat2(RENAME_NOREPLACE)`. An upload over a symlink replaces the link, `WriteText` writes its target: pick one.
+- `servers/files.go`: the restore check and `OpenRoot` aren't atomic; a request in that window works on the old folder.
+- Client: a failed ticket download shows as a failed browser download instead of the panel's message; the Files tab
+  lists the internal `.gss` folder.
+- Stack backups need the agent to read service volumes (root agent); untested end to end with `garrys-mod-mysql`.
+- Minecraft player patterns accept the server's own `System chat:` prefix, so a plugin broadcast reading
+  "X joined the game" counts as a join. Chat and `say` can't.
+
 ## M4 work split
 
 Main-session-only files (as before, plus; all M4 contracts are already in them): `protocol/schema/*` + generated,

@@ -1,0 +1,22 @@
+.metrics-panel {
+  &__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+    gap: var(--io-space-24) var(--io-space-16);
+  }
+
+  &__disk {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-8);
+    min-inline-size: 0;
+  }
+
+  &__disk-title {
+    font-weight: 600;
+  }
+
+  &__disk-note {
+    font-size: var(--io-text-sm);
+  }
+}

@@ -1,0 +1,207 @@
+.file-manager {
+  position: relative;
+
+  &[data-dragging] {
+    outline: 2px dashed var(--io-color-accent);
+    outline-offset: -2px;
+  }
+
+  &__input {
+    display: none;
+  }
+
+  &__crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--io-space-4);
+    font-size: var(--io-text-sm);
+  }
+
+  &__crumb {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--io-space-4) var(--io-space-8);
+    border: 0;
+    border-radius: var(--io-radius-sm);
+    background: transparent;
+    color: var(--io-color-text-muted);
+    font: inherit;
+    cursor: pointer;
+
+    &:hover {
+      background: var(--io-color-surface-soft);
+      color: var(--io-color-text);
+    }
+
+    &[aria-current="page"] {
+      color: var(--io-color-text);
+      font-weight: 600;
+    }
+  }
+
+  &__sep {
+    color: var(--io-color-text-subtle);
+  }
+
+  &__selection {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--io-space-8);
+    padding: var(--io-space-8) var(--io-space-12);
+    border-radius: var(--io-radius-sm);
+    background: var(--io-color-surface-soft);
+    font-size: var(--io-text-sm);
+
+    > span {
+      margin-inline-end: auto;
+    }
+  }
+
+  &__check {
+    inline-size: 2.5rem;
+  }
+
+  &__actions {
+    inline-size: 3rem;
+    text-align: end;
+  }
+
+  &__name {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--io-space-8);
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--io-color-text);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+
+    &[data-type="dir"] {
+      font-weight: 600;
+    }
+
+    &:hover:not(:disabled) {
+      color: var(--io-color-accent);
+    }
+
+    &:disabled {
+      color: var(--io-color-text-muted);
+      cursor: default;
+    }
+  }
+
+  &__target {
+    display: block;
+    margin-inline-start: calc(1rem + var(--io-space-8));
+    font-family: var(--io-font-mono);
+    font-size: var(--io-text-sm);
+    color: var(--io-color-text-muted);
+    overflow-wrap: anywhere;
+  }
+
+  &__loading {
+    display: flex;
+    align-items: center;
+    gap: var(--io-space-8);
+    color: var(--io-color-text-muted);
+  }
+
+  &__names {
+    margin: 0;
+    padding-inline-start: var(--io-space-16);
+    font-family: var(--io-font-mono);
+    font-size: var(--io-text-sm);
+    overflow-wrap: anywhere;
+  }
+
+  &__uploads {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-8);
+  }
+
+  &__upload {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-4);
+    padding: var(--io-space-8) var(--io-space-12);
+    border: 1px solid var(--io-color-line);
+    border-radius: var(--io-radius-sm);
+    font-size: var(--io-text-sm);
+
+    &[data-state="failed"] {
+      border-color: var(--io-color-bad);
+    }
+  }
+
+  &__upload-head {
+    display: flex;
+    align-items: center;
+    gap: var(--io-space-12);
+  }
+
+  &__upload-name {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+
+  &__upload-error {
+    color: var(--io-color-bad);
+  }
+
+  &__drop {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: inherit;
+    background: color-mix(in srgb, var(--io-color-surface) 80%, transparent);
+    font-weight: 600;
+    pointer-events: none;
+  }
+}
+
+.file-editor {
+  &__state {
+    display: flex;
+    align-items: center;
+    gap: var(--io-space-8);
+    color: var(--io-color-text-muted);
+
+    &[data-error] {
+      color: var(--io-color-bad);
+    }
+  }
+
+  &__conflict {
+    display: flex;
+    flex-direction: column;
+    gap: var(--io-space-8);
+    padding: var(--io-space-12);
+    border: 1px solid var(--io-color-warn);
+    border-radius: var(--io-radius-sm);
+    font-size: var(--io-text-sm);
+  }
+
+  &__conflict-actions {
+    display: flex;
+    gap: var(--io-space-8);
+  }
+
+  &__text {
+    inline-size: 100%;
+    min-block-size: 40vh;
+    white-space: pre;
+    overflow: auto;
+    tab-size: 4;
+  }
+}
