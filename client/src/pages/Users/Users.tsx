@@ -3,7 +3,7 @@ import {
   AlertDialog, Avatar, Badge, Button, Card, CardBody, Checkbox, Dialog, EmptyState, Input, List, ListItem, Menu, Spinner,
   Stack, Switch,
 } from "@ionnet/iontronic/react";
-import { Ellipsis, Gauge, KeyRound, Pencil, ShieldOff, Trash2, UserPlus, Users as UsersIcon } from "@ionnet/iontronic/icons";
+import { Ellipsis, Gauge, KeyRound, Mail, Pencil, ShieldOff, Trash2, UserPlus, Users as UsersIcon } from "@ionnet/iontronic/icons";
 import { LIMITS, passwordProblem } from "@shared/constants.ts";
 import { ROLES } from "@shared/permissions.ts";
 import type { RoleDto, UserDto } from "@shared/api/users.ts";
@@ -27,7 +27,9 @@ type Dialogs =
 
 /**
  * `/users` (USERS_MANAGE): accounts, roles, passwords, quotas and two-factor resets. The panel refuses to remove or
- * demote the last admin; its message shows as a toast. Non-admins don't get the quota action for themselves or for
+ * demote the last admin; its message shows as a toast. With mail on: an account can be created without a password (it
+ * gets a welcome link), badges show unconfirmed addresses and accounts without a password, and "Send password link"
+ * emails a welcome or reset link. Non-admins don't get the quota action for themselves or for
  * administrators (the panel answers 403).
  */
 export default function Users(props: Props) {
@@ -38,6 +40,7 @@ export default function Users(props: Props) {
   const [dialog, setDialog] = useState<Dialogs | null>(null);
   const close = () => setDialog(null);
   const actorIsAdmin = auth.user?.roles.includes(ROLES.ADMIN) ?? false;
+  const mailEnabled = auth.isMailEnabled();
   const mayEditQuota = (user: UserDto) => actorIsAdmin || (user.id !== auth.user?.id && !user.roles.includes(ROLES.ADMIN));
 
   const resetTotp = async (user: UserDto) => {
@@ -48,6 +51,15 @@ export default function Users(props: Props) {
       else await users.reload();
     } catch (error) {
       notify.error(error, `Couldn't reset two-factor sign-in for ${user.username}`);
+    }
+  };
+
+  const sendPasswordLink = async (user: UserDto) => {
+    try {
+      const sent = await UserApi.sendPasswordLink(user.id);
+      notify.ok(sent.kind === "welcome" ? "Welcome link sent" : "Password reset link sent", `Sent to ${sent.email}.`);
+    } catch (error) {
+      notify.error(error, `Couldn't send a link to ${user.username}`);
     }
   };
 
@@ -86,6 +98,9 @@ export default function Users(props: Props) {
                       {user.roles.map((role) => <Badge key={role} size="sm" tone={role === ROLES.ADMIN ? "accent" : "neutral"}>{role}</Badge>)}
                       {user.disabled && <Badge size="sm" tone="bad">Disabled</Badge>}
                       {user.totpEnabled && <Badge size="sm" tone="ok">2FA</Badge>}
+                      {user.emailTwoFactor && <Badge size="sm" tone="ok">Email 2FA</Badge>}
+                      {user.email && mailEnabled && user.emailVerifiedAt === null && <Badge size="sm" tone="warn">Unconfirmed</Badge>}
+                      {!user.hasPassword && <Badge size="sm" tone="warn">No password yet</Badge>}
                       {user.id === auth.user?.id && <Badge size="sm" tone="info">You</Badge>}
                     </>
                   }
@@ -97,6 +112,7 @@ export default function Users(props: Props) {
                       <Menu.Content align="end">
                         <Menu.Item icon={Pencil} onClick={() => setDialog({ kind: "edit", user })}>Edit</Menu.Item>
                         <Menu.Item icon={KeyRound} onClick={() => setDialog({ kind: "password", user })}>Reset password</Menu.Item>
+                        {user.email && mailEnabled && <Menu.Item icon={Mail} onClick={() => sendPasswordLink(user)}>Send password link</Menu.Item>}
                         {mayEditQuota(user) && <Menu.Item icon={Gauge} onClick={() => setDialog({ kind: "quota", user })}>Quota</Menu.Item>}
                         {user.totpEnabled && <Menu.Item icon={ShieldOff} onClick={() => setDialog({ kind: "totp", user })}>Reset two-factor</Menu.Item>}
                         <Menu.Separator />
@@ -111,8 +127,8 @@ export default function Users(props: Props) {
         </CardBody>
       </Card>
 
-      {dialog?.kind === "create" && <CreateUserDialog roles={roles.data ?? []} onClose={close} onDone={users.reload} />}
-      {dialog?.kind === "edit" && <EditUserDialog user={dialog.user} roles={roles.data ?? []} onClose={close} onDone={users.reload} />}
+      {dialog?.kind === "create" && <CreateUserDialog roles={roles.data ?? []} mailEnabled={mailEnabled} onClose={close} onDone={users.reload} />}
+      {dialog?.kind === "edit" && <EditUserDialog user={dialog.user} roles={roles.data ?? []} mailEnabled={mailEnabled} onClose={close} onDone={users.reload} />}
       {dialog?.kind === "password" && <PasswordDialog user={dialog.user} onClose={close} />}
       {dialog?.kind === "quota" && <QuotaDialog user={dialog.user} open onOpenChange={(open) => !open && close()} />}
 
@@ -165,22 +181,27 @@ function RolePicker(props: { roles: RoleDto[]; value: string[]; onChange: (value
   );
 }
 
-function CreateUserDialog(props: { roles: RoleDto[]; onClose: () => void; onDone: () => Promise<void> }) {
-  const { roles, onClose, onDone } = props;
+function CreateUserDialog(props: { roles: RoleDto[]; mailEnabled: boolean; onClose: () => void; onDone: () => Promise<void> }) {
+  const { roles, mailEnabled, onClose, onDone } = props;
   const notify = useNotify();
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [sendWelcome, setSendWelcome] = useState(true);
   const [selected, setSelected] = useState<string[]>([ROLES.USER]);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // With a welcome link, the user can choose their own password.
+  const canWelcome = mailEnabled && email.trim() !== "";
+  const passwordOptional = canWelcome && sendWelcome;
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const found: Record<string, string> = {};
     if (!LIMITS.USERNAME_PATTERN.test(username)) found.username = "Use 3 to 32 letters, numbers, dots, dashes or underscores.";
-    const passwordError = passwordProblem(password);
+    const passwordError = password || !passwordOptional ? passwordProblem(password) : null;
     if (passwordError) found.password = passwordError;
     if (selected.length === 0) found.roles = "Pick at least one role.";
     setErrors(found);
@@ -189,8 +210,14 @@ function CreateUserDialog(props: { roles: RoleDto[]; onClose: () => void; onDone
 
     setBusy(true);
     try {
-      await UserApi.create({ username, password, email: email.trim() || null, roles: selected });
-      notify.ok(`Added ${username}`);
+      await UserApi.create({
+        username,
+        password: password || undefined,
+        email: email.trim() || null,
+        roles: selected,
+        ...(canWelcome ? { sendWelcomeEmail: sendWelcome } : {}),
+      });
+      notify.ok(`Added ${username}`, canWelcome && sendWelcome ? `We emailed a welcome link to ${email.trim()}.` : undefined);
       await onDone();
       onClose();
     } catch (error) {
@@ -201,13 +228,35 @@ function CreateUserDialog(props: { roles: RoleDto[]; onClose: () => void; onDone
 
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
-      <Dialog.Content title="Add user" description="Share the password with them. They can change it under Account.">
+      <Dialog.Content
+        title="Add user"
+        description={passwordOptional
+          ? "We'll email them a link to set their own password."
+          : "Share the password with them. They can change it under Account."}
+      >
         <form onSubmit={submit} noValidate>
           <Dialog.Body>
             <Stack gap="16">
               <Input label="Username" required autoFocus autoComplete="off" value={username} onChange={(event) => setUsername(event.target.value)} error={errors.username} />
-              <Input label="Email" type="email" description="Optional." autoComplete="off" value={email} onChange={(event) => setEmail(event.target.value)} />
-              <Input label="Password" type="password" required autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} error={errors.password} />
+              <Input
+                label="Email"
+                type="email"
+                description={mailEnabled ? "Optional. With an address we can email them a link to set their password." : "Optional."}
+                autoComplete="off"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+              {canWelcome && <Checkbox label="Send welcome email" description="A link to set their password and confirm the address." checked={sendWelcome} onCheckedChange={setSendWelcome} />}
+              <Input
+                label="Password"
+                type="password"
+                required={!passwordOptional}
+                description={passwordOptional ? "Optional. Leave it blank to let them choose it from the link." : undefined}
+                autoComplete="new-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                error={errors.password}
+              />
               <RolePicker roles={roles} value={selected} onChange={setSelected} error={errors.roles} />
               <FormError>{formError}</FormError>
             </Stack>
@@ -222,8 +271,8 @@ function CreateUserDialog(props: { roles: RoleDto[]; onClose: () => void; onDone
   );
 }
 
-function EditUserDialog(props: { user: UserDto; roles: RoleDto[]; onClose: () => void; onDone: () => Promise<void> }) {
-  const { user, roles, onClose, onDone } = props;
+function EditUserDialog(props: { user: UserDto; roles: RoleDto[]; mailEnabled: boolean; onClose: () => void; onDone: () => Promise<void> }) {
+  const { user, roles, mailEnabled, onClose, onDone } = props;
   const auth = useAuth();
   const notify = useNotify();
   const [displayName, setDisplayName] = useState(user.displayName ?? "");
@@ -262,7 +311,13 @@ function EditUserDialog(props: { user: UserDto; roles: RoleDto[]; onClose: () =>
           <Dialog.Body>
             <Stack gap="16">
               <Input label="Display name" description="Optional." value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-              <Input label="Email" type="email" description="Optional." value={email} onChange={(event) => setEmail(event.target.value)} />
+              <Input
+                label="Email"
+                type="email"
+                description={mailEnabled ? "Optional. A new address must be confirmed again, and email codes turn off." : "Optional."}
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
               <RolePicker roles={roles} value={selected} onChange={setSelected} error={error ?? undefined} />
               <Switch label="Disabled" description="A disabled user is signed out and can't sign in." checked={disabled} onCheckedChange={setDisabled} />
             </Stack>

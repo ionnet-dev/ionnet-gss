@@ -6,9 +6,9 @@ per game container. The design is in `docs/blueprint.html`; this file is the cod
 ## Tree
 
 ```
-deno.json              imports (@shared/, hono, sequelize, mysql2, umzug, bcryptjs, @std/yaml) + tasks; fmt disabled
+deno.json              imports (@shared/, hono, sequelize, mysql2, umzug, bcryptjs, @std/yaml, M7: nodemailer) + tasks; fmt disabled
 docker-compose.yml     panel + mariadb (healthcheck, named volumes)
-docker-compose.dev.yml MariaDB only, 127.0.0.1:3308
+docker-compose.dev.yml MariaDB 127.0.0.1:3308; M7: Mailpit (SMTP 127.0.0.1:1025, inbox http://localhost:8025)
 Dockerfile             node stage builds client/, deno stage runs server/ and serves client/dist
 .env.example           every variable, grouped under ##### banners (defaults = dev)
 protocol/
@@ -20,7 +20,7 @@ shared/                types + consts used by server and client (no runtime deps
   permissions.ts       PERMISSIONS (UPPER_SNAKE keys), ROLES, DEFAULT_USER_PERMISSIONS
   live.ts              /ws/live: LiveEvents map, client/server frames, topics
   api/*.ts             REST DTOs: common, meta, auth, users (+roles, quota), invites, hosts (+enrol tokens, grants),
-                       servers, definitions, sources; M4: files, backups, metrics
+                       servers, definitions, sources; M4: files, backups, metrics; M7: settings
   protocol/protocol.gen.ts  GENERATED, never edit
   index.ts             barrel (for deno check)
 server/src/
@@ -34,11 +34,13 @@ server/src/
                        + 20261117000000-server-deleting.ts (state `deleting`, delete_keep_data)
                        + 20261118000000-server-private-network.ts (allow_private_network)
                        + 20261119000000-m3-sources.ts + 20261120000000-m5-tenancy.ts (totp_last_step, recovery_codes)
+                       + 20261121000000-agent-updates.ts + 20261122000000-m7-email.ts (settings, email_tokens, users)
   models/              one class per file (declare attributes, initModel(), finders, serializers) + columns.ts
-                       + index.ts (instance, init, every association); M5: RecoveryCode
+                       + index.ts (instance, init, every association); M5: RecoveryCode; M7: Setting, EmailToken
   controllers/         one namespace per resource exporting `router`; ApiController mounts them (M4: File, Backup,
                        Metrics below /servers/:id, Download at /downloads; M5: Quota at /quota, Totp at /auth/totp +
-                       /users/:id/totp, Share below /servers/:id, Agent at /agent)
+                       /users/:id/totp, Share below /servers/:id, Agent at /agent; M7: Email at
+                       /auth/email + /auth/email-2fa, Settings at /settings)
   gateways/agent/      AgentGateway (static: by host id), AgentConnection (envelope, phases), handlers/ (by type)
   gateways/live/       LiveGateway (static: push(event, data, audience))
   definitions/         DefinitionEngine (pure: parse, resolve extends, variables, limits, image, render, buildSpec),
@@ -47,13 +49,14 @@ server/src/
                        options_from lists, https allowlist + cache)
   jobs/                sourceSync.ts (M3: interval sync of git sources)
   hosts/               M6: AgentUpdater (agent build per host, manual + automatic update, status in memory)
+  mail/                M7: Mailer (the SMTP relay from the `mail` setting; only nodemailer importer), templates (pure)
   servers/             GameServerService: every server operation (access, quota, ports, provision, lifecycle,
                        console, agent state → rows + live events, reconcile after hello); M4: ServerAccess (share-aware
                        levels), agentCall (agent codes → HTTP), FileService, BackupService, MetricsService + MetricRing;
                        M5: ShareService
   transfers/           M4: TransferRelay (browser HTTP ⇄ agent chunks, windowed), DownloadTickets (single-use links)
   lib/                 HttpError, http (AppEnv, readBody, paramInt/Uuid, clientIp), RateLimiter, tokens, portPool, totp (M5),
-                       agentBuilds (M6: the builds in AGENT_DIST_DIR)
+                       agentBuilds (M6: the builds in AGENT_DIST_DIR), secretBox (M7: AES-GCM for secrets in settings)
 client/                npm + Vite (Iontronic is a github: dep Deno can't install)
   vite.config.ts       :5200, HMR direct, aliases @/ @shared/, inline theme boot
   src/main.tsx         providers + auth bootstrap + <Router>
@@ -61,7 +64,7 @@ client/                npm + Vite (Iontronic is a github: dep Deno can't install
   src/router/          Router.tsx (Router, Link, navigate, useLocation)
   src/Api/             BaseApi.ts (token+user in localStorage, GET/POST/…, M4: PUT_TEXT, UPLOAD with progress) +
                        AuthApi, UserApi, InviteApi, HostApi, ServerApi, DefinitionApi (M2), SourceApi (M3),
-                       FileApi, BackupApi, MetricsApi (M4), QuotaApi, ShareApi (M5)
+                       FileApi, BackupApi, MetricsApi (M4), QuotaApi, ShareApi (M5), SettingsApi (M7)
   src/controllers/     Controller (notify), AuthController (session, permissions)
   src/hooks/           useController, useAuth, useResource (load + reload + live-event refetch)
   src/live/            LiveSocket (the /ws/live client, on(event))
@@ -70,7 +73,8 @@ client/                npm + Vite (Iontronic is a github: dep Deno can't install
                        HostGrants, TwoFactorCard, TotpSetupDialog, QrCode,
                        M6: AgentBuild (badge), AgentUpdate (host page card)
   src/pages/<Name>/    Login, Setup, Register, Hosts, HostDetail, Users, Invites, Account, NotFound;
-                       M2: Servers (also `/`), ServerCreate, ServerDetail; component Console; M3: Sources
+                       M2: Servers (also `/`), ServerCreate, ServerDetail; component Console; M3: Sources;
+                       M7: Settings, ForgotPassword, ResetPassword, ConfirmEmail
 agent/                 Go module github.com/ionnet-dev/ionnet-gss/agent
   cmd/gss-agent        enrol | run | version | help
   cmd/gss-init         PID 1 in game containers (M2)
@@ -1076,3 +1080,205 @@ Hosts show which agent build they run and can update it from the panel. Contract
 - **Client.** `AgentBuild` (badge: Up to date / Update available / Unknown, also on the host list for outdated
   hosts) and `AgentUpdate` (card on the host page for HOSTS_MANAGE: builds, progress line, Update button, automatic
   switch, install hint for unknown builds). Both refetch on `host.updated`.
+
+## M7: email
+
+An admin configures an SMTP relay in the panel (`/settings`). With mail on: password links (forgot password, admin
+"send password link", a welcome "set your password" link for accounts an admin creates with an address), address
+confirmation (with an optional "require a confirmed address to sign in"), email two-factor, and security notices.
+The explainer is the artifact "GSS Email Relay". **No protocol change.**
+
+### Contracts
+
+- **Shapes:** `shared/api/settings.ts` (new), `shared/api/auth.ts` (`LoginResponse.step`, `TwoFactorChallenge.methods/
+  emailHint/emailSent`, `EmailConfirmationRequired`, `TotpLoginBody.method`, `TotpDisableBody.method`, password link,
+  email address and email two-factor regions, `TotpStatusResponse.email*`), `shared/api/users.ts`
+  (`UserDto.emailVerifiedAt/pendingEmail/emailTwoFactor/hasPassword`, optional `CreateUserBody.password` +
+  `sendWelcomeEmail`, `PasswordLinkSentResponse`), `shared/api/meta.ts` (`mailEnabled`, `requireConfirmedEmail`),
+  `LIMITS.EMAIL_*`/`PASSWORD_*_TTL_*` in `shared/constants.ts`, live `settings.updated`.
+- **Migration** `20261122000000-m7-email.ts`: `settings` (key PK, JSON text), `email_tokens` (user FK cascade,
+  `purpose`, `token_hash` CHAR(64), `email`, `attempts`, `expires_at`, `used_at`; indexes `token_hash`,
+  `(user_id, purpose)`), users `email_verified_at`, `pending_email`, `email_two_factor`, `has_password` (default true).
+- **Settings** (`models/Setting.ts`): `Setting.get(key)` / `set(key, value)` with an in-memory cache loaded on first
+  use; defaults when no row (`mail`: disabled, port 587, `starttls`, `verifyCertificate` true, everything else
+  empty/false). The SMTP password is stored only as `passwordBox` from `lib/secretBox.ts`: AES-256-GCM, key =
+  HKDF-SHA-256(`JWT_SECRET`, info `"gss-settings-v1"`), output `v1.<iv b64url>.<ciphertext b64url>`; `open()` returns
+  null when it can't decrypt (→ `passwordUnreadable`). WebCrypto only.
+- **Mailer** (`mail/Mailer.ts`, static): the only importer of `nodemailer` (pinned `10.3.1` in `deno.json`).
+  `isEnabled()` (sync, from the settings cache), `send(to, message)` (throws `HttpError` 502 with the server's answer;
+  `connectionTimeout`/`greetingTimeout` 10 s, `socketTimeout` 20 s), `sendInBackground(to, message)` (logs failures,
+  never throws), `test(to, draft?)`, `reload()` after a settings change (rebuilds the transport). `security` maps to
+  nodemailer as `tls` → `secure: true`; `starttls` → `secure: false, requireTLS: true`; `none` → `secure: false,
+  ignoreTLS: true`; `verifyCertificate` false → `tls.rejectUnauthorized: false`. `From:` = `"<fromName ?? APP_NAME>"
+  <fromAddress>`.
+- **Templates** (`mail/templates.ts`, pure): `MailTemplates.<kind>(data) → { subject, text, html }` for `confirm`,
+  `reset`, `welcome` (says whether a password was already given), `loginCode`, `actionCode`, `passwordChanged`,
+  `emailChangeRequested` (to the old address), `twoFactorOff`, `test`. Every user-supplied value is HTML-escaped; a
+  small inline-styled layout, no images, no remote content. Links are `PUBLIC_URL` + `/reset-password?token=…`,
+  `/confirm-email?token=…` (helper in `lib/panelUrl.ts` if needed).
+- **Email tokens** (`models/EmailToken.ts`). Link tokens: 32 random bytes base64url (`randomToken("")`), codes: 6
+  digits from `crypto.getRandomValues` without modulo bias; both stored as `sha256Hex`. `issueLink(userId, purpose,
+  email, ttlMs, t?)` and `issueCode(userId, purpose, email)` first delete that user's unused tokens of the same purpose
+  (one live link/code per purpose; `reset` and `welcome` replace each other). `findLink(token, purposes)` (preview,
+  doesn't use it). `consumeLink(token, purposes)`: conditional `UPDATE … SET used_at WHERE token_hash AND purpose IN
+  AND used_at IS NULL AND expires_at > now`, then loads the row; 0 rows → null. `consumeCode(userId, purpose, code)`:
+  the newest unused unexpired row; conditional `attempts = attempts + 1 WHERE attempts < EMAIL_CODE_MAX_ATTEMPTS`
+  first (0 rows → null), then constant-time compare (`digestEquals`), then conditional `used_at`. `revoke(userId,
+  purposes, t?)`. Expired and used rows older than a day are deleted on a 1-hour interval started from `index.ts`
+  (`EmailToken.startSweep()`).
+- **Cooldown:** one email per user and kind per `LIMITS.EMAIL_RESEND_SECONDS` (in memory, key `<userId>:<kind>`).
+  User-facing sends answer 429 "Wait a minute before asking for another email." + `Retry-After`; forgot password and
+  notices skip silently.
+- **User** (`models/User.ts`, `//#region Email (M7)`): `isEmailConfirmed()` (email set and `emailVerifiedAt`),
+  `secondFactorMethods()` (`totp` if `totpEnabled`, `email` if `emailTwoFactor`), `hasSecondFactor()`,
+  `maskedEmail(address)` (`a•••@example.com`: first character, `•••`, domain). `findByChallenge(token, purpose)` now
+  takes the purpose (`totp` second step: any second factor on; `confirm`: 30 min, for the login gate).
+  `consumeSecondFactor(code, method?)`: 6 digits + method `email` → `EmailToken.consumeCode(id, "login" | "action",
+  …)` (callers pass which), 6 digits otherwise → TOTP, anything else → recovery code; recovery codes are accepted
+  whenever any second factor is on. `clearTotp()` deletes recovery codes only when email two-factor is off too.
+  `registerUser` gets `password?: string | null` (null → random unusable hash and `hasPassword` false) and resets
+  nothing else. Every place that sets a password sets `hasPassword` true.
+- **Login order** (`AuthController`, one helper `beginSession(user, ip)` used by login, register and reset):
+  password → **gate**: mail on + `requireConfirmedEmail` + not admin + not `isEmailConfirmed()` → no address: 403 "Your
+  account needs a confirmed email address. Ask an administrator to add one."; else `EmailConfirmationRequired` →
+  **second factor**: methods non-empty → `TwoFactorChallenge` (email the only method: send a `login` code now and set
+  `emailSent`; a failed send logs and answers `emailSent: false`) → session. Every `LoginSuccess` gets `step: "done"`.
+  `/login/totp` counts every attempt in `hitSecondFactor` as before, with method `email` checking a `login` code.
+  `/login/email-code` and `/login/confirm-email/resend` take the challenge (purpose `totp` / `confirm`) and count in
+  `loginPerIp`.
+- **Password links:** `/password/forgot` (`publicPerIp`; 409 "Password reset by email isn't set up on this panel.
+  Ask an administrator." while mail is off) finds the user by username, else by `email` (lowercased), skips disabled
+  users and users without an address, then `sendInBackground` a `reset` link (`PASSWORD_RESET_TTL_MINUTES`); always
+  `OkResponse`. `/password/reset/:token` (`publicPerIp`) previews `reset`/`welcome`. `/password/reset`
+  (`publicPerIp`): validates the password first, consumes the link, sets the password + `hasPassword`, bumps
+  `tokenVersion`, revokes the user's other `reset`/`welcome` tokens, marks the address confirmed when the link's
+  `email` equals `user.email`, closes live sockets (`UNAUTHORIZED`), notices `passwordChanged` (not for `welcome`),
+  audit `user.password_reset { kind }`, then `beginSession`. Disabled user → 400 like an unusable link.
+- **Welcome:** `POST /api/users` with an address, mail on and `sendWelcomeEmail !== false` → `welcome` link
+  (`PASSWORD_SETUP_TTL_HOURS`) sent with `send` after the user is created (a failed send keeps the user and answers
+  201; the client then offers "Send password link" — log it and audit `user.welcome_failed`). Without a password:
+  400 unless an address is given, mail is on and the welcome email isn't turned off. `POST /api/users/:id/password-link`
+  (`assertMayManage`, 409 no address / mail off) → `welcome` when `!hasPassword`, else `reset`; audit
+  `user.password_link_sent`.
+- **Address:** `POST /auth/email` (password checked first, 401). Same address → no change. Mail on: `pendingEmail` =
+  new (409 when another account has it as `email`), `confirm` link to it, `emailChangeRequested` notice to the old
+  address. Mail off: `email` = new, `emailVerifiedAt` null. `null` removes (`email`, `pendingEmail`,
+  `emailVerifiedAt` cleared; 409 rules in `ChangeEmailBody`). `/email/resend` sends a `confirm` link to `pendingEmail
+  ?? email` (409 when nothing is unconfirmed). `/email/cancel` clears `pendingEmail` and revokes `confirm` tokens.
+  `/email/confirm` (public, `publicPerIp`): link `email` = `pendingEmail` → swap (`email` = pending, verified now,
+  pending null; unique clash → 409 and keep pending); = `email` → verified now; otherwise 400 "This link is for an
+  address that's no longer on the account." Registration and setup with an address send a `confirm` link when mail
+  is on (background). Admin PATCH of `email`: `emailVerifiedAt` null, `pendingEmail` null, `emailTwoFactor` false
+  (audit change `emailTwoFactor`), revoke `confirm`/`login`/`action` tokens, `confirm` link to the new address.
+  Live `user.updated` after every change; audit `user.email_change_requested`, `user.email_confirmed`,
+  `user.email_removed`.
+- **Email two-factor:** `enable` (password, 401; 409 "Confirm your email address first." / "The panel doesn't send
+  email." / already on) → `emailTwoFactor` true; when no recovery codes are left unused and TOTP is off, issue new
+  ones and return them. `disable` → proof like TOTP disable (`TotpController.assertSecondProof` moved to a shared
+  helper, with `method`; `email` codes here are purpose `action`) → off, recovery codes removed when TOTP is off too,
+  notice `twoFactorOff`. `/email-2fa/code` (signed in, `emailTwoFactor` on) sends an `action` code. TOTP disable and
+  recovery codes accept `method: "email"` too. Admin "Reset two-factor" (`/users/:id/totp/reset`) clears both
+  methods. Audit `user.email_2fa_enabled`, `user.email_2fa_disabled`; login audit `{ method: "email" }`.
+- **Notices** (all `sendInBackground`, only with mail on and an address, never block the request): password changed
+  (own change, reset, admin set), address change requested (old address), two-factor turned off (either method,
+  admin reset).
+- **Settings routes** (admin): `GET /mail` → DTO. `PUT /mail` validates (host 1-255 chars without spaces, port 1-65535,
+  `security` enum, `fromAddress` via `User.normalizeEmail`, `fromName` ≤ 64, username ≤ 255, password ≤ 255;
+  `enabled` true needs host + fromAddress; `requireConfirmedEmail` true needs `enabled`), saves, `Mailer.reload()`,
+  audit `settings.mail_changed { changes }` (field names only), live `settings.updated` to `{ all: true }`. `POST
+  /mail/test`: rate-limited per user (10 per window), `await Mailer.test` → `OkResponse` or 502; audit
+  `settings.mail_tested { to, ok }`.
+- **Meta:** `mailEnabled` = `Mailer.isEnabled()`, `requireConfirmedEmail` = enabled && setting.
+- **Client.** Pages: `Settings` (mail card: enable switch, host/port/security/login/password (placeholder "Stored —
+  leave blank to keep" when `hasPassword`, a "Remove" action), sender, verify certificate, "Require a confirmed email
+  address to sign in" with a hint that existing users without one will be asked to confirm at their next sign-in;
+  "Send test email" with the form's current values to the admin's own address by default; Save), `ForgotPassword`,
+  `ResetPassword` (preview first; "Set your password" for `welcome`, "Choose a new password" for `reset`; after
+  success adopt the session or continue into the two-factor step), `ConfirmEmail` (a button, never on page load:
+  mail scanners open links). Login: "Forgot password?" when `mailEnabled`; second step by `methods` (TOTP field, "Email
+  me a code instead" / "Send again" with a `EMAIL_RESEND_SECONDS` countdown, recovery code link; email only: "We sent
+  a code to a•••@example.com"; `emailSent: false` → error line + "Send again" + recovery code); `confirm_email` step
+  ("Confirm your email address" + "Send the link again"). Register: email required when `requireConfirmedEmail`;
+  handles `confirm_email`. Account: `EmailCard` (address + Confirmed/Unconfirmed badge, pending change with
+  resend/cancel, change dialog with password), `TwoFactorCard` gains the email method (switch on with password, codes
+  shown once when returned; disable/recovery dialogs let you pick authenticator code / email code ("Send code") /
+  recovery code). Users: create dialog with optional password when an address is given and mail is on, "Send welcome
+  email" checkbox (default on); list shows Unconfirmed / No password yet badges; row action "Send password link".
+  `useAuth`/meta refetch on `settings.updated`.
+
+### API routes (M7)
+
+| Method | Path | Auth | Body | Response |
+| --- | --- | --- | --- | --- |
+| GET·PUT | /api/settings/mail | admin | `UpdateMailSettingsBody` | `MailSettingsDto`; 400 |
+| POST | /api/settings/mail/test | admin, RL | `TestMailBody` | `OkResponse`; 502 SMTP error |
+| POST | /api/auth/login/email-code | challenge, RL | `ChallengeBody` | `EmailCodeSentResponse`; 401, 429 |
+| POST | /api/auth/login/confirm-email/resend | challenge, RL | `ChallengeBody` | `OkResponse`; 401, 429 |
+| POST | /api/auth/password/forgot | -, RL | `ForgotPasswordBody` | `OkResponse`; 409 mail off |
+| GET | /api/auth/password/reset/:token | -, RL | | `PasswordLinkPreviewResponse` |
+| POST | /api/auth/password/reset | -, RL | `ResetPasswordBody` | `LoginResponse`; 400 |
+| POST | /api/auth/email | S | `ChangeEmailBody` | `UserDto`; 401, 409 |
+| POST | /api/auth/email/resend | S | | `OkResponse`; 409, 429 |
+| POST | /api/auth/email/cancel | S | | `UserDto` |
+| POST | /api/auth/email/confirm | -, RL | `ConfirmEmailBody` | `ConfirmEmailResponse`; 400, 409 |
+| POST | /api/auth/email-2fa/enable | S | `EmailTwoFactorEnableBody` | `EmailTwoFactorEnableResponse`; 401, 409 |
+| POST | /api/auth/email-2fa/disable | S | `EmailTwoFactorDisableBody` | `UserDto`; 401 |
+| POST | /api/auth/email-2fa/code | S | | `EmailCodeSentResponse`; 409, 429 |
+| POST | /api/users/:id/password-link | P:USERS_MANAGE | | `PasswordLinkSentResponse`; 403, 409 |
+
+Changed: `/auth/login`, `/auth/login/totp`, `/auth/register`, `/auth/setup`, `/auth/password` answer `step`;
+`/auth/register` and `/auth/password/reset` answer `LoginResponse`; `POST /api/users` password optional.
+
+### Boundaries added in M7
+
+| From | May import | Never |
+| --- | --- | --- |
+| `mail/Mailer.ts` | `nodemailer`, `Setting`, `lib/secretBox`, `Config`, `@shared` | controllers, `User` |
+| `mail/templates.ts` | `@shared/constants`, `Config.PUBLIC_URL` | anything with I/O (pure) |
+| controllers | `Mailer`, `MailTemplates`, `EmailToken`, `Setting` (via `models/index.ts`) | `nodemailer` |
+| `lib/secretBox.ts` | WebCrypto, `Config.JWT_SECRET` | models |
+
+### M7 work split
+
+Main session (done): every shared contract, the migration, `models/index.ts`, the column declarations in `User.ts`,
+skeletons of `Setting.ts`, `EmailToken.ts`, `SettingsController.ts`, `EmailController.ts` and the four pages,
+`ApiController.ts`, `deno.json` (nodemailer), `client/src/Api/{AuthApi,UserApi,SettingsApi}.ts`, `routes.tsx` (`admin`
+requirement), `AppLayout.tsx` (Settings nav), `docker-compose.dev.yml` (Mailpit: SMTP 127.0.0.1:1025, inbox
+http://localhost:8025, API `/api/v1/messages`, `/api/v1/message/<ID>`).
+
+| Parcel | Route | Owns | Verify on its own |
+| --- | --- | --- | --- |
+| **A1: mail + settings** | `builder-opus` (crypto at rest, SMTP failure modes) | `lib/secretBox.ts`, `mail/{Mailer,templates}.ts` (signatures fixed in the skeletons), `models/Setting.ts`, `controllers/{Settings,Meta}Controller.ts` | `deno task check` (server part). Private panel `PORT=3321 DB_NAME=gss_m7a`, relay = Mailpit: GET defaults; PUT validation (each field 400); enabling without host 400; password → DB row holds a `v1.` box only, GET says `hasPassword`; test to Mailpit ok (read it back from the API, check From/subject/HTML), test with draft port 1 → 502 with message; changed `JWT_SECRET` → `passwordUnreadable`; non-admin 403; meta flags follow. Templates rendered once each into Mailpit (scratch script, deleted after) |
+| **A2: auth flows** | `builder-opus` (auth, single-use tokens, enumeration) | `models/EmailToken.ts`, `models/User.ts` (logic, `//#region Email (M7)`), `models/Invite.ts` (`redeem` email rule), `controllers/{Auth,Email,Totp,User}Controller.ts`, `server/src/index.ts` (sweep start only) | Codes against the `Mailer`/`MailTemplates` signatures; until A1 lands, a local stub in a scratch copy is fine but the committed files stay A1's. `deno task check`. Private panel `PORT=3322 DB_NAME=gss_m7b` (after A1, or with mail settings written straight into `settings` as JSON with `passwordBox` null), relay = Mailpit: forgot for unknown/known user → same answer, one email; reset link twice → 400; welcome create without password → link → set → login; email change → pending + notice to old + confirm swaps; gate on → non-admin gets `confirm_email`, admin doesn't; email 2FA login: code, wrong ×5 → code dead, replay → 401, resend within 60 s → 429; mail off with email-only 2FA → `emailSent` false, recovery code works; admin email PATCH turns email 2FA off |
+| **B: client** | `builder` | `pages/{Settings,ForgotPassword,ResetPassword,ConfirmEmail,Login,Register,Account,Users}/**`, `components/{EmailCard,TwoFactorCard,EmailTwoFactorDialog,...}/**` (new ones as needed), `controllers/AuthController.ts`, `hooks/useAuth.ts` if needed | `cd client && npm run typecheck && npm run build`; Playwright against Vite with mocked `/api/*` (all shapes from `shared/`): every new page and step, light + dark screenshots of Settings, Login (email step), Account cards |
+
+A1, A2 and B share only the contracts above (A2 calls A1 only through the `Mailer`/`MailTemplates` signatures). Integration (main): both against the dev panel + Mailpit, end to end in a
+headless browser, then `reviewer`.
+
+### Review fixes (M7)
+
+From the integrated review; all in the contract above now:
+
+- **Password links follow the address.** `/password/reset` refuses a link whose `email` isn't the account's current
+  `email` (400, same message as an unusable link). Every address change (admin PATCH, own change with mail off,
+  removal, the pending swap in `/email/confirm`) revokes `reset`, `welcome`, `login` and `action` tokens; every
+  password set (`/auth/password`, `/users/:id/password`, reset) revokes `reset` and `welcome`. `consumeCode` also
+  requires `row.email === user.email`.
+- **Adding or moving a factor needs the factor already on.** `SecondFactorProof` (password + code + method) is
+  required, when `hasSecondFactor()`, by `POST /auth/email` (change or remove your address), `/email-2fa/enable`
+  (when TOTP is on) and `/totp/setup` (when email two-factor is on; `TotpSetupBody`). TOTP confirm keeps the existing
+  recovery codes (`recoveryCodes: null`) when email two-factor was on. A "two-factor turned on" notice
+  (`MailTemplates.twoFactorOn`) goes out when either method is turned on.
+- **After a password link, the inbox isn't enough.** The `totp` challenge issued by `/password/reset` carries
+  `viaLink: true`; with TOTP on, its `methods` is `["totp"]` only and `/login/totp` refuses `method: "email"` for it
+  (recovery codes still work). Email-only users keep `["email"]` (documented: email two-factor protects against a
+  leaked password, not a lost inbox).
+- **Forgot password can't cancel other links.** A forgot request skips (silently) when the user has a live `reset`
+  link issued under 15 minutes ago, never replaces a live `welcome` link, and sends a `welcome` link instead of a
+  `reset` link when `!hasPassword`.
+- **The stored SMTP password only goes to the server it was saved for.** When `host`, `port`, `security` or
+  `username` in a test draft or a PUT differs from the stored value and no `password` is given, a test sends without
+  the stored password and a PUT is refused (400 "password: enter the SMTP password again: the server settings
+  changed."). The client says so next to the password field.
+- **Smaller:** background sends release their cooldown when the relay fails (`Mailer.send` inside the background
+  task); `assertPassword` counts before checking (like `hitSecondFactor`) and resets on success.

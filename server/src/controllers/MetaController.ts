@@ -4,6 +4,7 @@ import { PROTOCOL_VERSION } from "@shared/protocol/protocol.gen.ts";
 import { AppSystem } from "../AppSystem.ts";
 import { Config } from "../Config.ts";
 import type { AppEnv } from "../lib/http.ts";
+import { Mailer } from "../mail/Mailer.ts";
 import { isDatabaseUp } from "../models/index.ts";
 
 /**
@@ -29,6 +30,8 @@ export namespace MetaController {
       version: AppSystem.version,
       publicUrl: Config.PUBLIC_URL,
       protocolVersion: PROTOCOL_VERSION,
+      mailEnabled: Mailer.isEnabled(),
+      requireConfirmedEmail: Mailer.requiresConfirmedEmail(),
     });
   });
 }

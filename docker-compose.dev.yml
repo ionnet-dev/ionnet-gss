@@ -20,5 +20,15 @@ services:
       timeout: 3s
       retries: 30
 
+  # M7: catches every email the dev panel sends. Relay: host 127.0.0.1, port 1025, security "none", no login.
+  # Inbox: http://localhost:8025 (API: /api/v1/messages).
+  mailpit:
+    image: axllent/mailpit:v1.27
+    container_name: gss-mailpit-dev
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+
 volumes:
   gss-mariadb-dev:

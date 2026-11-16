@@ -78,6 +78,12 @@ export interface LiveEvents {
   // USERS_MANAGE + the user themself.
   "quota.updated": { userId: number };
   //#endregion
+
+  //#region M7
+  // Panel settings saved (`key`: "mail"). Audience: everyone signed in (the client refetches `/api/meta`; admins on
+  // the settings page refetch the settings). Carries no values.
+  "settings.updated": { key: "mail" };
+  //#endregion
 }
 
 export type LiveEventName = keyof LiveEvents;

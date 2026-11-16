@@ -5,6 +5,7 @@ import { AgentController } from "./AgentController.ts";
 import { AuthController } from "./AuthController.ts";
 import { BackupController } from "./BackupController.ts";
 import { DownloadController } from "./DownloadController.ts";
+import { EmailController } from "./EmailController.ts";
 import { FileController } from "./FileController.ts";
 import { MetricsController } from "./MetricsController.ts";
 import { QuotaController } from "./QuotaController.ts";
@@ -18,6 +19,7 @@ import { HostController } from "./HostController.ts";
 import { InviteController } from "./InviteController.ts";
 import { MetaController } from "./MetaController.ts";
 import { RoleController } from "./RoleController.ts";
+import { SettingsController } from "./SettingsController.ts";
 import { UserController } from "./UserController.ts";
 
 /**
@@ -29,6 +31,8 @@ export namespace ApiController {
   router.route("/", MetaController.router); // /health, /meta
   router.route("/auth", AuthController.router);
   router.route("/auth/totp", TotpController.router); // M5
+  router.route("/auth/email", EmailController.router); // M7: own address
+  router.route("/auth/email-2fa", EmailController.twoFactorRouter); // M7
   router.route("/users", UserController.router);
   router.route("/users/:id/totp", TotpController.adminRouter); // M5
   router.route("/quota", QuotaController.router); // M5: own quota
@@ -45,6 +49,7 @@ export namespace ApiController {
   router.route("/definitions", DefinitionController.router);
   router.route("/sources", SourceController.router);
   router.route("/agent", AgentController.router); // M5: public install script and agent downloads
+  router.route("/settings", SettingsController.router); // M7: admin only
 
   router.all("*", (c) => {
     throw HttpError.notFound(`No API route for ${c.req.method} ${c.req.path}.`);

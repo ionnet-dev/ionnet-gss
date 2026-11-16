@@ -25,6 +25,13 @@ export const LIMITS = {
   SHARES_PER_SERVER: 20, // M5: users one server can be shared with.
   RECOVERY_CODES: 10, // M5: recovery codes issued per TOTP setup or regeneration.
   RECOVERY_CODE_PATTERN: /^[a-z2-7]{5}-?[a-z2-7]{5}$/, // M5: after lowercasing and removing spaces.
+  // M7: email
+  EMAIL_CONFIRM_TTL_HOURS: 24, // Confirmation links.
+  PASSWORD_RESET_TTL_MINUTES: 60, // Forgot-password and admin-sent reset links.
+  PASSWORD_SETUP_TTL_HOURS: 72, // Welcome ("set your password") links.
+  EMAIL_CODE_TTL_MINUTES: 10, // Sign-in and action codes sent by email.
+  EMAIL_CODE_MAX_ATTEMPTS: 5, // Wrong tries before an emailed code stops working.
+  EMAIL_RESEND_SECONDS: 60, // Least time between two emails of one kind to one user.
 } as const;
 
 /**

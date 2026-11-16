@@ -21,6 +21,8 @@ import { ServerShare } from "./ServerShare.ts";
 import { Schedule } from "./Schedule.ts";
 import { AuditLog } from "./AuditLog.ts";
 import { RecoveryCode } from "./RecoveryCode.ts";
+import { Setting } from "./Setting.ts";
+import { EmailToken } from "./EmailToken.ts";
 
 /**
  * The one Sequelize instance. MariaDB through the mysql dialect; columns are snake_case (`underscored`).
@@ -37,7 +39,7 @@ export const sequelize = new Sequelize(Config.DB_NAME, Config.DB_USER, Config.DB
 });
 
 //#region Init
-for (const model of [User, Role, Quota, Invite, Host, HostGrant, EnrolToken, Source, Definition, GameServer, PortAllocation, Backup, ServerShare, Schedule, AuditLog, RecoveryCode]) {
+for (const model of [User, Role, Quota, Invite, Host, HostGrant, EnrolToken, Source, Definition, GameServer, PortAllocation, Backup, ServerShare, Schedule, AuditLog, RecoveryCode, Setting, EmailToken]) {
   model.initModel(sequelize);
 }
 //#endregion
@@ -51,6 +53,8 @@ User.hasOne(Quota, { as: "quota", foreignKey: "userId", onDelete: "CASCADE" });
 Quota.belongsTo(User, { as: "user", foreignKey: "userId" });
 User.belongsTo(User, { as: "invitedBy", foreignKey: "invitedById" });
 User.hasMany(RecoveryCode, { as: "recoveryCodes", foreignKey: "userId", onDelete: "CASCADE" });
+User.hasMany(EmailToken, { as: "emailTokens", foreignKey: "userId", onDelete: "CASCADE" });
+EmailToken.belongsTo(User, { as: "user", foreignKey: "userId" });
 Invite.belongsTo(Role, { as: "role", foreignKey: "roleId" });
 Invite.belongsTo(User, { as: "createdBy", foreignKey: "createdById" });
 Invite.belongsTo(User, { as: "usedBy", foreignKey: "usedById" });
@@ -109,5 +113,5 @@ export async function isDatabaseUp(): Promise<boolean> {
   return await sequelize.query("SELECT 1").then(() => true).catch(() => false);
 }
 
-export { AuditLog, Backup, Definition, EnrolToken, GameServer, Host, HostGrant, Invite, PortAllocation, Quota, RecoveryCode, Role, Schedule, ServerShare, Source, User };
+export { AuditLog, Backup, Definition, EmailToken, EnrolToken, GameServer, Host, HostGrant, Invite, PortAllocation, Quota, RecoveryCode, Role, Schedule, ServerShare, Setting, Source, User };
 export default sequelize;

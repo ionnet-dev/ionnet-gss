@@ -14,6 +14,7 @@ export interface Requirement {
   signedOut?: boolean; // Redirect to homePath() when signed in (login, register).
   setup?: boolean; // Only while the panel has no user yet.
   permission?: Permission; // Redirect to homePath() without it.
+  admin?: boolean; // M7: administrators only (redirect to homePath() otherwise).
 }
 
 /**
@@ -35,10 +36,11 @@ export function requirement(req: Requirement, route: RouteDef): RouteDef {
       if (auth.setupRequired && !req.setup) return "/setup";
       if (req.setup && auth.setupRequired === false) return "/login";
       if (req.signedOut && auth.isSignedIn()) return homePath();
-      if ((req.signedIn || req.permission) && !auth.isSignedIn()) {
+      if ((req.signedIn || req.permission || req.admin) && !auth.isSignedIn()) {
         return `/login?redirect=${encodeURIComponent(match.path)}`;
       }
       if (req.permission && !auth.has(req.permission)) return homePath();
+      if (req.admin && !auth.user?.isAdmin) return homePath();
       return null;
     },
   };
@@ -79,6 +81,11 @@ export const routes: RouteDef[] = [
   requirement({ permission: "SOURCES_MANAGE" }, { path: /^\/sources$/, render: appPage(() => import("./pages/Sources/Sources.tsx")) }),
   requirement({ permission: "INVITES_MANAGE" },{ path: /^\/invites$/, render: appPage(() => import("./pages/Invites/Invites.tsx")) }),
   requirement({ signedIn: true }, { path: /^\/account$/, render: appPage(() => import("./pages/Account/Account.tsx")) }),
+  // M7: mail settings; password links and confirmation links (opened from an email, signed in or not).
+  requirement({ admin: true }, { path: /^\/settings$/, render: appPage(() => import("./pages/Settings/Settings.tsx")) }),
+  requirement({ signedOut: true }, { path: /^\/forgot-password$/, render: authPage(() => import("./pages/ForgotPassword/ForgotPassword.tsx")) }),
+  requirement({}, { path: /^\/reset-password$/, render: authPage(() => import("./pages/ResetPassword/ResetPassword.tsx")) }),
+  requirement({}, { path: /^\/confirm-email$/, render: authPage(() => import("./pages/ConfirmEmail/ConfirmEmail.tsx")) }),
   // M2: /servers, /servers/<uuid> (console, settings); M3: /sources; M4: /servers/<uuid>/files, /backups.
 ];
 

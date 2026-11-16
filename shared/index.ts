@@ -18,4 +18,5 @@ export type * from "./api/sources.ts";
 export type * from "./api/files.ts";
 export type * from "./api/backups.ts";
 export type * from "./api/metrics.ts";
+export type * from "./api/settings.ts";
 export * from "./protocol/protocol.gen.ts";

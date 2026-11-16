@@ -18,4 +18,13 @@ export interface MetaResponse {
    * Agent protocol version this panel speaks.
    */
   protocolVersion: number;
+  /**
+   * M7: the panel sends email (`MailSettingsDto.enabled`): "Forgot password?", welcome links and email two-factor are
+   * available.
+   */
+  mailEnabled: boolean;
+  /**
+   * M7: non-admins need a confirmed address to sign in (only true while `mailEnabled`); registration asks for one.
+   */
+  requireConfirmedEmail: boolean;
 }

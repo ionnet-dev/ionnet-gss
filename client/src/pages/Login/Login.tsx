@@ -1,14 +1,10 @@
 import { type FormEvent, useState } from "react";
 import { Button, Card, CardBody, CardHeader, Input, Stack } from "@ionnet/iontronic/react";
+import type { EmailConfirmationRequired, TwoFactorChallenge } from "@shared/api/auth.ts";
+import AuthStep from "@/components/AuthStep/AuthStep.tsx";
 import FormError from "@/components/FormError/FormError.tsx";
 import { useAuth } from "@/hooks/useAuth.ts";
 import { Link, navigate, type RouteMatch } from "@/router/Router.tsx";
-
-/**
- * The panel's challenge lives 5 minutes; a little less here, so the form goes back to the password before the panel
- * would refuse it.
- */
-const CHALLENGE_TTL_MS = 4.5 * 60 * 1000;
 
 interface Props {
   match: RouteMatch;
@@ -22,8 +18,8 @@ function safeRedirect(value: string | null): string {
 }
 
 /**
- * `/login?redirect=…`: username and password; on a two-factor challenge a code field replaces the form, with "Use a
- * recovery code" for the case without the phone.
+ * `/login?redirect=…`: username and password, then (by the panel's answer) the second-factor step or the "confirm your
+ * email address" step. "Forgot password?" shows while the panel sends email.
  */
 export default function Login(props: Props) {
   const { match } = props;
@@ -32,9 +28,7 @@ export default function Login(props: Props) {
   const inviteCode = match.query.get("code");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [challenge, setChallenge] = useState<{ token: string; at: number } | null>(null);
-  const [useRecovery, setUseRecovery] = useState(false);
-  const [code, setCode] = useState("");
+  const [step, setStep] = useState<TwoFactorChallenge | EmailConfirmationRequired | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -43,23 +37,9 @@ export default function Login(props: Props) {
     setError(null);
     setBusy(true);
     try {
-      if (challenge) {
-        if (Date.now() - challenge.at > CHALLENGE_TTL_MS) {
-          startOver();
-          setError("That took too long. Enter your password again.");
-          return;
-        }
-        await auth.completeTotp(challenge.token, code.trim());
-        navigate(redirect);
-        return;
-      }
       const response = await auth.login({ username: username.trim(), password });
-      if (response.twoFactorRequired) {
-        setChallenge({ token: response.challengeToken, at: Date.now() });
-        setCode("");
-        setUseRecovery(false);
-      }
-      else navigate(redirect);
+      if (response.step === "done") navigate(redirect);
+      else setStep(response);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -67,67 +47,25 @@ export default function Login(props: Props) {
     }
   };
 
-  const startOver = () => {
-    setChallenge(null);
-    setCode("");
+  const startOver = (message?: string) => {
+    setStep(null);
     setPassword("");
-    setUseRecovery(false);
-    setError(null);
+    setError(message ?? null);
   };
 
-  const switchMethod = () => {
-    setUseRecovery(!useRecovery);
-    setCode("");
-    setError(null);
-  };
-
-  const description = !challenge
-    ? "Use the account an admin created or invited you to."
-    : useRecovery
-    ? "Enter one of the recovery codes you saved when you turned on two-factor sign-in. Each works once."
-    : "Enter the code from your authenticator app.";
+  if (step) return <AuthStep response={step} onDone={() => navigate(redirect)} onBack={startOver} />;
 
   return (
     <Card>
-      <CardHeader
-        title="Sign in"
-        description={description}
-      />
+      <CardHeader title="Sign in" description="Use the account an admin created or invited you to." />
       <form onSubmit={submit}>
         <CardBody>
           <Stack gap="16">
-            {challenge
-              ? (
-                <Input
-                  key={useRecovery ? "recovery" : "totp"}
-                  label={useRecovery ? "Recovery code" : "Code"}
-                  placeholder={useRecovery ? "xxxxx-xxxxx" : "123456"}
-                  required
-                  autoFocus
-                  inputMode={useRecovery ? "text" : "numeric"}
-                  autoComplete={useRecovery ? "off" : "one-time-code"}
-                  autoCapitalize="none"
-                  spellCheck={false}
-                  maxLength={useRecovery ? 16 : 7}
-                  mono
-                  value={code}
-                  onChange={(event) => setCode(event.target.value)}
-                />
-              )
-              : (
-                <>
-                  <Input label="Username" required autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} />
-                  <Input label="Password" type="password" required autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
-                </>
-              )}
+            <Input label="Username" required autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} />
+            <Input label="Password" type="password" required autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
             <FormError>{error}</FormError>
-            <Button type="submit" variant="primary" fullWidth loading={busy}>{challenge ? "Verify" : "Sign in"}</Button>
-            {challenge && (
-              <Stack direction="row" gap="8" justify="between" wrap>
-                <Button variant="ghost" size="sm" onClick={switchMethod}>{useRecovery ? "Use the app code" : "Use a recovery code"}</Button>
-                <Button variant="ghost" size="sm" onClick={startOver}>Back</Button>
-              </Stack>
-            )}
+            <Button type="submit" variant="primary" fullWidth loading={busy}>Sign in</Button>
+            {auth.isMailEnabled() && <Link to="/forgot-password">Forgot password?</Link>}
             {inviteCode && (
               <span className="io-text-muted">
                 Have an invite? <Link to={`/register?code=${encodeURIComponent(inviteCode)}`}>Create your account</Link>.

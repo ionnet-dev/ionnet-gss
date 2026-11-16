@@ -16,6 +16,7 @@ import { HttpError } from "../lib/HttpError.ts";
 import { randomToken, sha256Hex, tokenHint } from "../lib/tokens.ts";
 import { ID, intFk } from "./columns.ts";
 import { Role } from "./Role.ts";
+import { Setting } from "./Setting.ts";
 import { User } from "./User.ts";
 
 const MAX_INVITE_HOURS = 24 * 365;
@@ -102,8 +103,10 @@ export class Invite extends Model<InferAttributes<Invite>, InferCreationAttribut
   }
 
   /**
-   * Create the user and mark the invite used, in one transaction.
-   * @throws HttpError 400 when the invite is used, expired, or bound to another email.
+   * Create the user and mark the invite used, in one transaction. M7: an email address is required while the panel
+   * sends email and requires a confirmed address to sign in (unless the invite grants the admin role, which the gate
+   * doesn't apply to).
+   * @throws HttpError 400 when the invite is used, expired, bound to another email, or the address is missing.
    */
   public static async redeem(code: string, data: { username: string; password: string; email?: string | null }): Promise<User> {
     const invite = await Invite.findByCode(code);
@@ -116,6 +119,10 @@ export class Invite extends Model<InferAttributes<Invite>, InferCreationAttribut
         throw HttpError.badRequest("This invite was issued for a different email address.");
       }
       email = invite.email.toLowerCase();
+    }
+    if (email === null && !invite.role!.isAdminRole()) {
+      const mail = Setting.get("mail");
+      if (mail.enabled && mail.requireConfirmedEmail) throw HttpError.badRequest("This panel requires an email address. Enter yours to register.");
     }
 
     return await Invite.sequelize!.transaction(async (transaction) => {

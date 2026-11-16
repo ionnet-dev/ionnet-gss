@@ -2,6 +2,7 @@ import { type FormEvent, useState } from "react";
 import { Badge, Button, Card, CardBody, CardFooter, CardHeader, Input, SegmentedControl, Stack, useTheme, type ThemeMode } from "@ionnet/iontronic/react";
 import { LogOut, Monitor, Moon, Sun } from "@ionnet/iontronic/icons";
 import { passwordProblem } from "@shared/constants.ts";
+import EmailCard from "@/components/EmailCard/EmailCard.tsx";
 import FormError from "@/components/FormError/FormError.tsx";
 import { useNotify } from "@/components/Notify/useNotify.ts";
 import PageHeader from "@/components/PageHeader/PageHeader.tsx";
@@ -16,7 +17,7 @@ interface Props {
 }
 
 /**
- * `/account`: who you are, change your password, pick a theme, sign out. M5: two-factor setup.
+ * `/account`: who you are, your email address, change your password, pick a theme, sign out. M5: two-factor setup.
  */
 export default function Account(props: Props) {
   const auth = useAuth();
@@ -46,6 +47,7 @@ export default function Account(props: Props) {
           actions={<Stack direction="row" gap="4" wrap>{auth.user?.roles.map((role) => <Badge key={role} size="sm" tone="accent">{role}</Badge>)}</Stack>}
         />
       </Card>
+      <EmailCard />
       <PasswordForm />
       <TwoFactorCard />
       {quota.data && <QuotaUsage quota={quota.data} />}

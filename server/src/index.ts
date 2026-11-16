@@ -3,7 +3,7 @@
  */
 import { AppSystem } from "./AppSystem.ts";
 import { Config } from "./Config.ts";
-import { connectDatabase, sequelize } from "./models/index.ts";
+import { connectDatabase, EmailToken, sequelize, Setting } from "./models/index.ts";
 import { runPendingMigrations } from "./migrate.ts";
 import { createApp } from "./App.ts";
 import { AgentGateway } from "./gateways/agent/AgentGateway.ts";
@@ -24,6 +24,7 @@ if (Config.AUTO_MIGRATE) {
   const applied = await runPendingMigrations();
   if (applied.length) console.log(`migrations applied: ${applied.join(", ")}`);
 }
+await Setting.load(); // M7: settings cache, so `Setting.get()` and `Mailer.isEnabled()` are synchronous.
 await DefinitionSync.syncBuiltin(); // games/ → definitions rows; logs failures, never throws.
 await ServerAccess.init(); // M5: share index for live audiences.
 
@@ -31,6 +32,7 @@ const app = createApp();
 AgentGateway.start();
 LiveGateway.start();
 const stopSourceSync = startSourceSync();
+const stopEmailTokenSweep = EmailToken.startSweep(); // M7: expired and used links/codes.
 
 const server = Deno.serve({
   port: Config.PORT,
@@ -43,6 +45,7 @@ async function shutdown(): Promise<void> {
   AgentGateway.stop();
   LiveGateway.stop();
   stopSourceSync();
+  stopEmailTokenSweep();
   await server.shutdown();
   await sequelize.close();
   Deno.exit(0);

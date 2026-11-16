@@ -1,8 +1,13 @@
 /**
  * Who is signed in, and what they may do. Created once (`authController`); components read it with `useAuth()`.
- * Owns the session lifecycle: first-run check, login (+ TOTP step), register, sign-out, and the live socket.
+ * Owns the session lifecycle: first-run check, login (+ second step), register, password links, sign-out, and the live
+ * socket. Also holds the panel's `meta` (mail flags), refetched on `settings.updated`.
  */
-import type { ChangePasswordBody, LoginBody, LoginResponse, RecoveryCodesBody, RegisterBody, SetupBody, TotpDisableBody } from "@shared/api/auth.ts";
+import type {
+  ChangeEmailBody, ChangePasswordBody, EmailTwoFactorDisableBody, EmailTwoFactorEnableBody, LoginBody, LoginResponse, RecoveryCodesBody, RegisterBody,
+  ResetPasswordBody, SecondFactorMethod, SetupBody, TotpDisableBody, TotpSetupBody, TotpSetupResponse,
+} from "@shared/api/auth.ts";
+import type { MetaResponse } from "@shared/api/meta.ts";
 import type { UserDto } from "@shared/api/users.ts";
 import type { Permission } from "@shared/permissions.ts";
 import { AuthApi } from "@/Api/AuthApi.ts";
@@ -17,6 +22,11 @@ export class AuthController extends Controller {
    */
   public setupRequired: boolean | null = null;
   public ready = false;
+  /**
+   * `GET /api/meta` (public); null until loaded or while the panel is unreachable. Read `mailEnabled` and
+   * `requireConfirmedEmail` from it.
+   */
+  public meta: MetaResponse | null = null;
 
   private _initStarted = false;
   /**
@@ -37,14 +47,23 @@ export class AuthController extends Controller {
     liveSocket.on("user.updated", (data) => {
       if (data.userId === null || data.userId === this.user?.id) this.refresh().catch(() => {});
     });
-    liveSocket.onReconnect(() => this.refresh().catch(() => {}));
+    liveSocket.on("settings.updated", () => {
+      this.loadMeta().catch(() => {});
+      this.refresh().catch(() => {});
+    });
+    liveSocket.onReconnect(() => {
+      this.loadMeta().catch(() => {});
+      this.refresh().catch(() => {});
+    });
 
+    const metaLoaded = this.loadMeta().catch(() => {});
     try {
       this.setupRequired = (await AuthApi.getStatus()).setupRequired;
     } catch {
       // Panel unreachable: show the sign-in page, whose own request will report the error.
       this.setupRequired = false;
     }
+    await metaLoaded;
 
     const token = BaseApi.getToken();
     if (token && !this.setupRequired) {
@@ -80,18 +99,42 @@ export class AuthController extends Controller {
   }
 
   /**
-   * Password step. On `LoginSuccess` the session is stored; on a TOTP challenge the caller shows the code field and
-   * calls `completeTotp()`.
+   * Fetch `GET /api/meta` again (mail turned on or off, "require a confirmed address" changed).
    */
-  public async login(body: LoginBody): Promise<LoginResponse> {
-    const response = await AuthApi.login(body);
-    if (!response.twoFactorRequired) this.applySession(response.token, response.user);
-    return response;
+  public async loadMeta(): Promise<void> {
+    this.meta = await AuthApi.getMeta();
+    this.notify();
   }
 
-  public async completeTotp(challengeToken: string, code: string): Promise<void> {
-    const response = await AuthApi.loginTotp({ challengeToken, code });
+  /**
+   * Whether the panel sends email (false until `meta` is loaded).
+   */
+  public isMailEnabled(): boolean {
+    return this.meta?.mailEnabled ?? false;
+  }
+
+  /**
+   * Password step. On `step: "done"` the session is stored; on `two_factor` the caller shows the code step and calls
+   * `completeTotp()`; on `confirm_email` it shows the confirmation step.
+   */
+  public async login(body: LoginBody): Promise<LoginResponse> {
+    return this._adopt(await AuthApi.login(body));
+  }
+
+  /**
+   * Second step of sign-in. `method` says where a 6-digit code came from (`email`; default the authenticator app); a
+   * recovery code needs none.
+   */
+  public async completeTotp(challengeToken: string, code: string, method?: SecondFactorMethod): Promise<void> {
+    const response = await AuthApi.loginTotp({ challengeToken, code, method });
     this.applySession(response.token, response.user);
+  }
+
+  /**
+   * Use a password link (forgot password, welcome). Answers like `login()`.
+   */
+  public async resetPassword(body: ResetPasswordBody): Promise<LoginResponse> {
+    return this._adopt(await AuthApi.resetPassword(body));
   }
 
   public async setup(body: SetupBody): Promise<void> {
@@ -100,9 +143,11 @@ export class AuthController extends Controller {
     this.applySession(response.token, response.user);
   }
 
-  public async register(body: RegisterBody): Promise<void> {
-    const response = await AuthApi.register(body);
-    this.applySession(response.token, response.user);
+  /**
+   * Redeem an invite. Answers like `login()`: `confirm_email` when the panel requires a confirmed address.
+   */
+  public async register(body: RegisterBody): Promise<LoginResponse> {
+    return this._adopt(await AuthApi.register(body));
   }
 
   /**
@@ -115,10 +160,19 @@ export class AuthController extends Controller {
 
   //#region Two-factor (M5)
   /**
-   * Turn two-factor on with a code for the pending secret (`AuthApi.setupTotp`).
-   * @returns The recovery codes, which the panel sends only this once.
+   * Start the authenticator setup: a new secret to scan. While email two-factor is on, `body` must prove it (password +
+   * a code); a wrong proof answers 401, which here doesn't sign out.
    */
-  public async confirmTotp(code: string): Promise<string[]> {
+  public async startTotpSetup(body?: TotpSetupBody): Promise<TotpSetupResponse> {
+    return await this._allowUnauthorized(() => AuthApi.setupTotp(body));
+  }
+
+  /**
+   * Turn two-factor on with a code for the pending secret (`AuthApi.setupTotp`).
+   * @returns The recovery codes, which the panel sends only this once; null when the user keeps the ones they have
+   * (email two-factor was already on).
+   */
+  public async confirmTotp(code: string): Promise<string[] | null> {
     const response = await AuthApi.confirmTotp({ code });
     this._setUser(response.user);
     return response.recoveryCodes;
@@ -137,6 +191,36 @@ export class AuthController extends Controller {
    */
   public async regenerateRecoveryCodes(body: RecoveryCodesBody): Promise<string[]> {
     return (await this._allowUnauthorized(() => AuthApi.regenerateRecoveryCodes(body))).recoveryCodes;
+  }
+  //#endregion
+
+  //#region Email (M7)
+  /**
+   * Change or remove (`email: null`) your address. A wrong password answers 401, which here doesn't sign out.
+   */
+  public async changeEmail(body: ChangeEmailBody): Promise<UserDto> {
+    const user = await this._allowUnauthorized(() => AuthApi.changeEmail(body));
+    this._setUser(user);
+    return user;
+  }
+
+  public async cancelEmailChange(): Promise<void> {
+    this._setUser(await AuthApi.cancelEmailChange());
+  }
+
+  /**
+   * Turn email two-factor on.
+   * `code` and `method` are needed while the authenticator app is on (a code from the app, or a recovery code).
+   * @returns The recovery codes when this is the first second factor (shown once), else null.
+   */
+  public async enableEmailTwoFactor(body: EmailTwoFactorEnableBody): Promise<string[] | null> {
+    const response = await this._allowUnauthorized(() => AuthApi.enableEmailTwoFactor(body));
+    this._setUser(response.user);
+    return response.recoveryCodes;
+  }
+
+  public async disableEmailTwoFactor(body: EmailTwoFactorDisableBody): Promise<void> {
+    this._setUser(await this._allowUnauthorized(() => AuthApi.disableEmailTwoFactor(body)));
   }
   //#endregion
 
@@ -179,6 +263,14 @@ export class AuthController extends Controller {
     } finally {
       this._expectUnauthorized = false;
     }
+  }
+
+  /**
+   * Store the session when a login-like answer carries one (`step: "done"`); pass the response on either way.
+   */
+  private _adopt(response: LoginResponse): LoginResponse {
+    if (response.step === "done") this.applySession(response.token, response.user);
+    return response;
   }
 
   private _setUser(user: UserDto): void {

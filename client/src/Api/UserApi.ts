@@ -2,6 +2,7 @@ import type { OkResponse } from "@shared/api/common.ts";
 import type {
   CreateUserBody,
   EffectiveQuotaDto,
+  PasswordLinkSentResponse,
   RoleDto,
   SetUserPasswordBody,
   UpdateQuotaBody,
@@ -33,6 +34,13 @@ export namespace UserApi {
 
   export function setPassword(id: number, body: SetUserPasswordBody): Promise<OkResponse> {
     return BaseApi.POST(`/users/${id}/password`, body);
+  }
+
+  /**
+   * M7: email the user a welcome link (no password yet) or a reset link.
+   */
+  export function sendPasswordLink(id: number): Promise<PasswordLinkSentResponse> {
+    return BaseApi.POST(`/users/${id}/password-link`);
   }
 
   export function remove(id: number): Promise<OkResponse> {

@@ -4,6 +4,7 @@ import type { OkResponse } from "@shared/api/common.ts";
 import type {
   CreateUserBody,
   EffectiveQuotaDto,
+  PasswordLinkSentResponse,
   SetUserPasswordBody,
   UpdateQuotaBody,
   UpdateUserBody,
@@ -15,7 +16,10 @@ import { ROLES } from "@shared/permissions.ts";
 import { LiveGateway } from "../gateways/live/LiveGateway.ts";
 import { type AppEnv, clientIp, paramInt, readBody } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
-import { AuditLog, GameServer, Quota, User } from "../models/index.ts";
+import { Mailer } from "../mail/Mailer.ts";
+import { MailTemplates } from "../mail/templates.ts";
+import { AuditLog, EmailToken, GameServer, Quota, RecoveryCode, User } from "../models/index.ts";
+import { AuthController } from "./AuthController.ts";
 
 async function findUser(id: number, transaction?: Transaction): Promise<User> {
   const user = await User.findWithRoles({ id }, transaction);
@@ -39,7 +43,8 @@ function pushUserUpdated(userId: number): void {
  * `tokenVersion` (their sessions end). Non-admins can't change, reset or delete administrators, and can only grant
  * or remove roles whose permissions they hold (`User.assertMayAssignRoles`). Refuses to remove, disable or demote
  * the last admin (409), checked under `User.lockAdminChanges()`.
- * Audit: `user.created`, `user.updated`, `user.password_set`, `user.deleted`.
+ * Audit: `user.created`, `user.updated`, `user.password_set`, `user.deleted`; M7: `user.welcome_failed`,
+ * `user.password_link_sent`.
  */
 export namespace UserController {
   export const router = new Hono<AppEnv>();
@@ -55,22 +60,43 @@ export namespace UserController {
 
   /**
    * POST /api/users  CreateUserBody → 201 UserDto. 403 for a role the caller may not grant, 409 when the username or
-   * email is taken.
+   * email is taken. M7: with an address and mail on, a welcome link (`PASSWORD_SETUP_TTL_HOURS`) is sent unless
+   * `sendWelcomeEmail` is false; a failed send keeps the user (logged, audit `user.welcome_failed`). The password may
+   * be left out only when that welcome email goes out (400 otherwise).
    */
   router.post("/", async (c) => {
     const body = await readBody<CreateUserBody>(c);
     const actor = c.var.user;
+    if (body.sendWelcomeEmail !== undefined && typeof body.sendWelcomeEmail !== "boolean") throw HttpError.badRequest("\"sendWelcomeEmail\" must be true or false.");
+    const email = User.normalizeEmail(body.email);
+    const sendWelcome = email !== null && Mailer.isEnabled() && body.sendWelcomeEmail !== false;
+    const noPassword = body.password === undefined || body.password === null || body.password === "";
+    if (noPassword && !sendWelcome) {
+      throw HttpError.badRequest(email === null || !Mailer.isEnabled()
+        ? "Give a password, or an email address for a \"set your password\" link (the panel must send email)."
+        : "Give a password, or send the welcome email so they can set one.");
+    }
     const roleNames = body.roles ?? [ROLES.USER];
     await actor.assertMayAssignRoles(await User.resolveRoles(roleNames));
     const user = await User.registerUser({
       username: body.username as string,
-      password: body.password as string,
-      email: body.email,
+      password: noPassword ? null : body.password as string,
+      email,
       displayName: body.displayName,
       roleNames,
       invitedById: actor.id,
     });
     await AuditLog.record({ action: "user.created", actorId: actor.id, ip: clientIp(c), details: { userId: user.id, username: user.username } });
+    if (sendWelcome) {
+      try {
+        AuthController.takeEmailCooldown(user.id, "password");
+        await Mailer.send(email, await AuthController.passwordLinkMessage(user, "welcome", email, actor.username));
+      } catch (error) {
+        AuthController.releaseEmailCooldown(user.id, "password");
+        console.error(`welcome email to user ${user.id} failed`, error);
+        await AuditLog.record({ action: "user.welcome_failed", actorId: actor.id, ip: clientIp(c), details: { userId: user.id, error: (error as Error).message } });
+      }
+    }
     pushUserUpdated(user.id);
     return c.json<UserDto>(user.toClientJSON(), 201);
   });
@@ -96,9 +122,17 @@ export namespace UserController {
       assertMayManage(actor, user);
       const changes: string[] = [];
 
-      if (email !== undefined && email !== user.email) {
+      // M7: a new address is unconfirmed, drops a pending change and turns email two-factor off.
+      const emailChanged = email !== undefined && email !== user.email;
+      if (emailChanged) {
         user.email = email;
+        user.emailVerifiedAt = null;
+        user.pendingEmail = null;
         changes.push("email");
+        if (user.emailTwoFactor) {
+          user.emailTwoFactor = false;
+          changes.push("emailTwoFactor");
+        }
       }
       if (displayName !== undefined && displayName !== user.displayName) {
         user.displayName = displayName;
@@ -131,10 +165,18 @@ export namespace UserController {
         throw error;
       }
       if (rolesChanged) await user.setRoles(newRoles!, { transaction });
+      if (emailChanged) {
+        await EmailToken.revoke(id, ["confirm", "reset", "welcome", "login", "action"], transaction);
+        if (changes.includes("emailTwoFactor") && !user.totpEnabled) await RecoveryCode.removeAll(id, transaction);
+      }
       return { changes, rolesChanged, disabledNow, updated: await findUser(id, transaction) };
     });
 
     const { changes, rolesChanged, disabledNow, updated } = result;
+    const newAddress = updated.email;
+    if (changes.includes("email") && newAddress !== null) {
+      AuthController.mailLater(id, "confirm", newAddress, () => AuthController.confirmLinkMessage(updated, newAddress));
+    }
     const self = id === actor.id;
     if (changes.length) await AuditLog.record({ action: "user.updated", actorId: actor.id, ip: clientIp(c), details: { userId: id, changes } });
     if (disabledNow) LiveGateway.closeUser(id, LIVE_CLOSE.UNAUTHORIZED, "Your account was disabled.");
@@ -148,7 +190,7 @@ export namespace UserController {
 
   /**
    * POST /api/users/:id/password  SetUserPasswordBody → OkResponse. 403 for an admin target unless the caller is
-   * an admin. Ends the user's sessions.
+   * an admin. Ends the user's sessions; M7: sends a "password changed" notice.
    */
   router.post("/:id/password", async (c) => {
     const id = paramInt(c, "id");
@@ -158,10 +200,34 @@ export namespace UserController {
     assertMayManage(actor, user);
     User.verifyPassword(body.password);
     await user.setPassword(body.password);
-    await user.bumpTokenVersion();
+    await User.sequelize!.transaction(async (transaction) => {
+      await user.bumpTokenVersion(transaction);
+      await EmailToken.revoke(id, ["reset", "welcome"], transaction);
+    });
     await AuditLog.record({ action: "user.password_set", actorId: actor.id, ip: clientIp(c), details: { userId: id } });
     LiveGateway.closeUser(id, LIVE_CLOSE.UNAUTHORIZED, "Your password was changed by an administrator.");
+    AuthController.notify(user, "passwordChanged", () => MailTemplates.passwordChanged({ username: user.username, by: "admin" }));
+    pushUserUpdated(id);
     return c.json<OkResponse>({ ok: true });
+  });
+
+  /**
+   * POST /api/users/:id/password-link → PasswordLinkSentResponse (M7). Emails a welcome link while the user has no
+   * password yet, else a reset link. 403 for an admin target unless the caller is an admin; 409 without an address,
+   * for a disabled account or while mail is off; 429 within the email cooldown; 502 when the relay refuses.
+   */
+  router.post("/:id/password-link", async (c) => {
+    const id = paramInt(c, "id");
+    const actor = c.var.user;
+    const user = await findUser(id);
+    assertMayManage(actor, user);
+    const address = user.email;
+    if (address === null) throw HttpError.conflict(`${user.username} has no email address. Add one first.`);
+    if (user.disabled) throw HttpError.conflict(`${user.username}'s account is disabled. Enable it first.`);
+    const kind = user.hasPassword ? "reset" : "welcome";
+    await AuthController.mailNow(id, "password", address, () => AuthController.passwordLinkMessage(user, kind, address, actor.username));
+    await AuditLog.record({ action: "user.password_link_sent", actorId: actor.id, ip: clientIp(c), details: { userId: id, kind } });
+    return c.json<PasswordLinkSentResponse>({ kind, email: address });
   });
 
   /**

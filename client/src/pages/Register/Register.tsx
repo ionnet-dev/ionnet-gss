@@ -2,8 +2,9 @@ import { type FormEvent, useEffect, useState } from "react";
 import { Button, Card, CardBody, CardHeader, EmptyState, Input, Spinner, Stack } from "@ionnet/iontronic/react";
 import { Ticket } from "@ionnet/iontronic/icons";
 import { LIMITS, passwordProblem } from "@shared/constants.ts";
-import type { InvitePreviewResponse } from "@shared/api/auth.ts";
+import type { EmailConfirmationRequired, InvitePreviewResponse, TwoFactorChallenge } from "@shared/api/auth.ts";
 import { AuthApi } from "@/Api/AuthApi.ts";
+import AuthStep from "@/components/AuthStep/AuthStep.tsx";
 import FormError from "@/components/FormError/FormError.tsx";
 import { useAuth } from "@/hooks/useAuth.ts";
 import { navigate, type RouteMatch } from "@/router/Router.tsx";
@@ -14,6 +15,7 @@ interface Props {
 
 /**
  * `/register?code=…`: checks the invite, then asks for a username and password. An invite that names an email locks it.
+ * While the panel requires a confirmed address the email is required, and the account page waits for its link.
  */
 export default function Register(props: Props) {
   const { match } = props;
@@ -84,6 +86,8 @@ function RegisterForm(props: { code: string; invite: InvitePreviewResponse }) {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmStep, setConfirmStep] = useState<TwoFactorChallenge | EmailConfirmationRequired | null>(null);
+  const emailRequired = auth.meta?.requireConfirmedEmail ?? false;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -92,19 +96,28 @@ function RegisterForm(props: { code: string; invite: InvitePreviewResponse }) {
     const passwordError = passwordProblem(password);
     if (passwordError) found.password = passwordError;
     if (confirm !== password) found.confirm = "The passwords don't match.";
+    if (emailRequired && !email.trim()) found.email = "Enter your email address. This panel sends a link to confirm it.";
     setErrors(found);
     setFormError(null);
     if (Object.keys(found).length > 0) return;
 
     setBusy(true);
     try {
-      await auth.register({ inviteCode: code, username, password, email: email.trim() || null });
-      navigate("/hosts");
+      const response = await auth.register({ inviteCode: code, username, password, email: email.trim() || null });
+      if (response.step !== "done") {
+        setConfirmStep(response);
+        setBusy(false);
+      }
+      else navigate("/hosts");
     } catch (error) {
       setFormError(error instanceof Error ? error.message : String(error));
       setBusy(false);
     }
   };
+
+  if (confirmStep) {
+    return <AuthStep response={confirmStep} intro="Your account is ready." onDone={() => navigate("/hosts")} onBack={() => navigate("/login")} />;
+  }
 
   return (
     <Card>
@@ -117,10 +130,12 @@ function RegisterForm(props: { code: string; invite: InvitePreviewResponse }) {
               label="Email"
               type="email"
               autoComplete="email"
-              description={invite.email ? "Set by the invite." : "Optional."}
+              required={emailRequired}
+              description={invite.email ? "Set by the invite." : emailRequired ? "We'll send a link to confirm it." : "Optional."}
               value={email}
               readOnly={invite.email !== null}
               onChange={(event) => setEmail(event.target.value)}
+              error={errors.email}
             />
             <Input label="Password" type="password" required autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} error={errors.password} />
             <Input label="Repeat password" type="password" required autoComplete="new-password" value={confirm} onChange={(event) => setConfirm(event.target.value)} error={errors.confirm} />

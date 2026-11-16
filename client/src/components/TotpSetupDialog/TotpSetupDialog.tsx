@@ -1,9 +1,10 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Button, Dialog, Grid, Input, Spinner, Stack } from "@ionnet/iontronic/react";
 import { Download } from "@ionnet/iontronic/icons";
-import type { TotpSetupResponse } from "@shared/api/auth.ts";
+import type { TotpSetupBody, TotpSetupResponse } from "@shared/api/auth.ts";
 import { AuthApi } from "@/Api/AuthApi.ts";
 import CopyButton from "@/components/CopyButton/CopyButton.tsx";
+import SecondFactorInput, { type SecondFactorAnswer } from "@/components/SecondFactorInput/SecondFactorInput.tsx";
 import FormError from "@/components/FormError/FormError.tsx";
 import LoadError from "@/components/LoadError/LoadError.tsx";
 import QrCode from "@/components/QrCode/QrCode.tsx";
@@ -17,7 +18,9 @@ interface Props {
 
 /**
  * Two steps: scan (`AuthApi.setupTotp` → `QrCode` of `otpauthUrl` + the secret as text) and confirm a code
- * (`confirmTotp`); then the recovery codes, shown once with copy and download (.txt). M5, parcel C.
+ * (`confirmTotp`); then the recovery codes, shown once with copy and download (.txt). While email two-factor is on, a
+ * first step asks for the password and an email code (or a recovery code), because adding a factor needs the one already
+ * on; the existing recovery codes then stay. M5, parcel C.
  */
 export default function TotpSetupDialog(props: Props) {
   const { open, onOpenChange, onEnabled } = props;
@@ -43,25 +46,31 @@ function SetupFlow(props: { onEnabled: () => void; onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
+  const [keptCodes, setKeptCodes] = useState(false);
   const request = useRef<Promise<TotpSetupResponse> | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const needsProof = auth.user?.emailTwoFactor ?? false;
+  // null while the proof step is still to be answered.
+  const [proof, setProof] = useState<TotpSetupBody | null>(needsProof ? null : {});
 
   // A new secret each time the dialog opens; an unconfirmed one replaces the previous pending setup on the panel.
   // One request per mount (the ref survives StrictMode's second effect run), so the QR shown is the secret stored.
   useEffect(() => {
+    if (!proof) return;
     let cancelled = false;
-    request.current ??= AuthApi.setupTotp();
+    request.current ??= auth.startTotpSetup(needsProof ? proof : undefined);
     request.current
       .then((response) => !cancelled && setSetup(response))
       .catch((err) => !cancelled && setLoadError(err instanceof Error ? err : new Error(String(err))));
     return () => {
       cancelled = true;
     };
-  }, [attempt]);
+  }, [attempt, proof]);
 
   const retry = () => {
     request.current = null;
     setLoadError(null);
+    if (needsProof) setProof(null);
     setAttempt((n) => n + 1);
   };
 
@@ -75,7 +84,9 @@ function SetupFlow(props: { onEnabled: () => void; onClose: () => void }) {
     setError(null);
     setBusy(true);
     try {
-      setRecoveryCodes(await auth.confirmTotp(value));
+      const codes = await auth.confirmTotp(value);
+      if (codes) setRecoveryCodes(codes);
+      else setKeptCodes(true);
       onEnabled();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -83,6 +94,21 @@ function SetupFlow(props: { onEnabled: () => void; onClose: () => void }) {
       setBusy(false);
     }
   };
+
+  if (keptCodes) {
+    return (
+      <>
+        <Dialog.Body>
+          <span>Two-factor sign-in with your authenticator app is on. Your recovery codes stay the same.</span>
+        </Dialog.Body>
+        <Dialog.Footer>
+          <Button variant="primary" onClick={onClose}>Done</Button>
+        </Dialog.Footer>
+      </>
+    );
+  }
+
+  if (!proof) return <ProofStep onProof={setProof} />;
 
   if (recoveryCodes) {
     return (
@@ -155,6 +181,50 @@ function SetupFlow(props: { onEnabled: () => void; onClose: () => void }) {
       <Dialog.Footer>
         <Dialog.Close>Cancel</Dialog.Close>
         <Button type="submit" variant="primary" loading={busy}>Turn on</Button>
+      </Dialog.Footer>
+    </form>
+  );
+}
+
+/**
+ * Password + an emailed code (or a recovery code): the proof `POST /api/auth/totp/setup` needs while email two-factor
+ * is on.
+ */
+function ProofStep(props: { onProof: (proof: TotpSetupBody) => void }) {
+  const { onProof } = props;
+  const auth = useAuth();
+  const [password, setPassword] = useState("");
+  const [answer, setAnswer] = useState<SecondFactorAnswer>({ code: "", method: undefined });
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!password || !answer.code) {
+      setError("Enter your password and a code.");
+      return;
+    }
+    onProof({ password, code: answer.code, method: answer.method });
+  };
+
+  return (
+    <form onSubmit={submit} noValidate>
+      <Dialog.Body>
+        <Stack gap="16">
+          <span className="io-text-muted">Email codes are on, so confirm it's you first.</span>
+          <Input label="Password" type="password" autoFocus autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          <SecondFactorInput
+            methods={["email"]}
+            emailHint={auth.user?.email ?? null}
+            emailState="idle"
+            sendEmailCode={async () => (await AuthApi.sendActionEmailCode()).emailHint}
+            onChange={setAnswer}
+          />
+          <FormError>{error}</FormError>
+        </Stack>
+      </Dialog.Body>
+      <Dialog.Footer>
+        <Dialog.Close>Cancel</Dialog.Close>
+        <Button type="submit" variant="primary">Continue</Button>
       </Dialog.Footer>
     </form>
   );

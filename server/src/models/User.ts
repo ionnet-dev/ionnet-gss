@@ -16,6 +16,7 @@ import type { MiddlewareHandler } from "hono";
 import { sign, verify } from "hono/jwt";
 import bcrypt from "bcryptjs";
 import { LIMITS, passwordBytes } from "@shared/constants.ts";
+import type { SecondFactorMethod } from "@shared/api/auth.ts";
 import type { UserDto } from "@shared/api/users.ts";
 import { PERMISSION_KEYS, type Permission, ROLES } from "@shared/permissions.ts";
 import { Config } from "../Config.ts";
@@ -23,11 +24,13 @@ import { type AppEnv, bearerToken } from "../lib/http.ts";
 import { HttpError } from "../lib/HttpError.ts";
 import { verifyCode } from "../lib/totp.ts";
 import { ID, intFk } from "./columns.ts";
+import { EmailToken } from "./EmailToken.ts";
 import { RecoveryCode } from "./RecoveryCode.ts";
 import { Role } from "./Role.ts";
 import type { Quota } from "./Quota.ts";
 
 const TOTP_CHALLENGE_SECONDS = 5 * 60;
+const CONFIRM_CHALLENGE_SECONDS = 30 * 60; // M7: the login gate's "confirm your address" step.
 
 /**
  * A panel account. Signs in with a password (bcrypt), gets a JWT bearer token, and optionally a TOTP second step (M5).
@@ -43,6 +46,10 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
   declare totpSecret: string | null; // Base32, set while enrolling 2FA and after (M5).
   declare totpEnabled: CreationOptional<boolean>;
   declare totpLastStep: CreationOptional<number | null>; // Last accepted TOTP time step (M5): older or equal = replay.
+  declare emailVerifiedAt: CreationOptional<Date | null>; // M7: when `email` was confirmed; null = unconfirmed.
+  declare pendingEmail: CreationOptional<string | null>; // M7: a new address waiting for its confirmation link.
+  declare emailTwoFactor: CreationOptional<boolean>; // M7: email a code at sign-in.
+  declare hasPassword: CreationOptional<boolean>; // M7: false until a welcome link sets the first password.
   declare lastLoginAt: Date | null;
   declare invitedById: ForeignKey<User["id"]> | null;
   declare createdAt: CreationOptional<Date>;
@@ -66,6 +73,10 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
       totpSecret: { type: DataTypes.STRING(64), allowNull: true },
       totpEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
       totpLastStep: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
+      emailVerifiedAt: { type: DataTypes.DATE, allowNull: true },
+      pendingEmail: { type: DataTypes.STRING(255), allowNull: true },
+      emailTwoFactor: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+      hasPassword: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       lastLoginAt: { type: DataTypes.DATE, allowNull: true },
       invitedById: intFk(true),
       createdAt: DataTypes.DATE,
@@ -124,10 +135,12 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
   //#region Factories and finders
   /**
    * Validate and create a user with the given roles (default `user`). 409 when the username or email is taken.
+   * `password: null` (M7) creates the account with an unusable random hash and `hasPassword` false: the user sets one
+   * through a welcome link.
    */
   public static async registerUser(data: User.RegisterData, transaction?: Transaction): Promise<User> {
     User.verifyUsername(data.username);
-    User.verifyPassword(data.password);
+    if (data.password !== null) User.verifyPassword(data.password);
     const email = User.normalizeEmail(data.email);
     const displayName = User.normalizeDisplayName(data.displayName);
     const roles = await User.resolveRoles(data.roleNames ?? [ROLES.USER], transaction);
@@ -141,7 +154,13 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
 
     const create = async (t: Transaction): Promise<User> => {
       const user = User.build({ username: data.username, email, displayName, password: "", totpSecret: null, lastLoginAt: null, invitedById: data.invitedById ?? null });
-      await user.setPassword(data.password);
+      if (data.password === null) {
+        await user.setPassword(crypto.randomUUID() + crypto.randomUUID());
+        user.hasPassword = false;
+      }
+      else {
+        await user.setPassword(data.password);
+      }
       try {
         await user.save({ transaction: t });
       } catch (error) {
@@ -257,10 +276,11 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
 
   //#region Password and tokens
   /**
-   * Hash and set a new password. Does not save.
+   * Hash and set a new password and mark the account as having one (`hasPassword`). Does not save.
    */
   public async setPassword(password: string): Promise<void> {
     this.password = await bcrypt.hash(password, 12);
+    this.hasPassword = true;
   }
 
   public async checkPassword(password: string): Promise<boolean> {
@@ -269,16 +289,20 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
 
   /**
    * A signed JWT (`JWT_SECRET`, HS256) for this user.
-   * @param purpose `session` (default, `JWT_TTL_HOURS`) or `totp` (a 5-minute login challenge).
+   * @param purpose `session` (default, `JWT_TTL_HOURS`), `totp` (a 5-minute second-factor challenge) or `confirm`
+   * (M7: a 30-minute challenge of the login gate, for resending the confirmation link).
+   * @param viaLink M7, `totp` only: the challenge follows a password link, so an emailed code isn't enough when TOTP
+   * is on (see `findChallenge`).
    */
-  public async createToken(purpose: User.TokenPurpose = "session"): Promise<string> {
-    const seconds = purpose === "totp" ? TOTP_CHALLENGE_SECONDS : Config.JWT_TTL_HOURS * 3600;
+  public async createToken(purpose: User.TokenPurpose = "session", viaLink = false): Promise<string> {
+    const seconds = purpose === "totp" ? TOTP_CHALLENGE_SECONDS : purpose === "confirm" ? CONFIRM_CHALLENGE_SECONDS : Config.JWT_TTL_HOURS * 3600;
     const payload: User.TokenPayload = {
       sub: this.id,
       ver: this.tokenVersion,
       purpose,
       exp: Math.floor(Date.now() / 1000) + seconds,
     };
+    if (viaLink) payload.viaLink = true;
     return await sign(payload, Config.JWT_SECRET, "HS256");
   }
 
@@ -293,20 +317,39 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
 
   //#region TOTP (M5)
   /**
-   * The user a login challenge (`createToken("totp")`) belongs to, or null when the token is invalid, expired, not a
-   * `totp` challenge, of an old `tokenVersion`, the user is disabled, or two-factor is off. Loads `roles`.
+   * The user a login challenge (`createToken(purpose)`) belongs to, or null when the token is invalid, expired, of
+   * another purpose, of an old `tokenVersion`, or the user is disabled. `totp` (the second step) also needs a second
+   * factor on (M7: either method). Loads `roles`.
    */
-  public static async findByChallenge(token: string): Promise<User | null> {
+  public static async findByChallenge(token: string, purpose: "totp" | "confirm"): Promise<User | null> {
+    return (await User.findChallenge(token, purpose))?.user ?? null;
+  }
+
+  /**
+   * Like `findByChallenge`, with the challenge's flags. `viaLink` (M7): issued after a password link; then the
+   * methods are `["totp"]` while TOTP is on (the inbox that got the link mustn't also pass the second factor).
+   */
+  public static async findChallenge(token: string, purpose: "totp" | "confirm"): Promise<User.Challenge | null> {
     let payload: User.TokenPayload;
     try {
       payload = await verify(token, Config.JWT_SECRET, "HS256") as User.TokenPayload;
     } catch {
       return null;
     }
-    if (payload.purpose !== "totp" || typeof payload.sub !== "number") return null;
+    if (payload.purpose !== purpose || typeof payload.sub !== "number") return null;
     const user = await User.findWithRoles({ id: payload.sub });
-    if (!user || user.disabled || user.tokenVersion !== payload.ver || !user.totpEnabled || !user.totpSecret) return null;
-    return user;
+    if (!user || user.disabled || user.tokenVersion !== payload.ver) return null;
+    if (purpose === "totp" && !user.hasSecondFactor()) return null;
+    return { user, viaLink: payload.viaLink === true };
+  }
+
+  /**
+   * The second factors a challenge accepts: `secondFactorMethods()`, but only `totp` after a password link while
+   * TOTP is on (M7).
+   */
+  public challengeMethods(viaLink: boolean): SecondFactorMethod[] {
+    const methods = this.secondFactorMethods();
+    return viaLink && methods.includes("totp") ? ["totp"] : methods;
   }
 
   /**
@@ -337,20 +380,30 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
   }
 
   /**
-   * A TOTP code (6 digits) or a recovery code (anything else), for the login second step, disabling and new
-   * recovery codes.
-   * @returns `"totp"` / `"recovery_code"` for the method that matched, or null.
+   * A second-factor code, for the login second step, disabling either method and new recovery codes. 6 digits with
+   * `method` `email` → an emailed code of `emailPurpose`; 6 digits otherwise → TOTP; anything else → a recovery code,
+   * accepted whenever any second factor is on.
+   * @param method Where a 6-digit code came from. Default is `totp`.
+   * @param emailPurpose `login` (sign-in step) or `action` (sensitive action while signed in). Default is `login`.
+   * @returns The method that matched, or null.
    */
-  public async consumeSecondFactor(code: string): Promise<"totp" | "recovery_code" | null> {
-    if (!this.totpEnabled || !this.totpSecret || typeof code !== "string") return null;
+  public async consumeSecondFactor(code: string, method: SecondFactorMethod = "totp", emailPurpose: EmailToken.CodePurpose = "login"): Promise<User.SecondFactorMatch | null> {
+    if (!this.hasSecondFactor() || typeof code !== "string") return null;
     const value = code.replace(/\s/g, "");
-    if (new RegExp(`^\\d{${LIMITS.TOTP_DIGITS}}$`).test(value)) return await this.consumeTotpCode(value) ? "totp" : null;
+    if (new RegExp(`^\\d{${LIMITS.TOTP_DIGITS}}$`).test(value)) {
+      if (method === "email") {
+        if (!this.emailTwoFactor || this.email === null) return null;
+        return await EmailToken.consumeCode(this.id, emailPurpose, value, this.email) ? "email" : null;
+      }
+      if (!this.totpEnabled) return null;
+      return await this.consumeTotpCode(value) ? "totp" : null;
+    }
     return await RecoveryCode.consume(this.id, value) ? "recovery_code" : null;
   }
 
   /**
-   * Turn two-factor off: secret, `totpEnabled`, `totpLastStep` cleared, recovery codes deleted. Saves. Used by
-   * disable and by the admin reset (which also bumps `tokenVersion`).
+   * Turn TOTP off: secret, `totpEnabled`, `totpLastStep` cleared; the recovery codes are deleted only when email
+   * two-factor is off too (M7). Saves. Used by disable and by the admin reset (which also bumps `tokenVersion`).
    */
   public async clearTotp(transaction?: Transaction): Promise<void> {
     const clear = async (t: Transaction): Promise<void> => {
@@ -358,7 +411,57 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
       this.totpEnabled = false;
       this.totpLastStep = null;
       await this.save({ transaction: t });
-      await RecoveryCode.removeAll(this.id, t);
+      if (!this.emailTwoFactor) await RecoveryCode.removeAll(this.id, t);
+    };
+    if (transaction) await clear(transaction);
+    else await User.sequelize!.transaction(clear);
+  }
+  //#endregion
+
+  //#region Email (M7)
+  /**
+   * Whether the account has an address and it was confirmed (a link sent to it was used).
+   */
+  public isEmailConfirmed(): boolean {
+    return this.email !== null && this.emailVerifiedAt !== null;
+  }
+
+  /**
+   * The second factors the user has on, `totp` first.
+   */
+  public secondFactorMethods(): SecondFactorMethod[] {
+    const methods: SecondFactorMethod[] = [];
+    if (this.totpEnabled && this.totpSecret) methods.push("totp");
+    if (this.emailTwoFactor) methods.push("email");
+    return methods;
+  }
+
+  /**
+   * Whether any second factor is on (recovery codes work then).
+   */
+  public hasSecondFactor(): boolean {
+    return this.secondFactorMethods().length > 0;
+  }
+
+  /**
+   * An address as shown on the sign-in page: first character, `•••`, domain (`a•••@example.com`).
+   */
+  public static maskedEmail(address: string): string {
+    const at = address.lastIndexOf("@");
+    if (at <= 0) return "•••";
+    return `${address[0]}•••${address.slice(at)}`;
+  }
+
+  /**
+   * Turn email two-factor off: `emailTwoFactor` false, unused `login`/`action` codes deleted, and the recovery codes
+   * too when TOTP is off. Saves.
+   */
+  public async clearEmailTwoFactor(transaction?: Transaction): Promise<void> {
+    const clear = async (t: Transaction): Promise<void> => {
+      this.emailTwoFactor = false;
+      await this.save({ transaction: t });
+      await EmailToken.revoke(this.id, ["login", "action"], t);
+      if (!this.totpEnabled) await RecoveryCode.removeAll(this.id, t);
     };
     if (transaction) await clear(transaction);
     else await User.sequelize!.transaction(clear);
@@ -438,6 +541,10 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
       permissions: [...this.getPermissions()],
       isAdmin: this.isAdmin(),
       totpEnabled: this.totpEnabled,
+      emailVerifiedAt: this.emailVerifiedAt?.toISOString() ?? null,
+      pendingEmail: this.pendingEmail ?? null,
+      emailTwoFactor: this.emailTwoFactor,
+      hasPassword: this.hasPassword,
       lastLoginAt: this.lastLoginAt?.toISOString() ?? null,
       createdAt: this.createdAt.toISOString(),
     };
@@ -469,7 +576,20 @@ export class User extends Model<InferAttributes<User>, InferCreationAttributes<U
 }
 
 export namespace User {
-  export type TokenPurpose = "session" | "totp";
+  export type TokenPurpose = "session" | "totp" | "confirm";
+
+  /**
+   * A verified login challenge (`findChallenge`).
+   */
+  export interface Challenge {
+    user: User;
+    viaLink: boolean; // M7: issued by the password reset.
+  }
+
+  /**
+   * What `consumeSecondFactor` matched.
+   */
+  export type SecondFactorMatch = "totp" | "email" | "recovery_code";
 
   /**
    * Claims of a panel JWT.
@@ -484,7 +604,7 @@ export namespace User {
 
   export interface RegisterData {
     username: string;
-    password: string;
+    password: string | null; // null (M7) = no password yet: an unusable hash, `hasPassword` false.
     email?: string | null;
     displayName?: string | null;
     roleNames?: string[]; // Default: [ROLES.USER].
